@@ -1,0 +1,18 @@
+[package]
+name = "kcore"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kcore-derive = { path = "../kcore-derive" }
+serde = { version = "1.0.229", features = ["derive"] }
+uuid = { version = "1.24.0", features = ["v4"] }
+nalgebra = "0.35.0"
+parking_lot = "0.12.5"
+base64 = "0.23.1"
+fxhash = "0.2.1"
+byteorder = "1.5.0"
+bitflags = "2.6.0"
+bytemuck = { version = "1.25.2", features = ["derive"] }
+arrayvec = "0.7.2"
+futures = "0.3.34"

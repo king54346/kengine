@@ -1,0 +1,33 @@
+# ---- Rust / Cargo ----
+target/
+**/*.rs.bk
+*.pdb
+
+# 增量编译与 profiling 产物
+*.profraw
+perf.data
+perf.data.old
+flamegraph.svg
+
+# ---- JetBrains (RustRover / IntelliJ) ----
+.idea/
+*.iml
+*.iws
+
+# ---- 其他编辑器 ----
+.vscode/
+*.swp
+*~
+
+# ---- 操作系统 ----
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+# macOS
+.DS_Store
+
+# ---- 日志与本地临时文件 ----
+*.log
+/tmp/
+/local/

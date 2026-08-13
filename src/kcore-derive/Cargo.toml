@@ -1,0 +1,15 @@
+[package]
+name = "kcore-derive"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+darling = "0.24.0"
+syn = { version = "3.0.3", features = ["full", "extra-traits"] }
+quote = "1.0.47"
+proc-macro2 = "1.0"
+convert_case = "0.11.0"
+fxhash = "0.2.1"
