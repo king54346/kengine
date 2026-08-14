@@ -112,8 +112,8 @@ where
     }
 }
 
-// SAFETY: This is safe, because Payload is never directly exposed to the call site. It is always
-// accessed using a sort of read-write lock that forces borrowing rules at runtime.
+// SAFETY：安全，因为 Payload 从不直接暴露给调用方。
+// 所有访问都通过类似读写锁的机制进行，在运行时强制借用规则。
 unsafe impl<T, P> Sync for Payload<P>
 where
     T: Sized,
@@ -121,8 +121,8 @@ where
 {
 }
 
-// SAFETY: This is safe, because Payload is never directly exposed to the call site. It is always
-// accessed using a sort of read-write lock that forces borrowing rules at runtime.
+// SAFETY：安全，因为 Payload 从不直接暴露给调用方。
+// 所有访问都通过类似读写锁的机制进行，在运行时强制借用规则。
 unsafe impl<T, P> Send for Payload<P>
 where
     T: Sized,

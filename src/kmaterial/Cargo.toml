@@ -1,0 +1,12 @@
+[package]
+name = "kmaterial"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kasset = { path = "../kasset" }
+kcore = { path = "../kcore" }
+kmath = { path = "../kmath" }
+kshader = { path = "../kshader" }
+ktexture = { path = "../ktexture" }
+fxhash = "0.2.1"

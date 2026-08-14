@@ -1,5 +1,4 @@
-//! A wrapper for a variable that hold additional flags, allowing the variable to be
-//! inherited from a parent (a prefab, for example).
+//! 带附加标志的变量包装器，允许从父对象（如 prefab）继承值。
 
 use crate::{
     reflect::{prelude::*, ReflectHandle, ReflectHashSet},
@@ -14,26 +13,26 @@ use std::{
 };
 
 bitflags! {
-    /// A set of possible variable flags.
+    /// 变量可能拥有的标志集合。
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
     pub struct VariableFlags: u8 {
-        /// Nothing.
-        const NONE = 0;
-        /// A variable was externally modified.
-        const MODIFIED = 0b0000_0001;
-        /// A variable must be synced with respective variable from data model.
-        const NEED_SYNC = 0b0000_0010;
+    /// 无标志。
+    const NONE = 0;
+    /// 变量已被外部修改。
+    const MODIFIED = 0b0000_0001;
+    /// 变量需要与数据模型中对应的变量同步。
+    const NEED_SYNC = 0b0000_0010;
     }
 }
 
-/// An error that can occur while inheriting a property.
+/// 属性继承失败时的错误。
 #[derive(Debug)]
 pub enum InheritError {
-    /// Types of properties mismatch.
+    /// 属性类型不匹配。
     TypesMismatch {
-        /// Type of left property.
+        /// 左侧属性的类型。
         left_type: TypeId,
-        /// Type of right property.
+        /// 右侧属性的类型。
         right_type: TypeId,
     },
 }
@@ -54,9 +53,9 @@ impl Display for InheritError {
 
 impl std::error::Error for InheritError {}
 
-/// A wrapper for a variable that hold additional flag, that tells that initial value was changed
-/// at runtime. Such wrapper is used in a prefab-based workflow: a variable that was not touched
-/// by a user inherits its value from the parent prefab, while a modified one keeps its own value.
+/// 带附加标志的变量包装器，用于追踪初始值是否在运行时被修改。
+/// 常用于基于 prefab 的工作流：未被用户修改的变量从父 prefab 继承值，
+/// 而已修改的变量保持自己的值。
 #[derive(Debug)]
 pub struct InheritableVariable<T> {
     value: T,
@@ -80,8 +79,7 @@ impl<T> From<T> for InheritableVariable<T> {
 
 impl<T: PartialEq> PartialEq for InheritableVariable<T> {
     fn eq(&self, other: &Self) -> bool {
-        // `flags` intentionally excluded, they're a bookkeeping detail rather than
-        // part of the value's identity.
+        // `flags` 有意排除在外，它只是内部账本信息，不是值的实际内容。
         self.value.eq(&other.value)
     }
 }
@@ -98,8 +96,8 @@ impl<T: Default> Default for InheritableVariable<T> {
 }
 
 impl<T> InheritableVariable<T> {
-    /// Creates a new variable that is marked as modified, so it will keep its own value
-    /// instead of inheriting one from a parent.
+    /// 创建一个已标记为修改过的新变量，因此它会保留自己的值，
+    /// 而不是从父对象继承。
     pub fn new_modified(value: T) -> Self {
         Self {
             value,
@@ -107,8 +105,7 @@ impl<T> InheritableVariable<T> {
         }
     }
 
-    /// Creates a new variable that is **not** marked as modified, so it will inherit its
-    /// value from a parent.
+    /// 创建一个**未**标记为修改过的新变量，因此它会从父对象继承值。
     pub fn new_non_modified(value: T) -> Self {
         Self {
             value,
@@ -116,7 +113,7 @@ impl<T> InheritableVariable<T> {
         }
     }
 
-    /// Creates a new variable with the given flags.
+    /// 使用给定标志创建新变量。
     pub fn new_with_flags(value: T, flags: VariableFlags) -> Self {
         Self {
             value,
@@ -124,40 +121,39 @@ impl<T> InheritableVariable<T> {
         }
     }
 
-    /// Replaces the value and marks the variable as modified, returning the previous value.
+    /// 替换值并将变量标记为已修改，返回旧值。
     pub fn set_value_and_mark_modified(&mut self, value: T) -> T {
         self.mark_modified_and_need_sync();
         std::mem::replace(&mut self.value, value)
     }
 
-    /// Replaces the value without marking the variable as modified, returning the previous value.
+    /// 替换值但不将变量标记为已修改，返回旧值。
     pub fn set_value_silent(&mut self, value: T) -> T {
         std::mem::replace(&mut self.value, value)
     }
 
-    /// Returns `true` if the variable was modified and should not be overwritten during inheritance.
+    /// 如果变量已被修改并且在继承时不应被覆盖，则返回 `true`。
     pub fn is_modified(&self) -> bool {
         self.flags.get().contains(VariableFlags::MODIFIED)
     }
 
-    /// Returns a shared reference to the wrapped value.
+    /// 返回被包装值的共享引用。
     pub fn get_value_ref(&self) -> &T {
         &self.value
     }
 
-    /// Returns a mutable reference to the wrapped value and marks the variable as modified.
+    /// 返回被包装值的可变引用，并将变量标记为已修改。
     pub fn get_value_mut_and_mark_modified(&mut self) -> &mut T {
         self.mark_modified_and_need_sync();
         &mut self.value
     }
 
-    /// Returns a mutable reference to the wrapped value **without** marking the variable
-    /// as modified.
+    /// 返回被包装值的可变引用，**但不**将变量标记为已修改。
     pub fn get_value_mut_silent(&mut self) -> &mut T {
         &mut self.value
     }
 
-    /// Consumes the wrapper and returns the wrapped value.
+    /// 消耗包装器并返回其中的值。
     pub fn take(self) -> T {
         self.value
     }
@@ -287,8 +283,8 @@ impl<T: Reflect + Clone + PartialEq> Reflect for InheritableVariable<T> {
         Some(self)
     }
 
-    // The remaining `as_*` accessors delegate to the wrapped value so that an inheritable
-    // collection still behaves like a collection through reflection.
+    // 剩余的 `as_*` 访问器会委托给被包装值，
+    // 这样一个可继承的集合在反射中仍然表现得像集合。
 
     fn as_array(&self) -> Option<&dyn ReflectArray> {
         self.value.as_array()

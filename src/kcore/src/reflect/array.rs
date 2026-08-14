@@ -5,14 +5,14 @@ use crate::reflect::*;
 use kcore_derive::impl_reflect;
 use uuid::uuid;
 
-/// [`Reflect`] sub trait for working with slices.
+/// [`Reflect`] 的子 trait，用于操作切片类型。
 pub trait ReflectArray: Reflect {
     fn reflect_index(&self, index: usize) -> Option<&dyn Reflect>;
     fn reflect_index_mut(&mut self, index: usize) -> Option<&mut dyn Reflect>;
     fn reflect_len(&self) -> usize;
 }
 
-/// [`Reflect`] sub trait for working with `Vec`-like types
+/// [`Reflect`] 的子 trait，用于操作 `Vec` 类型。
 pub trait ReflectList: ReflectArray {
     fn reflect_push(&mut self, value: Box<dyn Reflect>) -> Result<(), Box<dyn Reflect>>;
     fn reflect_pop(&mut self) -> Option<Box<dyn Reflect>>;
@@ -47,7 +47,7 @@ impl<const N: usize, T: Reflect + Clone + PartialEq> ReflectArray for [T; N] {
 }
 
 impl<const N: usize, T: Reflect + Clone + PartialEq> Reflect for [T; N] {
-    // TODO: combine uuids.
+    // TODO: 合并 UUID。
     blank_reflect!("6d2a2f2d-d74e-4125-8840-b4910aa2e0cc");
 
     fn as_array(&self) -> Option<&dyn ReflectArray> {
@@ -78,7 +78,7 @@ impl<T: Reflect + Clone + PartialEq> ReflectArray for Vec<T> {
     }
 }
 
-/// REMARK: `Reflect` is implemented for `Vec<T>` where `T: Reflect` only.
+/// 注：`Reflect` 仅对 `T: Reflect` 的 `Vec<T>` 实现。
 impl<T: Reflect + Clone + PartialEq> ReflectList for Vec<T> {
     fn reflect_push(&mut self, value: Box<dyn Reflect>) -> Result<(), Box<dyn Reflect>> {
         self.push(*value.downcast::<T>()?);

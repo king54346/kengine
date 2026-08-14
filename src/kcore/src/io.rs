@@ -1,17 +1,17 @@
-//! File loading. Provides an async API so that file access can be made uniform
-//! across native targets and the web, where synchronous file access is impossible.
+//! 文件加载。提供异步 API，使文件访问在原生平台和 Web 平台上保持统一
+//!（Web 平台不支持同步文件访问）。
 
 use std::{
     fmt::{Display, Formatter},
     path::Path,
 };
 
-/// An error that may occur while loading a file.
+/// 加载文件时可能出现的错误。
 #[derive(Debug)]
 pub enum FileError {
-    /// An i/o error occurred.
+    /// 发生了 I/O 错误。
     Io(std::io::Error),
-    /// A platform-specific error occurred.
+    /// 发生了平台相关的错误。
     Custom(String),
 }
 
@@ -39,22 +39,22 @@ impl From<std::io::Error> for FileError {
     }
 }
 
-/// Reads the entire contents of the file at the given path.
+/// 读取给定路径文件的全部内容。
 pub async fn load_file<P: AsRef<Path>>(path: P) -> Result<Vec<u8>, FileError> {
     Ok(std::fs::read(path)?)
 }
 
-/// Returns `true` if the given path points at an existing entity.
+/// 如果给定路径指向已存在的条目，则返回 `true`。
 pub fn exists<P: AsRef<Path>>(path: P) -> bool {
     path.as_ref().exists()
 }
 
-/// Returns `true` if the given path points at a directory.
+/// 如果给定路径指向目录，则返回 `true`。
 pub fn is_dir<P: AsRef<Path>>(path: P) -> bool {
     path.as_ref().is_dir()
 }
 
-/// Returns `true` if the given path points at a regular file.
+/// 如果给定路径指向普通文件，则返回 `true`。
 pub fn is_file<P: AsRef<Path>>(path: P) -> bool {
     path.as_ref().is_file()
 }

@@ -1,24 +1,19 @@
-//! A generational arena - a contiguous growable array type which allows removing
-//! from the middle without shifting and therefore without invalidating other indices.
+//! 代际竞技场（Generational Arena）—— 一种连续可增长数组，支持从中间删除元素而无需移位，
+//! 因此不会使其他索引失效。
 //!
-//! Pool is a contiguous block of memory with fixed-size entries, each entry can be
-//! either vacant or occupied. When you put an object into the pool you get a handle to
-//! that object. You can use that handle later on to borrow a reference to an object.
-//! A handle can point to some object or be invalid, this may look similar to raw
-//! pointers, but there is two major differences:
+//! Pool 是一段连续内存，包含固定大小的条目，每个条目可以是空闲或已占用状态。
+//! 向 Pool 中放入对象时，会获得一个指向该对象的句柄。
+//! 之后可以用该句柄借用对象的引用。
+//! 句柄可以指向某个对象，也可以无效，这与原始指针类似，但有两点重要区别：
 //!
-//! 1) We can check if a handle is valid before accessing the object it might point to.
-//! 2) We can ensure the handle we're using is still valid for the object it points to
-//! to make sure it hasn't been replaced with a different object on the same position.
-//! Each handle stores a special field called generation which is shared across the entry
-//! and the handle, so the handle is valid if these fields are the same on both the entry
-//! and the handle. This protects from situations where you have a handle that has
-//! a valid index of a record, but the payload in this record has been replaced.
+//! 1) 可以在访问对象前检查句柄是否有效。
+//! 2) 可以确认句柄仍然指向最初创建时的那个对象，而不是该位置上后来替换的对象。
+//!    每个句柄存储一个称为 generation（代次）的字段，与条目共享；
+//!    当条目和句柄的 generation 相同时，句柄才是有效的。
+//!    这可以防止句柄索引有效但该位置的对象已被替换的情况。
 //!
-//! Contiguous memory block increases efficiency of memory operations - the CPU will
-//! load portions of data into its cache piece by piece, it will be free from any
-//! indirections that might cause cache invalidation. This is the so called cache
-//! friendliness.
+//! 连续内存块提高了内存操作效率——CPU 会逐块将数据加载到缓存中，
+//! 避免了可能导致缓存失效的间接引用，即所谓的缓存友好性。
 
 use crate::{reflect::prelude::*, visitor::prelude::*};
 use std::any::type_name;
@@ -42,10 +37,9 @@ pub use payload::*;
 
 const INVALID_GENERATION: u32 = 0;
 
-/// Pool allows to create as many objects as you want in contiguous memory
-/// block. It allows to create and delete objects much faster than if they'll
-/// be allocated on heap. Also since objects stored in contiguous memory block
-/// they can be effectively accessed because such memory layout is cache-friendly.
+/// Pool 允许在连续内存块中创建任意数量的对象。
+/// 相比在堆上逐个分配，创建和删除对象的速度更快。
+/// 同时由于对象存储在连续内存中，访问效率更高（缓存友好）。
 pub struct Pool<T, P = Option<T>>
 where
     T: Sized,
@@ -65,41 +59,39 @@ impl<T: Sized + Debug, P: PayloadContainer<Element = T> + 'static> Debug for Poo
     }
 }
 
-/// This trait unifies pool objects and their variants.
+/// 该 trait 统一了对象池对象及其变体类型。
 ///
-/// If T is the pool object type, [`ObjectOrVariant::convert_to_dest_type`] returns the pool object itself.
+/// 若 T 是对象池的对象类型，则 [`ObjectOrVariant::convert_to_dest_type`] 直接返回对象本身。
 ///
-/// If T is a variant of the pool object type, [`ObjectOrVariant::convert_to_dest_type`] returns the variant of the pool object.
+/// 若 T 是对象池对象类型的某个变体，则返回该变体。
 ///
-/// The [`Pool`] struct uses this trait to unify the logic of retrieving both pool objects and their variants.
+/// [`Pool`] 结构体通过该 trait 统一处理池对象与其变体的获取逻辑。
 pub trait ObjectOrVariant<T> {
     fn convert_to_dest_type(object: &T) -> Option<&Self>;
     fn convert_to_dest_type_mut(object: &mut T) -> Option<&mut Self>;
 }
 
-/// This trait is a helper trait for implementing [`ObjectOrVariant`] indirectly in child crates.
+/// 该 trait 是在子 crate 中间接实现 [`ObjectOrVariant`] 的辅助 trait。
 ///
-/// To implement [`ObjectOrVariant`] for type `U` in a child crate, you need to implement [`ObjectOrVariantHelper`] for [`PhantomData<U>`].
+/// 在子 crate 中为类型 `U` 实现 [`ObjectOrVariant`] 时，需要为 [`PhantomData<U>`] 实现 [`ObjectOrVariantHelper`]。
 ///
-/// This is necessary because Rust does not support `impl<T> ForeignTrait<LocalType> for T`
+/// 这是因为 Rust 不支持 `impl<T> ForeignTrait<LocalType> for T`，
+/// 但支持 `impl<T> ForeignTrait<LocalType> for ForeignType<T>`。
 ///
-/// But Rust does support `impl<T> ForeignTrait<LocalType> for ForeignType<T>`
+/// 详见 [此处](https://rust-lang.github.io/rfcs/2451-re-rebalancing-coherence.html#concrete-orphan-rules)。
 ///
-/// Details can be found in [here](https://rust-lang.github.io/rfcs/2451-re-rebalancing-coherence.html#concrete-orphan-rules).
+/// 因此不能直接用 `impl<U: TraitBound> ObjectOrVariant<LocalType> for U`，
+/// 但可以用 `impl<U: TraitBound> ObjectOrVariantHelper<LocalType, U> for PhantomData<U>`。
 ///
-/// Therefore, we cannot implement [`ObjectOrVariant`] directly using `impl<U: TraitBound> ObjectOrVariant<LocalType> for U`
-///
-/// but we can do `impl<U: TraitBound> ObjectOrVariantHelper<LocalType, U> for PhantomData<U>`
-///
-/// There is an indirection to get rid of [`PhantomData<U>`] because we want to have a clean API for pool methods
-/// where you can pass in `U` directly instead of [`PhantomData<U>`].
+/// 通过间接跳转去掉 [`PhantomData<U>`]，使对象池方法的 API 更简洁：
+/// 直接传入 `U` 而非 [`PhantomData<U>`]。
 pub trait ObjectOrVariantHelper<T, U> {
     fn convert_to_dest_type_helper(object: &T) -> Option<&U>;
     fn convert_to_dest_type_helper_mut(object: &mut T) -> Option<&mut U>;
 }
 
-// This is the default implementation for pool object types.
-// For pool object variant types, they need to be implemented case by case, since Rust does not support multiple blanket implementations.
+// 这是对象池类型的默认实现。
+// 对于对象池对象的变体类型，需要逐一实现，因为 Rust 不支持多个覆盖实现（blanket impl）。
 impl<T> ObjectOrVariantHelper<T, T> for PhantomData<T> {
     fn convert_to_dest_type_helper(object: &T) -> Option<&T> {
         Some(object)
@@ -109,7 +101,7 @@ impl<T> ObjectOrVariantHelper<T, T> for PhantomData<T> {
     }
 }
 
-// This blanket implementation wraps types that implement ObjectOrVariantHelper with the ObjectOrVariant trait.
+// 这个覆盖实现将实现了 ObjectOrVariantHelper 的类型自动包装为 ObjectOrVariant trait。
 impl<T, U> ObjectOrVariant<T> for U
 where
     PhantomData<U>: ObjectOrVariantHelper<T, U>,
@@ -226,8 +218,7 @@ where
     }
 }
 
-// Zero - non-borrowed.
-// Negative values - amount of mutable borrows, positive - amount of immutable borrows.
+// 零：未借用。负值：可变借用数量；正值：不可变借用数量。
 #[derive(Default, Debug)]
 struct RefCounter(pub UnsafeCell<isize>);
 
@@ -255,11 +246,10 @@ where
     P: PayloadContainer<Element = T>,
 {
     ref_counter: RefCounter,
-    // Generation number, used to keep info about lifetime. The handle is valid
-    // only if record it points to is of the same generation as the pool record.
-    // Notes: Zero is unknown generation used for None handles.
+    // 代次编号，用于跟踪生命周期。仅当句柄的代次与记录的代次一致时，句柄才有效。
+    // 注意：零是"无效代次"，用于 None 句柄。
     generation: u32,
-    // Actual payload.
+    // 实际载荷。
     payload: Payload<P>,
 }
 
@@ -336,6 +326,8 @@ where
     }
 }
 
+/// 取票（Ticket）用于临时取出对象，并承诺稍后归还。
+/// 若 Ticket 被 drop 而未归还，则会 panic。
 #[derive(Debug)]
 pub struct Ticket<T> {
     index: u32,
@@ -345,8 +337,8 @@ pub struct Ticket<T> {
 impl<T> Drop for Ticket<T> {
     fn drop(&mut self) {
         panic!(
-            "An object at index {} must be returned to a pool it was taken from! \
-            Call Pool::forget_ticket if you don't need the object anymore.",
+            "索引为 {} 的对象必须归还到它所属的对象池！\
+            若不再需要该对象，请调用 Pool::forget_ticket。",
             self.index
         )
     }
@@ -515,18 +507,17 @@ where
         self.spawn_with(|_| payload)
     }
 
-    /// Tries to put an object in the pool at given position. Returns `Err(payload)` if a corresponding
-    /// entry is occupied.
+    /// 尝试在指定位置向对象池放入对象。若对应条目已被占用，则返回 `Err(payload)`。
     ///
-    /// # Performance
+    /// # 性能
     ///
-    /// The method has O(n) complexity in worst case, where `n` - amount of free records in the pool.
-    /// In typical uses cases `n` is very low. It should be noted that if a pool is filled entirely
-    /// and you trying to put an object at the end of pool, the method will have O(1) complexity.
+    /// 最坏情况下此方法的复杂度为 `O(n)`，其中 `n` 是对象池中的空闲记录数量。
+    /// 在典型用例中，`n` 往往很小。需要注意的是，如果对象池已满且你要把对象放到池尾，
+    /// 那么此方法的复杂度将是 `O(1)`。
     ///
-    /// # Panics
+    /// # Panic
     ///
-    /// Panics if the index is occupied or reserved (e.g. by [`take_reserve`]).
+    /// 如果索引已被占用或被保留（例如被 [`take_reserve`] 占用），则 panic。
     ///
     /// [`take_reserve`]: Pool::take_reserve
     #[inline]
@@ -534,18 +525,17 @@ where
         self.spawn_at_internal(index, INVALID_GENERATION, payload)
     }
 
-    /// Tries to put an object in the pool at given handle. Returns `Err(payload)` if a corresponding
-    /// entry is occupied.
+    /// 尝试在指定句柄的位置向对象池放入对象。若对应条目已被占用，则返回 `Err(payload)`。
     ///
-    /// # Performance
+    /// # 性能
     ///
-    /// The method has O(n) complexity in worst case, where `n` - amount of free records in the pool.
-    /// In typical uses cases `n` is very low. It should be noted that if a pool is filled entirely
-    /// and you trying to put an object at the end of pool, the method will have O(1) complexity.
+    /// 最坏情况下此方法的复杂度为 `O(n)`，其中 `n` 是对象池中的空闲记录数量。
+    /// 在典型用例中，`n` 往往很小。需要注意的是，如果对象池已满且你要把对象放到池尾，
+    /// 那么此方法的复杂度将是 `O(1)`。
     ///
-    /// # Panics
+    /// # Panic
     ///
-    /// Panics if the index is occupied or reserved (e.g. by [`take_reserve`]).
+    /// 如果索引已被占用或被保留（例如被 [`take_reserve`] 占用），则 panic。
     ///
     /// [`take_reserve`]: Pool::take_reserve
     #[inline]
@@ -585,7 +575,7 @@ where
                 }
             },
             None => {
-                // Spawn missing records to fill gaps.
+                // 生成缺失的记录以填补空洞。
                 for i in self.records_len()..index {
                     self.records.push(PoolRecord {
                         ref_counter: Default::default(),
@@ -614,8 +604,8 @@ where
 
     #[inline]
     #[must_use]
-    /// Construct a value with the handle it would be given.
-    /// Note: Handle is _not_ valid until function has finished executing.
+    /// 以给定句柄为 key 来构造对象。
+    /// 注意：函数执行完毕前，该句柄**尚不**有效。
     pub fn spawn_with<F: FnOnce(Handle<T>) -> T>(&mut self, callback: F) -> Handle<T> {
         if let Some(free_index) = self.free_stack.pop() {
             let record = self
@@ -624,7 +614,7 @@ where
 
             if record.payload.is_some() {
                 panic!(
-                    "Attempt to spawn an object at pool record with payload! Record index is {free_index}"
+                    "尝试在已有载荷的池记录位置 spawn 对象！记录索引为 {free_index}"
                 );
             }
 
@@ -641,7 +631,7 @@ where
             record.payload.replace(payload);
             handle
         } else {
-            // No free records, create new one
+            // 无空闲记录，创建新记录
             let generation = 1;
 
             let handle = Handle {
@@ -665,8 +655,8 @@ where
     }
 
     #[inline]
-    /// Asynchronously construct a value with the handle it would be given.
-    /// Note: Handle is _not_ valid until function has finished executing.
+    /// 异步构造对象（以给定句柄为 key）。
+    /// 注意：函数执行完毕前，该句柄**尚不**有效。
     pub async fn spawn_with_async<F, Fut>(&mut self, callback: F) -> Handle<T>
     where
         F: FnOnce(Handle<T>) -> Fut,
@@ -679,7 +669,7 @@ where
 
             if record.payload.is_some() {
                 panic!(
-                    "Attempt to spawn an object at pool record with payload! Record index is {free_index}"
+                    "尝试在已有载荷的池记录位置 spawn 对象（async）！记录索引为 {free_index}"
                 );
             }
 
@@ -696,7 +686,7 @@ where
             record.payload.replace(payload);
             handle
         } else {
-            // No free records, create new one
+            // 没有空闲记录，创建新的记录。
             let generation = 1;
 
             let handle = Handle {
@@ -719,9 +709,8 @@ where
         }
     }
 
-    /// Generates a set of handles that could be used to spawn a set of objects. This method does not
-    /// modify the pool and the generated handles could be used together with [`Self::spawn_at_handle`]
-    /// method.
+    /// 预生成一组可用于后续 spawn 的句柄（不修改对象池）。
+    /// 生成的句柄可配合 [`Self::spawn_at_handle`] 使用。
     #[inline]
     pub fn generate_free_handles(&self, amount: usize) -> Vec<Handle<T>> {
         let mut free_handles = Vec::with_capacity(amount);
@@ -742,9 +731,8 @@ where
         free_handles
     }
 
-    /// Returns a handle that may be used to spawn an object in the pool. This handle is guaranteed
-    /// to point at the vacant place in the pool. [`Self::spawn_at_handle`] call with this handle
-    /// will always succeed if called right after this method.
+    /// 返回下一个可用于 spawn 的句柄。该句柄保证指向对象池中的空槽位。
+    /// 在调用此方法后立刻调用 [`Self::spawn_at_handle`] 必然成功。
     #[inline]
     pub fn next_free_handle(&self) -> Handle<T> {
         if let Some(index) = self.free_stack.last().cloned() {
@@ -763,26 +751,22 @@ where
         }
     }
 
-    /// Borrows shared reference to an object by its handle.
+    /// 通过句柄借用对象的共享引用。
     ///
     /// # Panics
     ///
-    /// Panics if handle is out of bounds or generation of handle does not match with
-    /// generation of pool record at handle index (in other words it means that object
-    /// at handle's index is different than the object was there before).
+    /// 若句柄越界，或句柄的代次与池记录的代次不一致（即该位置的对象已被替换），则 panic。
     #[inline]
     #[must_use]
     pub fn borrow(&self, handle: Handle<T>) -> &T {
         self.try_borrow(handle).unwrap()
     }
 
-    /// Borrows mutable reference to an object by its handle.
+    /// 通过句柄借用对象的可变引用。
     ///
     /// # Panics
     ///
-    /// Panics if handle is out of bounds or generation of handle does not match with
-    /// generation of pool record at handle index (in other words it means that object
-    /// at handle's index is different than the object was there before).
+    /// 若句柄越界，或句柄的代次与池记录的代次不一致，则 panic。
     ///
     /// # Example
     ///
@@ -799,11 +783,9 @@ where
         self.try_borrow_mut(handle).unwrap()
     }
 
-    /// Borrows shared reference to an object by its handle.
+    /// 通过句柄借用对象的共享引用。
     ///
-    /// Returns None if handle is out of bounds or generation of handle does not match with
-    /// generation of pool record at handle index (in other words it means that object
-    /// at handle's index is different than the object was there before).
+    /// 若句柄越界或代次不匹配，则返回 Err。
     #[inline]
     pub fn try_borrow(&self, handle: Handle<T>) -> Result<&T, PoolError> {
         self.records_get(handle.index).and_then(|r| {
@@ -815,11 +797,9 @@ where
         })
     }
 
-    /// Borrows mutable reference to an object by its handle.
+    /// 通过句柄借用对象的可变引用。
     ///
-    /// Returns None if handle is out of bounds or generation of handle does not match with
-    /// generation of pool record at handle index (in other words it means that object
-    /// at handle's index is different than the object was there before).
+    /// 若句柄越界或代次不匹配，则返回 Err。
     #[inline]
     pub fn try_borrow_mut(&mut self, handle: Handle<T>) -> Result<&mut T, PoolError> {
         self.records_get_mut(handle.index).and_then(|r| {
@@ -831,13 +811,11 @@ where
         })
     }
 
-    /// Borrows mutable references of objects at the same time. This method will succeed only
-    /// if handles are unique (not equal). Borrowing multiple mutable references at the same
-    /// time is useful in case if you need to mutate some objects at the same time.
+    /// 同时借用两个对象的可变引用。仅当两个句柄不相同时才会成功。
     ///
     /// # Panics
     ///
-    /// See [`borrow_mut`](Self::borrow_mut).
+    /// 参见 [`borrow_mut`](Self::borrow_mut)。
     ///
     /// # Example
     ///
@@ -851,9 +829,9 @@ where
     /// *b = 22;
     /// ```
     #[inline]
-    #[must_use = "Handle set must not be ignored"]
+    #[must_use = "句柄集合不得被忽略"]
     pub fn borrow_two_mut(&mut self, handles: (Handle<T>, Handle<T>)) -> (&mut T, &mut T) {
-        // Prevent giving two mutable references to same record.
+        // 防止对同一记录给出两个可变引用。
         assert_ne!(handles.0.index, handles.1.index);
         unsafe {
             let this = self as *mut Self;
@@ -861,13 +839,11 @@ where
         }
     }
 
-    /// Borrows mutable references of objects at the same time. This method will succeed only
-    /// if handles are unique (not equal). Borrowing multiple mutable references at the same
-    /// time is useful in case if you need to mutate some objects at the same time.
+    /// 同时借用三个对象的可变引用。仅当三个句柄各不相同时才会成功。
     ///
     /// # Panics
     ///
-    /// See [`borrow_mut`](Self::borrow_mut).
+    /// 参见 [`borrow_mut`](Self::borrow_mut)。
     ///
     /// # Example
     ///
@@ -883,12 +859,12 @@ where
     /// *c = 33;
     /// ```
     #[inline]
-    #[must_use = "Handle set must not be ignored"]
+    #[must_use = "句柄集合不得被忽略"]
     pub fn borrow_three_mut(
         &mut self,
         handles: (Handle<T>, Handle<T>, Handle<T>),
     ) -> (&mut T, &mut T, &mut T) {
-        // Prevent giving mutable references to same record.
+        // 防止对同一记录给出可变引用。
         assert_ne!(handles.0.index, handles.1.index);
         assert_ne!(handles.0.index, handles.2.index);
         assert_ne!(handles.1.index, handles.2.index);
@@ -902,13 +878,11 @@ where
         }
     }
 
-    /// Borrows mutable references of objects at the same time. This method will succeed only
-    /// if handles are unique (not equal). Borrowing multiple mutable references at the same
-    /// time is useful in case if you need to mutate some objects at the same time.
+    /// 同时借用四个对象的可变引用。仅当四个句柄各不相同时才会成功。
     ///
     /// # Panics
     ///
-    /// See [`borrow_mut`](Self::borrow_mut).
+    /// 参见 [`borrow_mut`](Self::borrow_mut)。
     ///
     /// # Example
     ///
@@ -926,13 +900,12 @@ where
     /// *d = 44;
     /// ```
     #[inline]
-    #[must_use = "Handle set must not be ignored"]
+    #[must_use = "句柄集合不得被忽略"]
     pub fn borrow_four_mut(
         &mut self,
         handles: (Handle<T>, Handle<T>, Handle<T>, Handle<T>),
     ) -> (&mut T, &mut T, &mut T, &mut T) {
-        // Prevent giving mutable references to same record.
-        // This is kinda clunky since const generics are not stabilized yet.
+        // 防止对同一记录给出可变引用（const generics 尚未稳定，这里写法略显笨拙）。
         assert_ne!(handles.0.index, handles.1.index);
         assert_ne!(handles.0.index, handles.2.index);
         assert_ne!(handles.0.index, handles.3.index);
@@ -950,7 +923,7 @@ where
         }
     }
 
-    /// Tries to borrow two objects when a handle to the second object stored in the first object.
+    /// 尝试在同时持有第一个对象的可变引用时，通过存储在第一个对象中的句柄借用第二个对象。
     #[inline]
     pub fn try_borrow_dependant_mut<F>(
         &mut self,
@@ -974,19 +947,18 @@ where
         (first, Err(PoolError::UnknownDependentObject(handle.into())))
     }
 
-    /// Moves object out of the pool using the given handle. All handles to the object will become invalid.
+    /// 使用句柄将对象移出对象池。所有指向该对象的句柄将全部失效。
     ///
     /// # Panics
     ///
-    /// Panics if the given handle is invalid.
+    /// 若给定句柄无效，则 panic。
     #[inline]
     pub fn free(&mut self, handle: Handle<T>) -> T {
         self.try_free(handle).unwrap()
     }
 
-    /// Tries to move object out of the pool using the given handle. Returns None if given handle
-    /// is invalid. After object is moved out if the pool, all handles to the object will become
-    /// invalid.
+    /// 尝试使用句柄将对象移出对象池。若给定句柄无效，则返回 Err。
+    /// 对象移出后，所有指向该对象的句柄将全部失效。
     #[inline]
     pub fn try_free(&mut self, handle: Handle<T>) -> Result<T, PoolError> {
         let index = usize::try_from(handle.index).expect("index overflowed usize");
@@ -1007,24 +979,24 @@ where
             })
     }
 
-    /// Moves an object out of the pool using the given handle with a promise that the object will be returned back.
-    /// Returns pair (ticket, value). The ticket must be used to put the value back!
+    /// 使用句柄临时取出对象，并承诺将其归还。返回 (ticket, value) 对。
+    /// **Ticket 必须用于归还对象！**
     ///
-    /// # Motivation
+    /// # 动机
     ///
-    /// This method is useful when you need to take temporary ownership of an object, do something
-    /// with it and then put it back while preserving all handles to it and being able to put new objects into
-    /// the pool without overriding the payload at its handle.
+    /// 当你需要临时持有对象的所有权、对其进行操作后再放回对象池，
+    /// 同时保持所有句柄有效，并允许在此期间向池中添加新对象而不覆盖该位置，
+    /// 此方法非常有用。
     ///
-    /// # Notes
+    /// # 注意
     ///
-    /// All handles to the object will be temporarily invalid until the object is returned to the pool! The pool record will
-    /// be reserved for a further [`put_back`] call, which means if you lose the ticket you will have an empty
-    /// "unusable" pool record forever.
+    /// 对象取出期间，所有指向该对象的句柄将**暂时无效**！
+    /// 该池记录会被预留给后续的 [`put_back`] 调用。
+    /// 若丢失 ticket，将导致一个永远无法使用的空槽位。
     ///
     /// # Panics
     ///
-    /// Panics if the given handle is invalid.
+    /// 若给定句柄无效，则 panic。
     ///
     /// [`put_back`]: Pool::put_back
     #[inline]
@@ -1032,7 +1004,7 @@ where
         self.try_take_reserve(handle).unwrap()
     }
 
-    /// Does the same as [`take_reserve`] but returns an option, instead of panicking.
+    /// 与 [`take_reserve`] 相同，但返回 Result 而非 panic。
     ///
     /// [`take_reserve`]: Pool::take_reserve
     #[inline]
@@ -1053,8 +1025,7 @@ where
         }
     }
 
-    /// Returns the value back into the pool using the given ticket. See [`take_reserve`] for more
-    /// information.
+    /// 使用 ticket 将对象归还对象池。详见 [`take_reserve`]。
     ///
     /// [`take_reserve`]: Pool::take_reserve
     #[inline]
@@ -1069,29 +1040,28 @@ where
         handle
     }
 
-    /// Forgets that value at ticket was reserved and makes it usable again.
-    /// Useful when you don't need to put value back by ticket, but just make
-    /// pool record usable again.
+    /// 放弃 ticket，使对应槽位重新可用。
+    /// 当你不再需要归还对象，只想让槽位重新可用时使用此方法。
     #[inline]
     pub fn forget_ticket(&mut self, ticket: Ticket<T>) {
         self.free_stack.push(ticket.index);
         std::mem::forget(ticket);
     }
 
-    /// Returns total capacity of pool. Capacity has nothing about real amount of objects in pool!
+    /// 返回总容量（容量不等于实际对象数量！）
     #[inline]
     #[must_use]
     pub fn get_capacity(&self) -> u32 {
         u32::try_from(self.records.len()).expect("records.len() overflowed u32")
     }
 
-    /// Destroys all objects in pool. All handles to objects will become invalid.
+    /// 销毁对象池中所有对象，所有句柄将全部失效。
     ///
-    /// # Remarks
+    /// # 注意
     ///
-    /// Use this method cautiously if objects in pool have cross "references" (handles)
-    /// to each other. This method will make all produced handles invalid and any further
-    /// calls for [`borrow`](Self::borrow) or [`borrow_mut`](Self::borrow_mut) will raise panic.
+    /// 若对象池中的对象之间存在相互引用（句柄），请谨慎使用此方法。
+    /// 调用后所有句柄将失效，后续 [`borrow`](Self::borrow) 或 [`borrow_mut`](Self::borrow_mut)
+    /// 的调用将 panic。
     #[inline]
     pub fn clear(&mut self) {
         self.records.clear();
@@ -1128,13 +1098,13 @@ where
         Handle::NONE
     }
 
-    /// Returns the exact number of "alive" objects in the pool.
+    /// 返回对象池中存活对象的精确数量。
     ///
-    /// Records that have been reserved (e.g. by [`take_reserve`]) are *not* counted.
+    /// 通过 [`take_reserve`] 预留的记录**不**计入其中。
     ///
-    /// It iterates through the entire pool to count the live objects so the complexity is `O(n)`.
+    /// 此方法需遍历整个对象池，时间复杂度为 `O(n)`。
     ///
-    /// See also [`total_count`].
+    /// 另见 [`total_count`]。
     ///
     /// # Example
     ///
@@ -1155,13 +1125,11 @@ where
         u32::try_from(cnt).expect("alive_count overflowed u32")
     }
 
-    /// Returns the number of allocated objects in the pool.
+    /// 返回对象池中已分配对象的数量（含 [`take_reserve`] 预留的记录）。
     ///
-    /// It also counts records that have been reserved (e.g. by [`take_reserve`]).
+    /// 此方法时间复杂度为 `O(1)`。
     ///
-    /// This method is `O(1)`.
-    ///
-    /// See also [`alive_count`].
+    /// 另见 [`alive_count`]。
     ///
     /// [`take_reserve`]: Pool::take_reserve
     /// [`alive_count`]: Pool::alive_count
@@ -1180,24 +1148,24 @@ where
 
                 record.payload.replace(payload)
             } else {
-                panic!("Attempt to replace object in pool using dangling handle! Handle is {:?}, but pool record has {} generation", handle, record.generation);
+                panic!("尝试使用悬空句柄替换对象池中的对象！句柄为 {:?}，但池记录的代次为 {}", handle, record.generation);
             }
         } else {
             None
         }
     }
 
-    /// Returns a reference to the first element in the pool (if any).
+    /// 返回对象池中第一个元素的共享引用（若存在）。
     pub fn first_ref(&self) -> Option<&T> {
         self.iter().next()
     }
 
-    /// Returns a reference to the first element in the pool (if any).
+    /// 返回对象池中第一个元素的可变引用（若存在）。
     pub fn first_mut(&mut self) -> Option<&mut T> {
         self.iter_mut().next()
     }
 
-    /// Checks if given handle "points" to some object.
+    /// 检查给定句柄是否指向某个对象。
     ///
     /// # Example
     ///
@@ -1216,7 +1184,7 @@ where
         }
     }
 
-    /// Creates new pool iterator that iterates over filled records in pool.
+    /// 创建迭代器，遍历对象池中所有已占用的记录。
     ///
     /// # Example
     ///
@@ -1241,9 +1209,8 @@ where
         }
     }
 
-    /// Creates new pair iterator that iterates over filled records using pair (handle, payload)
-    /// Can be useful when there is a need to iterate over pool records and know a handle of
-    /// that record.
+    /// 创建键值对迭代器，以 (handle, payload) 对的形式遍历已占用记录。
+    /// 需要在遍历时获知记录句柄时非常有用。
     #[inline]
     pub fn pair_iter(&self) -> PoolPairIterator<'_, T, P> {
         PoolPairIterator {
@@ -1252,8 +1219,7 @@ where
         }
     }
 
-    /// Creates new pool iterator that iterates over filled records in pool allowing
-    /// to modify record payload.
+    /// 创建可变迭代器，遍历对象池中所有已占用的记录，允许修改载荷。
     ///
     /// # Example
     ///
@@ -1278,9 +1244,8 @@ where
         }
     }
 
-    /// Creates new pair iterator that iterates over filled records using pair (handle, payload)
-    /// Can be useful when there is a need to iterate over pool records and know a handle of
-    /// that record.
+    /// 创建可变键值对迭代器，以 (handle, payload) 对的形式遍历已占用记录。
+    /// 需要在遍历时获知记录句柄时非常有用。
     #[inline]
     pub fn pair_iter_mut(&mut self) -> PoolPairIteratorMut<'_, T, P> {
         unsafe {
@@ -1293,8 +1258,7 @@ where
         }
     }
 
-    /// Retains pool records selected by `pred`. Useful when you need to remove all pool records
-    /// by some criteria.
+    /// 保留满足 `pred` 条件的记录，删除其余记录。适用于按条件批量清除对象。
     #[inline]
     pub fn retain<F>(&mut self, mut pred: F)
     where
@@ -1318,14 +1282,14 @@ where
         }
     }
 
-    /// Begins multi-borrow that allows you to borrow as many (`N`) **unique** references to the pool
-    /// elements as you need. See [`MultiBorrowContext::try_get`] for more info.
+    /// 开始多借用，允许同时借用对象池中任意数量的**唯一**引用。
+    /// 详见 [`MultiBorrowContext::try_get`]。
     #[inline]
     pub fn begin_multi_borrow(&mut self) -> MultiBorrowContext<'_, T, P> {
         MultiBorrowContext::new(self)
     }
 
-    /// Removes all elements from the pool.
+    /// 移除对象池中所有元素。
     #[inline]
     pub fn drain(&mut self) -> impl Iterator<Item = T> + '_ {
         self.free_stack.clear();
@@ -1363,7 +1327,7 @@ where
     T: Reflect,
     P: PayloadContainer<Element = T> + 'static,
 {
-    /// Tries to mutably borrow an object and fetch its component of specified type.
+    /// 尝试借用对象并获取其指定类型的分量（共享引用）。
     #[inline]
     pub fn try_get_or_field_ref<C>(&self, handle: Handle<T>) -> Result<&C, PoolError>
     where
@@ -1376,7 +1340,7 @@ where
         })
     }
 
-    /// Tries to mutably borrow an object and fetch its component of specified type.
+    /// 尝试借用对象并获取其指定类型的分量（可变引用）。
     #[inline]
     pub fn try_get_or_field_mut<C>(&mut self, handle: Handle<T>) -> Result<&mut C, PoolError>
     where
@@ -1418,7 +1382,7 @@ where
     type Output = U;
     #[inline]
     fn index(&self, index: Handle<U>) -> &Self::Output {
-        self.try_get(index).expect("The handle must be valid!")
+        self.try_get(index).expect("句柄必须有效！")
     }
 }
 
@@ -1430,7 +1394,7 @@ where
 {
     #[inline]
     fn index_mut(&mut self, index: Handle<U>) -> &mut Self::Output {
-        self.try_get_mut(index).expect("The handle must be valid!")
+        self.try_get_mut(index).expect("句柄必须有效！")
     }
 }
 

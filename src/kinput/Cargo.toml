@@ -1,0 +1,10 @@
+[package]
+name = "kinput"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kmath = { path = "../kmath" }
+fxhash = "0.2.1"
+# 版本必须与主 crate 一致，否则事件类型不通用。
+winit = "0.30.13"

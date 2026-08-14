@@ -1,5 +1,5 @@
-//! Immutable string + immutable string storage. See docs of [`ImmutableString`] and
-//! [`ImmutableStringStorage`] for more info.
+//! 不可变字符串及不可变字符串存储。详见 [`ImmutableString`] 和
+//! [`ImmutableStringStorage`] 的文档。
 
 #![warn(missing_docs)]
 
@@ -20,17 +20,16 @@ struct State {
     hash: u64,
 }
 
-/// Immutable string is a string with constant content. Immutability gives some nice properties:
+/// 不可变字符串是内容固定不变的字符串。不可变性带来以下优良特性：
 ///
-/// - Address of the string could be used as a hash, which improves hashing performance dramatically
-/// and basically making it constant in terms of complexity (O(1))
-/// - Equality comparison becomes constant in terms of complexity.
-/// - Uniqueness guarantees - means that calling multiple times will allocate memory only once
-/// `ImmutableString::new("foo")` and in consecutive calls existing string will be used.
+/// - 字符串地址可作为哈希值，哈希性能大幅提升，复杂度接近 O(1)
+/// - 相等性比较的复杂度也变为常数
+/// - 唯一性保证——多次调用 `ImmutableString::new("foo")` 只会分配一次内存，
+///   后续调用复用已存在的字符串
 ///
-/// # Use cases
+/// # 使用场景
 ///
-/// Most common use case for immutable strings is hash map keys in performance-critical places.
+/// 最常见的使用场景是性能敏感的哈希映射键。
 #[derive(Clone)]
 pub struct ImmutableString(Arc<State>);
 
@@ -124,32 +123,31 @@ impl AsRef<str> for ImmutableString {
 }
 
 impl ImmutableString {
-    /// Creates new immutable string from given string slice.
+    /// 根据给定的字符串切片创建新的不可变字符串。
     ///
-    /// # Performance
+    /// # 性能
     ///
-    /// This method has amortized O(1) complexity, in worst case (when there is no such string
-    /// in backing storage) it allocates memory which could lead to complexity defined by current
-    /// memory allocator.
+    /// 此方法的均摊复杂度为 `O(1)`。在最坏情况下（后台存储中不存在该字符串时），
+    /// 它需要分配内存，复杂度可能由当前内存分配器决定。
     #[inline]
     pub fn new<S: AsRef<str>>(string: S) -> ImmutableString {
         SSTORAGE.safe_lock().insert(string)
     }
 
-    /// Returns unique identifier of the string. Keep in mind that uniqueness is guaranteed only
-    /// for a single session, uniqueness is not preserved between application runs.
+    /// 返回字符串的唯一标识符。请注意：该唯一性仅在单次运行期间成立，
+    /// 在应用多次运行之间不保证一致。
     #[inline]
     pub fn cached_hash(&self) -> u64 {
         self.0.hash
     }
 
-    /// Clones content of inner immutable string to a mutable string.
+    /// 将内部不可变字符串的内容克隆为可变字符串。
     #[inline]
     pub fn to_mutable(&self) -> String {
         self.0.string.clone()
     }
 
-    /// Get a reference to the inner str.
+    /// 获取内部 `str` 的引用。
     pub fn as_str(&self) -> &str {
         self.deref()
     }
@@ -198,8 +196,8 @@ impl PartialEq for ImmutableString {
 
 impl Eq for ImmutableString {}
 
-/// Immutable string storage is a backing storage for every immutable string in the application,
-/// storage is a singleton. In normal circumstances you should never use it directly.
+/// 不可变字符串存储是应用中所有不可变字符串的后端存储，且该存储是单例。
+/// 正常情况下你不应直接使用它。
 #[derive(Default)]
 pub struct ImmutableStringStorage {
     vec: FxHashMap<u64, Arc<State>>,
@@ -223,7 +221,7 @@ impl ImmutableStringStorage {
             ImmutableString(immutable)
         }
     }
-    /// Insert without copying the given String.
+    /// 插入给定的 `String`，且不额外复制其内容。
     #[inline]
     fn insert_owned(&mut self, string: String) -> ImmutableString {
         let mut hasher = FxHasher::default();
@@ -241,7 +239,7 @@ impl ImmutableStringStorage {
 }
 
 impl ImmutableStringStorage {
-    /// Returns total amount of immutable strings in the storage.
+    /// 返回存储中不可变字符串的总数量。
     pub fn entry_count() -> usize {
         SSTORAGE.safe_lock().vec.len()
     }

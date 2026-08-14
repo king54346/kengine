@@ -1,0 +1,12 @@
+[package]
+name = "kshader"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kasset = { path = "../kasset" }
+kcore = { path = "../kcore" }
+klog = { path = "../klog" }
+# wgsl-in 用于在加载期解析并校验 WGSL，把着色器错误从 GPU 编译期提前到资源加载期。
+# 版本与 wgpu 30 内部的 naga 保持一致，避免重复编译。
+naga = { version = "30", features = ["wgsl-in"] }

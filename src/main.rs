@@ -1,408 +1,257 @@
-mod task;
+//! 用 kengine 写的示例游戏。
+//!
+//! 引擎负责窗口、事件循环、输入采集和渲染；这个文件里只有游戏逻辑。
+//!
+//! 操作：WASD 移动方块，Q/E 升降，空格暂停自转，R 重置，Esc 退出。
 
-use std::sync::Arc;
-use std::time::Instant;
+use kengine::prelude::*;
+use kcore::uuid::{Uuid, uuid};
+use std::{path::PathBuf, sync::Arc};
 
-use bytemuck::{Pod, Zeroable};
-use glam::camera::rh::{proj::directx::perspective, view::look_at_mat4};
-use glam::{Mat4, Vec3};
-use wgpu::util::DeviceExt;
-use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{Window, WindowId};
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
+/// 一个自定义资源类型：从文本文件读出的关卡配置。
+#[derive(Debug)]
+struct LevelConfig {
+    spin_speed: f32,
+    move_speed: f32,
 }
 
-impl Vertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 2] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
-
-    fn layout() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &Self::ATTRIBS,
-        }
+impl ResourceData for LevelConfig {
+    fn type_uuid(&self) -> Uuid {
+        uuid!("6b1e4d90-2a73-4c58-8f21-9d3c7e5a0b64")
     }
 }
 
-#[rustfmt::skip]
-const VERTICES: &[Vertex] = &[
-    // +X face (red)
-    Vertex { position: [ 0.5, -0.5, -0.5], color: [1.0, 0.0, 0.0] },
-    Vertex { position: [ 0.5,  0.5, -0.5], color: [1.0, 0.0, 0.0] },
-    Vertex { position: [ 0.5,  0.5,  0.5], color: [1.0, 0.0, 0.0] },
-    Vertex { position: [ 0.5, -0.5,  0.5], color: [1.0, 0.0, 0.0] },
-    // -X face (cyan)
-    Vertex { position: [-0.5, -0.5,  0.5], color: [0.0, 1.0, 1.0] },
-    Vertex { position: [-0.5,  0.5,  0.5], color: [0.0, 1.0, 1.0] },
-    Vertex { position: [-0.5,  0.5, -0.5], color: [0.0, 1.0, 1.0] },
-    Vertex { position: [-0.5, -0.5, -0.5], color: [0.0, 1.0, 1.0] },
-    // +Y face (green)
-    Vertex { position: [-0.5,  0.5, -0.5], color: [0.0, 1.0, 0.0] },
-    Vertex { position: [-0.5,  0.5,  0.5], color: [0.0, 1.0, 0.0] },
-    Vertex { position: [ 0.5,  0.5,  0.5], color: [0.0, 1.0, 0.0] },
-    Vertex { position: [ 0.5,  0.5, -0.5], color: [0.0, 1.0, 0.0] },
-    // -Y face (magenta)
-    Vertex { position: [-0.5, -0.5,  0.5], color: [1.0, 0.0, 1.0] },
-    Vertex { position: [-0.5, -0.5, -0.5], color: [1.0, 0.0, 1.0] },
-    Vertex { position: [ 0.5, -0.5, -0.5], color: [1.0, 0.0, 1.0] },
-    Vertex { position: [ 0.5, -0.5,  0.5], color: [1.0, 0.0, 1.0] },
-    // +Z face (blue)
-    Vertex { position: [-0.5, -0.5,  0.5], color: [0.0, 0.0, 1.0] },
-    Vertex { position: [ 0.5, -0.5,  0.5], color: [0.0, 0.0, 1.0] },
-    Vertex { position: [ 0.5,  0.5,  0.5], color: [0.0, 0.0, 1.0] },
-    Vertex { position: [-0.5,  0.5,  0.5], color: [0.0, 0.0, 1.0] },
-    // -Z face (yellow)
-    Vertex { position: [ 0.5, -0.5, -0.5], color: [1.0, 1.0, 0.0] },
-    Vertex { position: [-0.5, -0.5, -0.5], color: [1.0, 1.0, 0.0] },
-    Vertex { position: [-0.5,  0.5, -0.5], color: [1.0, 1.0, 0.0] },
-    Vertex { position: [ 0.5,  0.5, -0.5], color: [1.0, 1.0, 0.0] },
-];
+/// 对应的加载器：解析 `key = value` 形式的文本。
+#[derive(Debug)]
+struct LevelConfigLoader;
 
-#[rustfmt::skip]
-const INDICES: &[u16] = &[
-    0, 1, 2, 0, 2, 3,       // +X
-    4, 5, 6, 4, 6, 7,       // -X
-    8, 9, 10, 8, 10, 11,    // +Y
-    12, 13, 14, 12, 14, 15, // -Y
-    16, 17, 18, 16, 18, 19, // +Z
-    20, 21, 22, 20, 22, 23, // -Z
-];
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct Uniforms {
-    mvp: [[f32; 4]; 4],
-}
-
-struct State {
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    size: winit::dpi::PhysicalSize<u32>,
-    render_pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    num_indices: u32,
-    uniform_buffer: wgpu::Buffer,
-    uniform_bind_group: wgpu::BindGroup,
-    depth_view: wgpu::TextureView,
-    start_time: Instant,
-    window: Arc<Window>,
-}
-
-impl State {
-    async fn new(window: Arc<Window>) -> Self {
-        let size = window.inner_size();
-
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-
-        let surface = instance.create_surface(window.clone()).unwrap();
-
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-                apply_limit_buckets: false,
-            })
-            .await
-            .unwrap();
-
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("device"),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-
-        let mut config = surface.get_default_config(&adapter, size.width, size.height).unwrap();
-        config.present_mode = wgpu::PresentMode::Fifo;
-        surface.configure(&device, &config);
-
-        let depth_view = Self::create_depth_view(&device, &config);
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-        });
-
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vertex buffer"),
-            contents: bytemuck::cast_slice(VERTICES),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("index buffer"),
-            contents: bytemuck::cast_slice(INDICES),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("uniform buffer"),
-            size: std::mem::size_of::<Uniforms>() as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("uniform bind group layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-
-        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("uniform bind group"),
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("pipeline layout"),
-            bind_group_layouts: &[Option::from(&bind_group_layout)],
-            immediate_size: 0,
-        });
-
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("render pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Option::from(Vertex::layout())],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Option::from(true),
-                depth_compare: Option::from(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        Self {
-            surface,
-            device,
-            queue,
-            config,
-            size,
-            render_pipeline,
-            vertex_buffer,
-            index_buffer,
-            num_indices: INDICES.len() as u32,
-            uniform_buffer,
-            uniform_bind_group,
-            depth_view,
-            start_time: Instant::now(),
-            window,
-        }
+impl ResourceLoader for LevelConfigLoader {
+    fn extensions(&self) -> &[&str] {
+        &["level"]
     }
 
-    fn create_depth_view(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> wgpu::TextureView {
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("depth texture"),
-            size: wgpu::Extent3d {
-                width: config.width.max(1),
-                height: config.height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        texture.create_view(&wgpu::TextureViewDescriptor::default())
+    fn data_type_uuid(&self) -> Uuid {
+        uuid!("6b1e4d90-2a73-4c58-8f21-9d3c7e5a0b64")
     }
 
-    fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if new_size.width == 0 || new_size.height == 0 {
-            return;
-        }
-        self.size = new_size;
-        self.config.width = new_size.width;
-        self.config.height = new_size.height;
-        self.surface.configure(&self.device, &self.config);
-        self.depth_view = Self::create_depth_view(&self.device, &self.config);
-    }
+    fn load(&self, path: PathBuf, io: Arc<dyn ResourceIo>) -> BoxedLoaderFuture {
+        Box::pin(async move {
+            let bytes = io.load_file(&path).await?;
+            let text = String::from_utf8(bytes).map_err(LoadError::custom)?;
 
-    fn update(&mut self) {
-        let t = self.start_time.elapsed().as_secs_f32();
-
-        let model = Mat4::from_rotation_y(t) * Mat4::from_rotation_x(t * 0.6);
-        let view = look_at_mat4(Vec3::new(0.0, 1.5, 3.0), Vec3::ZERO, Vec3::Y);
-        let aspect = self.config.width as f32 / self.config.height as f32;
-        let proj = perspective(45f32.to_radians(), aspect, 0.1, 100.0);
-
-        let mvp = proj * view * model;
-        let uniforms = Uniforms {
-            mvp: mvp.to_cols_array_2d(),
-        };
-        self.queue
-            .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
-    }
-
-    fn render(&mut self) -> RenderOutcome {
-        let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return RenderOutcome::Skip;
+            let mut config = LevelConfig {
+                spin_speed: 1.0,
+                move_speed: 2.0,
+            };
+            for line in text.lines() {
+                let Some((key, value)) = line.split_once('=') else {
+                    continue;
+                };
+                let value: f32 = value.trim().parse().map_err(LoadError::custom)?;
+                match key.trim() {
+                    "spin_speed" => config.spin_speed = value,
+                    "move_speed" => config.move_speed = value,
+                    _ => {}
+                }
             }
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                return RenderOutcome::Reconfigure;
-            }
-            wgpu::CurrentSurfaceTexture::Validation => return RenderOutcome::Fatal,
-        };
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("render encoder"),
-            });
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("render pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.05,
-                            g: 0.05,
-                            b: 0.08,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
-        }
-
-        self.queue.submit(std::iter::once(encoder.finish()));
-        self.queue.present(output);
-
-        RenderOutcome::Ok
+            Ok(Box::new(config) as Box<dyn ResourceData>)
+        })
     }
-}
-
-enum RenderOutcome {
-    Ok,
-    Skip,
-    Reconfigure,
-    Fatal,
 }
 
 #[derive(Default)]
-struct App {
-    state: Option<State>,
+struct Game {
+    cube: Handle<Node>,
+    orbit: Handle<Node>,
+    config: Option<Resource<LevelConfig>>,
+    /// 异步加载的 glTF 模型，就绪后再实例化进场景。
+    model: Option<Resource<Model>>,
+    model_spawned: bool,
+    stats_reported: bool,
+    paused: bool,
 }
 
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() {
-            return;
+impl Plugin for Game {
+    fn init(&mut self, ctx: &mut PluginContext) {
+        // ── 输入映射：逻辑里只认动作名，不认具体按键 ──
+        let bindings = ctx.input.bindings_mut();
+        bindings.bind_action("pause", KeyCode::Space);
+        bindings.bind_action("quit", KeyCode::Escape);
+        bindings.bind_action("reset", KeyCode::KeyR);
+        bindings.bind_action("stats", KeyCode::KeyC);
+        bindings.bind_axis("horizontal", KeyCode::KeyD, KeyCode::KeyA);
+        bindings.bind_axis("forward", KeyCode::KeyW, KeyCode::KeyS);
+        bindings.bind_axis("vertical", KeyCode::KeyE, KeyCode::KeyQ);
+
+        // ── 资源：注册加载器并异步请求配置 ──
+        ctx.resources.add_loader(LevelConfigLoader);
+        ctx.resources.add_loader(TextureLoader);
+        ctx.resources.add_loader(ShaderLoader);
+        ctx.resources.add_loader(GltfLoader);
+        self.config = Some(ctx.resources.request("assets/demo.level"));
+        self.model = Some(ctx.resources.request("assets/gem.glb"));
+
+        // 程序化生成的棋盘格贴图，直接登记为资源，无需外部图片文件。
+        let checker = ctx.resources.register(
+            "builtin/checker",
+            Texture::checkerboard(64, 8, [230, 230, 235, 255], [40, 44, 60, 255])
+                .with_sampler(Sampler::pixelated()),
+        );
+
+        // ── 场景 ──
+        ctx.scene.add_node(
+            Node::new("Camera")
+                .with_camera(Camera::default())
+                .with_transform(Transform::looking_at(
+                    Vec3::new(0.0, 2.0, 5.0),
+                    Vec3::ZERO,
+                    Vec3::Y,
+                )),
+        );
+
+        // 贴了棋盘格的立方体，金属度高、粗糙度低 → 高光锐利。
+        self.cube = ctx.scene.add_node(
+            Node::new("Cube")
+                .with_mesh(Mesh::cube())
+                .with_material(
+                    Material::standard()
+                        .with_base_color_texture(checker.clone())
+                        .with_metallic(0.9)
+                        .with_roughness(0.25),
+                ),
+        );
+
+        // 子节点跟随父节点一起转，体现场景图层级。橙色、无贴图。
+        self.orbit = ctx.scene.add_node_with_parent(
+            Node::new("Orbit")
+                .with_mesh(Mesh::cube())
+                .with_material(
+                    Material::standard()
+                        .with_base_color(Vec4::new(1.0, 0.45, 0.1, 1.0))
+                        .with_roughness(0.6),
+                )
+                .with_position(Vec3::new(1.5, 0.0, 0.0))
+                .with_scale(Vec3::splat(0.3)),
+            self.cube,
+        );
+
+        // 地面平铺同一张贴图——共享资源不会重复上传显存。
+        ctx.scene.add_node(
+            Node::new("Ground")
+                .with_mesh(Mesh::plane(8.0))
+                .with_material(
+                    Material::standard()
+                        .with_base_color_texture(checker)
+                        .with_base_color(Vec4::new(0.6, 0.6, 0.7, 1.0))
+                        .with_roughness(0.9),
+                )
+                .with_position(Vec3::new(0.0, -1.0, 0.0))
+                .with_scale(Vec3::splat(8.0)),
+        );
+
+        // 一圈球体，其中大半在视野外——用来观察视锥剔除是否真的生效。
+        let ring_mesh = Mesh::sphere(12, 18);
+        for index in 0..48 {
+            let angle = index as f32 / 48.0 * std::f32::consts::TAU;
+            let radius = 14.0;
+            ctx.scene.add_node(
+                Node::new(format!("Ring{index}"))
+                    .with_mesh(ring_mesh.clone())
+                    .with_material(
+                        Material::standard()
+                            .with_base_color(Vec4::new(0.4, 0.9, 0.5, 1.0))
+                            .with_roughness(0.4),
+                    )
+                    .with_position(Vec3::new(
+                        angle.cos() * radius,
+                        -0.4,
+                        angle.sin() * radius,
+                    )),
+            );
         }
-        let window_attributes = Window::default_attributes().with_title("wgpu cube");
-        let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
-        self.state = Some(pollster::block_on(State::new(window)));
+
+        klog::info!("WASD 移动，Q/E 升降，空格暂停，R 重置，C 打印剔除统计，Esc 退出");
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let Some(state) = self.state.as_mut() else {
-            return;
-        };
+    fn update(&mut self, ctx: &mut PluginContext) {
+        // glTF 模型在后台加载，就绪的那一帧实例化进场景。
+        if !self.model_spawned
+            && let Some(handle) = &self.model
+            && let Some(model) = handle.data_ref()
+        {
+            let root = ctx.scene.root();
+            let instance = ctx.scene.instantiate_model(&model, root);
+            ctx.scene[instance].transform.position = Vec3::new(-2.0, 0.2, 0.0);
+            self.model_spawned = true;
+            klog::info!(
+                "模型已载入：{} 个三角形，{} 种材质",
+                model.triangle_count(),
+                model.materials().len()
+            );
+        }
 
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(new_size) => state.resize(new_size),
-            WindowEvent::RedrawRequested => {
-                state.update();
-                match state.render() {
-                    RenderOutcome::Ok | RenderOutcome::Skip => {}
-                    RenderOutcome::Reconfigure => state.resize(state.size),
-                    RenderOutcome::Fatal => event_loop.exit(),
-                }
-                state.window.request_redraw();
-            }
-            _ => {}
+        // 启动 2 秒后自动汇报一次渲染统计，方便无人值守时确认剔除生效。
+        if !self.stats_reported && ctx.elapsed > 2.0 {
+            self.stats_reported = true;
+            klog::info!(
+                "渲染统计：绘制 {} / 剔除 {} / 共 {}，三角形 {}",
+                ctx.stats.drawn,
+                ctx.stats.culled,
+                ctx.stats.total(),
+                ctx.stats.triangles
+            );
+        }
+
+        // 配置是异步加载的，没就绪时用默认值，就绪后自动生效。
+        let (spin_speed, move_speed) = self
+            .config
+            .as_ref()
+            .and_then(|c| c.data_ref().map(|d| (d.spin_speed, d.move_speed)))
+            .unwrap_or((1.0, 2.0));
+
+        if ctx.input.action_just_pressed("quit") {
+            ctx.request_exit();
+            return;
+        }
+
+        if ctx.input.action_just_pressed("pause") {
+            self.paused = !self.paused;
+            klog::info!("旋转{}", if self.paused { "已暂停" } else { "已恢复" });
+        }
+
+        if ctx.input.action_just_pressed("stats") {
+            let stats = ctx.stats;
+            klog::info!(
+                "渲染统计：绘制 {} / 剔除 {} / 共 {}，三角形 {}",
+                stats.drawn,
+                stats.culled,
+                stats.total(),
+                stats.triangles
+            );
+        }
+
+        if ctx.input.action_just_pressed("reset") {
+            ctx.scene[self.cube].transform = Transform::IDENTITY;
+            klog::info!("已重置");
+        }
+
+        // 移动：读取语义化的轴，而不是具体按键。
+        let plane = ctx.input.axis_vector("horizontal", "forward");
+        let lift = ctx.input.axis("vertical");
+        let velocity = Vec3::new(plane.x, lift, -plane.y) * move_speed * ctx.dt;
+        ctx.scene[self.cube].transform.translate(velocity);
+
+        if !self.paused {
+            ctx.scene[self.cube].transform.rotate_y(spin_speed * ctx.dt);
+            ctx.scene[self.orbit].transform.rotate_x(spin_speed * 2.0 * ctx.dt);
         }
     }
 }
 
 fn main() {
-    let event_loop = EventLoop::new().unwrap();
-    event_loop.set_control_flow(ControlFlow::Poll);
+    klog::init(None);
 
-    let mut app = App::default();
-    event_loop.run_app(&mut app).unwrap();
+    let mut executor = Executor::new().with_title("kengine demo");
+    executor.add_plugin(Game::default());
+    executor.run();
 }

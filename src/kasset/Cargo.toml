@@ -1,0 +1,12 @@
+[package]
+name = "kasset"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kcore = { path = "../kcore" }
+klog = { path = "../klog" }
+# 资源加载走 IO 线程池，必须启用真正的多线程实现（默认 feature 是单线程退化版）。
+ktask = { path = "../ktask", features = ["multi_threaded"] }
+fxhash = "0.2.1"
+parking_lot = "0.12.5"

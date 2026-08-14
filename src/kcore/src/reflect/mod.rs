@@ -1,4 +1,4 @@
-//! Runtime reflection
+//! 运行时反射
 
 mod array;
 mod error;
@@ -49,193 +49,141 @@ pub fn combine_uuids(a: Uuid, b: Uuid) -> Uuid {
     Uuid::from_bytes(combined_bytes)
 }
 
-/// A set of useful information about a type that can be queried at runtime.
+/// 可在运行时查询的类型信息集合。
 pub struct TypeInfo {
-    /// Name of the file where the type is located. Usually, it is just `file!()` macro call result.
+    /// 定义该类型的文件路径，通常为 `file!()` 宏的返回值。
     pub source_path: &'static str,
 
-    /// The actual name of the type in human-readable form. Typically, it just contains the result
-    /// of calling `std::any::type_name::<T>()`.
+    /// 类型的人类可读名称，通常为 `std::any::type_name::<T>()` 的结果。
     pub type_name: &'static str,
 
-    /// A parent assembly name of the type that implements this trait.
+    /// 实现此 trait 的类型所在的程序集（crate）名称。
     ///
-    /// ## Important notes for implementors
+    /// ## 实现者注意
     ///
-    /// Use proc-macro (`#[derive(Reflect)]`) to ensure that this field contains the correct assembly
-    /// name. In other words - there's no guarantee, that any implementation other than proc-macro
-    /// will return a correct name of the assembly. Alternatively, you can use `env!("CARGO_PKG_NAME")`
-    /// as an implementation.
+    /// 建议使用过程宏（`#[derive(Reflect)]`）来确保此字段包含正确的程序集名称。
+    /// 或者使用 `env!("CARGO_PKG_NAME")`。
     pub assembly_name: &'static str,
 
-    /// A documentation of the type.
+    /// 类型的文档注释。
     pub doc_comment: &'static str,
 
-    /// A set of types that are derived from this type. Derived here does not mean classic OOPs
-    /// derived class, it is just a "link" between this type an others. It is widely used to link
-    /// an actual type with its wrapper type (which typically contains `Box<dyn SomeTrait>`).
+    /// 派生自此类型的类型集合。"派生"不是 OOP 意义上的子类，
+    /// 而是该类型与其他类型之间的"链接"，通常用于将实际类型与包装类型（如 `Box<dyn SomeTrait>`）关联。
     pub derived_types: &'static [TypeId],
 
-    /// Unique id of the type.
+    /// 类型的唯一标识符。
     pub type_uuid: Uuid,
 }
 
-/// A trait for runtime reflection.
+/// 运行时反射 trait。
 ///
-/// ## Code Generation
+/// ## 代码生成
 ///
-/// The derive macro is available under `#[reflect(...)]` attribute that can be placed on both
-/// the type and its fields.
+/// 可通过 `#[reflect(...)]` 属性宏在类型和字段上进行代码生成。
 ///
-/// ### Type attributes
+/// ### 类型属性
 ///
-/// - `#[reflect(hide_all)]` - hide all fields from reflection.
-/// - `#[reflect(bounds)]` - add type boundary for `Reflect` impl, for example
-/// `#[reflect(bounds = "T: Reflect + Clone")]`
-/// - `#[reflect(non_cloneable)]` - prevent the macro from generating an implementation of
-/// [`Self::try_clone_box`] method for your type. Could be useful for non-cloneable types.
-/// - `#[reflect(non_comparable)]` - prevent the macro from generating an implementation of
-/// [`Self::try_compare`] method for your type. Could be useful for types that does not implement
-/// `PartialEq` trait.
-/// - `#[reflect(derived_type = "Type")]` - marks the type for which the attribute is added as a
-/// subtype for the `Type`.
-/// - `#[reflect(type_uuid = "5989667c-ca43-46ca-b906-ae4319f659a5")]` - assigns a unique identifier
-/// for the type. See the respective section below for more info.
-/// - `#[reflect(ignore_generics_type_uuid)]` - prevents the proc-macro from combining the UUIDs of
-/// generic arguments with the `type_uuid` of the type itself. Off by default (combines uuids by
-/// default).
+/// - `#[reflect(hide_all)]` — 隐藏所有字段。
+/// - `#[reflect(bounds)]` — 添加类型约束，例如 `#[reflect(bounds = "T: Reflect + Clone")]`。
+/// - `#[reflect(non_cloneable)]` — 阻止宏生成 `try_clone_box` 实现（适用于不可克隆的类型）。
+/// - `#[reflect(non_comparable)]` — 阻止宏生成 `try_compare` 实现（适用于未实现 `PartialEq` 的类型）。
+/// - `#[reflect(derived_type = "Type")]` — 将当前类型标记为 `Type` 的子类型。
+/// - `#[reflect(type_uuid = "uuid")]` — 为类型分配唯一标识符。
+/// - `#[reflect(ignore_generics_type_uuid)]` — 阻止宏将泛型参数的 UUID 与自身 UUID 合并。
 ///
-/// ### Direct vs Indirect Access
+/// ### 直接访问 vs 间接访问
 ///
-/// There are two kinds of methods that can be used to access internals of an object. The preferred
-/// one is called indirect - such methods accepts a closure that will be called by the method. These
-/// methods support types with interior mutability (Mutex, RefCell, etc.), but cannot give you a
-/// direct reference outside the provided closure. This is essential limitation to support types with
-/// interior mutability (for example, mutex requires holding some sort of lock guard while accessing
-/// its content). Indirect access can be quite annoying to use, and it is possible to get direct
-/// access to the fields by the price of not supporting types with interior mutability.
+/// 有两种字段访问方式：
+/// - **间接访问**（推荐）：通过闭包访问，支持具有内部可变性的类型（Mutex、RefCell 等）。
+/// - **直接访问**：直接返回字段引用，性能更好，但不支持内部可变性类型。
 ///
-/// ### Field attributes
+/// ### 字段属性
 ///
-/// - `#[reflect(hidden)]` - hides the field from reflection.
-/// - `#[reflect(setter = "foo")]` - set the desired method that will be used by [`Self::set_field`]
-/// default implementation.
-/// - `#[reflect(deref)]` - delegate the field access with `deref` + `deref_mut` calls. Could be
-/// useful for new-type objects.
-/// - `#[reflect(field = "foo")]` - sets the desired method, that will be used to access
-/// the field.
-/// - `#[reflect(field_mut = "foo")]` - sets the desired method, that will be used to access
-/// the field.
-/// - `#[reflect(name = "name")]` - overrides the name of the field.
-/// - `#[reflect(display_name = "name")]` - sets the human-readable name for the field.
-/// - `#[reflect(tag = "tag")]` - sets some arbitrary string tag of the field. It could be used to
-/// group properties by a certain criteria or to find a specific property by its tag.
-/// - `#[reflect(read_only)]` - the field is not meant to be editable. This flag does not prevent
-/// the reflection API from changing the actual value, it is just an instruction for external
-/// users (editors, tools, etc.)
-/// - `[#reflect(immutable_collection)]` - only for dynamic collections (`Vec`, etc.) - means that its
-/// size cannot be changed, however the _items_ of the collection can still be changed.
-/// - `#[reflect(min_value = "0.0")]` - minimal value of the field. Works only for numeric fields!
-/// - `#[reflect(max_value = "1.0")]` - maximal value of the field. Works only for numeric fields!
-/// - `#[reflect(step = "0.1")]` - increment/decrement step of the field. Works only for numeric fields!
-/// - `#[reflect(precision = "3")]` - maximum amount of decimal places for a numeric property.
+/// - `#[reflect(hidden)]` — 从反射中隐藏字段。
+/// - `#[reflect(setter = "foo")]` — 设置 `set_field` 使用的自定义 setter 方法。
+/// - `#[reflect(deref)]` — 通过 `deref` + `deref_mut` 代理字段访问（适用于 newtype 对象）。
+/// - `#[reflect(field = "foo")]` — 设置字段只读访问方法。
+/// - `#[reflect(field_mut = "foo")]` — 设置字段可变访问方法。
+/// - `#[reflect(name = "name")]` — 覆盖字段名称。
+/// - `#[reflect(display_name = "name")]` — 设置字段的人类可读名称。
+/// - `#[reflect(tag = "tag")]` — 设置字段的任意字符串标签。
+/// - `#[reflect(read_only)]` — 标记字段为只读（仅提示，不阻止反射 API 修改）。
+/// - `#[reflect(immutable_collection)]` — 仅对动态集合有效，表示大小不可修改。
+/// - `#[reflect(min_value = "0.0")]` — 字段最小值（仅限数值字段）。
+/// - `#[reflect(max_value = "1.0")]` — 字段最大值（仅限数值字段）。
+/// - `#[reflect(step = "0.1")]` — 字段步进值（仅限数值字段）。
+/// - `#[reflect(precision = "3")]` — 数值字段的最大小数位数。
 ///
-/// ### Clone
+/// ### 克隆
 ///
-/// By default, the proc macro adds an implementation of [`Self::try_clone_box`] with the assumption
-/// that your type implements the [`Clone`] trait. Not all types can implement this trait, in this
-/// case, add `#[reflect(non_cloneable)]` attribute for your type. This will force the implementation
-/// of [`Self::try_clone_box`] to return `None`.
+/// 默认情况下，宏假定你的类型实现了 `Clone` 并生成 `try_clone_box` 实现。
+/// 若类型无法实现 `Clone`，请添加 `#[reflect(non_cloneable)]`。
 ///
 /// ### PartialEq
 ///
-/// By default, the proc macro adds an implementation of [`Self::try_compare`] with the assumption
-/// that your type implements the [`PartialEq`] trait. Not all types can implement this trait, in this
-/// case, add `#[reflect(non_comparable)]` attribute for your type. This will force the implementation
-/// of [`Self::try_compare`] to return `None`.
+/// 默认情况下，宏假定你的类型实现了 `PartialEq` 并生成 `try_compare` 实现。
+/// 若类型无法实现 `PartialEq`，请添加 `#[reflect(non_comparable)]`。
 ///
-/// ### Type UUID
+/// ### 类型 UUID
 ///
-/// Every type that implements `Reflect` trait must provide a unique type UUID. Such an id can be
-/// added using `#[reflect(type_uuid = "unique_identifier")]` attribute. Where `unique_identifier`
-/// must be a UUID (for example - "59676ed4-d974-4851-a896-fadb314fafee"). UUID can be generated
-/// using online tools, a plugin for your IDE, or simply manual by changing hex characters of the
-/// UUID in the example. It is very important to provide truly unique identifiers across your
-/// project, otherwise the engine can be confused by two or more types with the same UUID. It is
-/// especially important in case of trait object serialization, where the UUID is used to link the
-/// actual type with its representation in a serialized form.
+/// 每个实现 `Reflect` 的类型必须提供唯一的 UUID，通过 `#[reflect(type_uuid = "...")]` 添加。
+/// 请确保 UUID 在整个项目中是唯一的，否则引擎在序列化 trait 对象时可能产生混淆。
 ///
-/// By default, the proc-macro tries to combine the given UUID with the uuids of each generic type.
-/// Which in its turn applies `Reflect` trait bound to each generic argument. If it is not desired
-/// behavior, use `#[reflect(ignore_generics_type_uuid)]` option.
+/// ## 附加 Trait 约束
 ///
-/// ## Additional Trait Bounds
-///
-/// `Reflect` restricted to types that implement `Debug` trait, this is needed to convert the actual value
-/// to string. `Display` isn't used here, because it can't be derived and it is very tedious to implement it
-/// for every type that should support `Reflect` trait. It is a good compromise between development speed
-/// and the quality of the string output.
+/// `Reflect` 要求类型实现 `Debug` trait，用于将值转换为字符串表示。
 pub trait Reflect: Any + Debug {
-    /// Returns the info about the type that implements this trait.
+    /// 返回实现此 trait 的类型信息。
     fn type_info() -> TypeInfo
     where
         Self: Sized;
 
-    /// Returns the info about the type that implements this trait.
+    /// 返回实现此 trait 的类型信息。
     fn type_info_ref(&self) -> TypeInfo;
 
-    /// Tries to clone the object and return it as a boxed trait object. This method can return
-    /// [`None`] for non-cloneable objects.
+    /// 尝试克隆对象并以 boxed trait 对象返回。不可克隆的对象会返回 [`None`]。
     fn try_clone_box(&self) -> Option<Box<dyn Reflect>>;
 
-    /// Tries to compare this object with some other. The result is `Some(bool)` if the underlying
-    /// type implements [`PartialEq`] trait, `None` - otherwise or if the type is marked with
-    /// `#[reflect(non_comparable)]` attribute.
+    /// 尝试将此对象与另一个对象比较。若底层类型实现了 [`PartialEq`]，则返回 `Some(bool)`；
+    /// 否则返回 `None`，或当类型标记了 `#[reflect(non_comparable)]` 时也返回 `None`。
     fn try_compare(&self, other: &dyn Reflect) -> Option<bool>;
 
-    /// Calls the given closure with the reference to a slice that contains description for all
-    /// fields in the object.
+    /// 使用包含对象所有字段描述的切片引用调用给定闭包。
     fn fields_ref(&self, func: &mut dyn FnMut(&[FieldRef]));
 
-    /// Calls the given closure with the reference to a slice that contains description for all
-    /// fields in the object.
+    /// 使用包含对象所有字段描述的切片引用调用给定闭包。
     fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [FieldMut]));
 
-    /// Replaces the self value with the specified value. If the call is successful, returns
-    /// `Ok(previous_value)`, otherwise returns `Err(specified_value)`.
+    /// 用指定值替换自身。若调用成功，返回 `Ok(previous_value)`；否则返回 `Err(specified_value)`。
     fn set(&mut self, value: Box<dyn Reflect>) -> Result<Box<dyn Reflect>, Box<dyn Reflect>>;
 
-    /// Tries to get a shared reference to a field at the specified index. Returns [`None`] in two cases:
-    /// 1) The type does not have such field
-    /// 2) The type uses interior mutability. This case is special - pretty much every type with
-    ///    interior mutability (Mutex, RefCell, etc.) requires holding some sort of lock guard
-    ///    while giving access to its content. This method returns the field reference directly,
-    ///    but returning a lock guard would require boxing which in most cases would ruin performance.
-    ///    If you need to get a field reference for types with interior mutability, then use
-    ///    [`Reflect::fields_ref`] instead.
+    /// 尝试获取指定索引处字段的共享引用。以下两种情况返回 [`None`]：
+    /// 1) 类型不存在该字段
+    /// 2) 类型使用内部可变性。此类类型（Mutex、RefCell 等）通常需要持有锁守卫
+    ///    才能访问内部数据。本方法直接返回字段引用，但如果返回锁守卫则需要装箱，
+    ///    这在大多数情况下会损害性能。若需要处理具有内部可变性的类型，请改用
+    ///    [`Reflect::fields_ref`]。
     fn field_direct_ref(&self, index: usize) -> Option<FieldRef<'_, '_>>;
 
-    /// Tries to get a mutable reference to a field at the specified index. Returns [`None`] in two cases:
-    /// 1) The type does not have such field
-    /// 2) The type uses interior mutability. This case is special - pretty much every type with
-    ///    interior mutability (Mutex, RefCell, etc.) requires holding some sort of lock guard
-    ///    while giving access to its content. This method returns the field reference directly,
-    ///    but returning a lock guard would require boxing which in most cases would ruin performance.
-    ///    If you need to get a field reference for types with interior mutability, then use
-    ///    [`Reflect::fields_ref`] instead.
+    /// 尝试获取指定索引处字段的可变引用。以下两种情况返回 [`None`]：
+    /// 1) 类型不存在该字段
+    /// 2) 类型使用内部可变性。此类类型（Mutex、RefCell 等）通常需要持有锁守卫
+    ///    才能访问内部数据。本方法直接返回字段引用，但如果返回锁守卫则需要装箱，
+    ///    这在大多数情况下会损害性能。若需要处理具有内部可变性的类型，请改用
+    ///    [`Reflect::fields_mut`]。
     fn field_direct_mut(&mut self, index: usize) -> Option<FieldMut<'_, '_>>;
 
-    /// Returns the total number of fields.
+    /// 返回字段总数。
     fn fields_count(&self) -> usize {
         let mut count = 0;
         self.fields_ref(&mut |fields| count = fields.len());
         count
     }
 
-    /// Tries to find a field with the specified name and set its value to the specified `value`.
-    /// This method may fail in two main reasons:
-    /// 1) The field does not exist (or it is hidden via `#[reflect(hidden)]` attribute).
-    /// 2) The type of the specified value does match the type of the field at the given name.
+    /// 尝试按名称查找字段并设置其值。以下两种情况会失败：
+    /// 1) 字段不存在（或通过 `#[reflect(hidden)]` 被隐藏）。
+    /// 2) 指定值的类型与字段类型不匹配。
     #[allow(clippy::type_complexity)]
     fn set_field(
         &mut self,
@@ -259,8 +207,7 @@ pub trait Reflect: Any + Debug {
         });
     }
 
-    /// Tries to find a field with the given name and calls the specified function with the result
-    /// (either `Some(field)` or `None`).
+    /// 尝试按名称查找字段，以结果（`Some(field)` 或 `None`）调用指定函数。
     fn find_field(&self, name: &str, func: &mut dyn FnMut(Option<&dyn Reflect>)) {
         self.fields_ref(&mut |fields| {
             func(
@@ -272,8 +219,7 @@ pub trait Reflect: Any + Debug {
         });
     }
 
-    /// Tries to find a field with the given name and calls the specified function with the result
-    /// (either `Some(field)` or `None`).
+    /// 尝试按名称查找字段（可变版本），以结果调用指定函数。
     fn find_field_mut(&mut self, name: &str, func: &mut dyn FnMut(Option<&mut dyn Reflect>)) {
         self.fields_mut(&mut |fields| {
             func(
@@ -382,8 +328,8 @@ impl dyn Reflect {
         (self as &mut dyn Any).downcast_mut::<T>()
     }
 
-    /// Tries to find the first field of the given type. This method internally uses
-    /// [`Reflect::field_direct_ref`] with all of its limitations.
+    /// 尝试查找第一个给定类型的字段。本方法内部会使用 [`Reflect::field_direct_ref`]，
+    /// 因此会受到其所有限制。
     #[inline]
     pub fn first_field_ref<T: Reflect>(&self) -> Option<&T> {
         let count = self.fields_count();
@@ -399,8 +345,8 @@ impl dyn Reflect {
         None
     }
 
-    /// Tries to find the first field of the given type. This method internally uses
-    /// [`Reflect::field_direct_ref`] with all of its limitations.
+    /// 尝试查找第一个给定类型的字段。本方法内部会使用 [`Reflect::field_direct_ref`]，
+    /// 因此会受到其所有限制。
     #[inline]
     pub fn first_field_mut<T: Reflect>(&mut self) -> Option<&mut T> {
         let count = self.fields_count();
@@ -422,8 +368,7 @@ impl dyn Reflect {
         None
     }
 
-    /// Tries to downcast self to the specified type, or if it is not possible, tries to find a
-    /// field of the specified type.
+    /// 尝试将自身向下转型为指定类型；若失败，则尝试查找该类型的字段。
     pub fn self_or_field_ref<T: Reflect>(&self) -> Option<&T> {
         if let Some(value) = (self as &dyn Any).downcast_ref::<T>() {
             Some(value)
@@ -432,8 +377,7 @@ impl dyn Reflect {
         }
     }
 
-    /// Tries to downcast self to the specified type, or if it is not possible, tries to find a
-    /// field of the specified type.
+    /// 尝试将自身向下转型为指定类型；若失败，则尝试查找该类型的字段。
     pub fn self_or_field_mut<T: Reflect>(&mut self) -> Option<&mut T> {
         // SAFETY: See the comment in `first_field_mut_of_type` method.
         let this = unsafe { &mut *(self as *mut Self) };
@@ -444,8 +388,8 @@ impl dyn Reflect {
         }
     }
 
-    /// Sets a field by its path in the given entity. This method always uses [`Reflect::set_field`] which means,
-    /// that it will always call custom property setters.
+    /// 按路径设置给定对象中的字段。此方法始终使用 [`Reflect::set_field`]，
+    /// 也就是说它总会调用自定义属性 setter。
     #[inline]
     pub fn set_field_by_path<'p>(
         &mut self,

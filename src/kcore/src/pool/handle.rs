@@ -11,17 +11,15 @@ use std::{
     sync::atomic::{self, AtomicUsize},
 };
 
-/// Handle is some sort of non-owning reference to content in a pool. It stores
-/// index of object and additional information that allows to ensure that handle
-/// is still valid (points to the same object as when handle was created).
+/// 句柄是对对象池内容的非所有权引用。存储对象索引及额外信息，
+/// 用于确保句柄仍然有效（指向创建时的同一对象）。
 #[derive(Serialize, Deserialize)]
 pub struct Handle<T> {
-    /// Index of object in pool.
+    /// 对象在对象池中的索引。
     pub(super) index: u32,
-    /// Generation number, if it is same as generation of pool record at
-    /// index of handle then this is valid handle.
+    /// 代次编号：当记录的代次与句柄的代次相同时，句柄才有效。
     pub(super) generation: u32,
-    /// Type holder.
+    /// 类型占位符。
     #[serde(skip)]
     pub(super) type_marker: PhantomData<T>,
 }
@@ -224,8 +222,7 @@ impl<T> Handle<T> {
         type_marker: PhantomData,
     };
 
-    /// Converts the handle to its base variant. In other words, if there are two related types and
-    /// A is a variant of B, then this method converts `Handle<A> -> Handle<B>`.
+    /// 将句柄转换为其基类型变体。即若 A 是 B 的变体，则将 `Handle<A>` 转换为 `Handle<B>`。
     #[inline(always)]
     pub fn to_base<B>(self) -> Handle<B>
     where
@@ -234,7 +231,7 @@ impl<T> Handle<T> {
         self.transmute()
     }
 
-    /// Converts the handle of a base object to the handle of its variant.
+    /// 将基类型句柄转换为其变体类型句柄。
     #[inline(always)]
     pub fn to_variant<V>(self) -> Handle<V>
     where
@@ -320,7 +317,7 @@ impl<T> Display for Handle<T> {
     }
 }
 
-/// Atomic handle.
+/// 原子句柄（线程安全）。
 pub struct AtomicHandle(AtomicUsize);
 
 impl Clone for AtomicHandle {
@@ -399,17 +396,16 @@ impl Debug for AtomicHandle {
     }
 }
 
-/// Type-erased handle.
+/// 类型擦除的句柄。
 #[derive(
     Copy, Clone, Debug, Ord, PartialOrd, PartialEq, Eq, Hash, Reflect, Visit, Serialize, Deserialize,
 )]
 #[reflect(type_uuid = "50131acc-8b3b-40b5-b495-e2c552c94db3")]
 pub struct ErasedHandle {
-    /// Index of object in pool.
+    /// 对象在对象池中的索引。
     #[reflect(read_only)]
     index: u32,
-    /// Generation number, if it is same as generation of pool record at
-    /// index of handle then this is valid handle.
+    /// 代次编号：当记录的代次与句柄的代次相同时，句柄才有效。
     #[reflect(read_only)]
     generation: u32,
 }

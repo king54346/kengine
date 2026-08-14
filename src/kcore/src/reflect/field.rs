@@ -5,44 +5,42 @@ use std::ops::Deref;
 
 #[derive(Debug)]
 pub struct FieldMetadata<'s> {
-    /// A name of the property.
+    /// 属性名称。
     pub name: &'s str,
 
-    /// A human-readable name of the property.
+    /// 人类可读的属性显示名称。
     pub display_name: &'s str,
 
-    /// Tag of the property. Could be used to group properties by a certain criteria or to find a
-    /// specific property by its tag.
+    /// 属性标签，可用于按条件分组或按标签查找特定属性。
     pub tag: &'s str,
 
-    /// Doc comment content.
+    /// 文档注释内容。
     pub doc: &'s str,
 
-    /// A property is not meant to be edited.
+    /// 属性不可编辑（只读）。
     pub read_only: bool,
 
-    /// Only for dynamic collections (Vec, etc) - means that its size cannot be changed, however the
-    /// _items_ of the collection can still be changed.
+    /// 仅对动态集合（Vec 等）有效——表示集合大小不可修改，但集合内容项仍可修改。
     pub immutable_collection: bool,
 
-    /// A minimal value of the property. Works only with numeric properties!
+    /// 属性的最小值。仅对数值属性有效！
     pub min_value: Option<f64>,
 
-    /// A minimal value of the property. Works only with numeric properties!
+    /// 属性的最大值。仅对数值属性有效！
     pub max_value: Option<f64>,
 
-    /// A minimal value of the property. Works only with numeric properties!
+    /// 属性的步进值。仅对数值属性有效！
     pub step: Option<f64>,
 
-    /// Maximum amount of decimal places for a numeric property.
+    /// 数值属性的最大小数位数。
     pub precision: Option<usize>,
 }
 
 pub struct FieldRef<'a, 'b> {
-    /// A reference to field's metadata.
+    /// 字段元数据的引用。
     pub metadata: &'a FieldMetadata<'b>,
 
-    /// An reference to the actual value of the property.
+    /// 属性实际值的引用。
     pub value: &'a dyn Reflect,
 }
 
@@ -55,7 +53,7 @@ impl<'b> Deref for FieldRef<'_, 'b> {
 }
 
 impl FieldRef<'_, '_> {
-    /// Tries to cast a value to a given type.
+    /// 尝试将值转换为给定类型。
     pub fn cast_value<T: Reflect>(&self) -> Result<&T, CastError> {
         match self.value.downcast_ref::<T>() {
             Some(value) => Ok(value),
@@ -87,12 +85,12 @@ impl PartialEq<Self> for FieldRef<'_, '_> {
 }
 
 pub struct FieldMut<'a, 'b> {
-    /// A reference to field's metadata.
+    /// 字段元数据的引用。
     pub metadata: &'a FieldMetadata<'b>,
 
-    /// An reference to the actual value of the property. This is "non-mangled" reference, which
-    /// means that while `field/fields/field_mut/fields_mut` might return a reference to other value,
-    /// than the actual field, the `value` is guaranteed to be a reference to the real value.
+    /// 属性实际值的可变引用。这是"未经篡改"的引用——
+    /// 即使 `field/fields/field_mut/fields_mut` 可能返回其他值的引用，
+    /// `value` 保证是对真实字段的引用。
     pub value: &'a mut dyn Reflect,
 }
 

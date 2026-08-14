@@ -1,0 +1,20 @@
+[package]
+name = "kgltf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kasset = { path = "../kasset" }
+kcore = { path = "../kcore" }
+klog = { path = "../klog" }
+kmaterial = { path = "../kmaterial" }
+kmath = { path = "../kmath" }
+kmesh = { path = "../kmesh" }
+ktexture = { path = "../ktexture" }
+# names 用于保留节点名，utils 提供顶点数据读取器。
+# 关掉默认特性里的 import：文件读取要走 kasset 的 ResourceIo，而非直接碰 std::fs。
+gltf = { version = "1.4.1", default-features = false, features = ["names", "utils"] }
+base64 = "0.23.1"
+
+[dev-dependencies]
+ktask = { path = "../ktask", features = ["multi_threaded"] }

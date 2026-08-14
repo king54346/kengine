@@ -3,31 +3,30 @@ use crate::variable::{InheritError, VariableFlags};
 use std::any::TypeId;
 
 pub trait ReflectInheritableVariable: Reflect {
-    /// Tries to inherit a value from parent. It will succeed only if the current variable is
-    /// not marked as modified.
+    /// 尝试从父对象继承值。仅当当前变量**未被标记为已修改**时才会成功。
     fn try_inherit(
         &mut self,
         parent: &dyn ReflectInheritableVariable,
         ignored_types: &[TypeId],
     ) -> Result<Option<Box<dyn Reflect>>, InheritError>;
 
-    /// Resets modified flag from the variable.
+    /// 重置变量的已修改标志。
     fn reset_modified_flag(&mut self);
 
-    /// Returns current variable flags.
+    /// 返回当前变量的标志位。
     fn flags(&self) -> VariableFlags;
 
     fn set_flags(&mut self, flags: VariableFlags);
 
-    /// Returns true if value was modified.
+    /// 返回值是否已被修改。
     fn is_modified(&self) -> bool;
 
-    /// Marks value as modified, so its value won't be overwritten during property inheritance.
+    /// 将值标记为已修改，使其在属性继承时不被覆盖。
     fn mark_modified(&mut self);
 
-    /// Returns a mutable reference to wrapped value without marking the variable itself as modified.
+    /// 返回包装值的可变引用，但不将变量本身标记为已修改。
     fn inner_value_mut(&mut self) -> &mut dyn Reflect;
 
-    /// Returns a shared reference to wrapped value without marking the variable itself as modified.
+    /// 返回包装值的共享引用，但不将变量本身标记为已修改。
     fn inner_value_ref(&self) -> &dyn Reflect;
 }

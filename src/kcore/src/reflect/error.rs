@@ -3,18 +3,18 @@ use std::any::TypeId;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 
-/// An error returned from a failed path string query.
+/// 路径字符串查询失败时返回的错误。
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReflectPathError<'a> {
-    // syntax errors
+    // 语法错误
     UnclosedBrackets { s: &'a str },
     InvalidIndexSyntax { s: &'a str },
 
-    // access errors
+    // 访问错误
     UnknownField { s: &'a str },
     NoItemForIndex { s: &'a str },
 
-    // type cast errors
+    // 类型转换错误
     InvalidDowncast,
     NotAnArray,
 }
@@ -25,42 +25,42 @@ impl Display for ReflectPathError<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             ReflectPathError::UnclosedBrackets { s } => {
-                write!(f, "unclosed brackets: `{s}`")
+                write!(f, "括号未关闭：`{s}`")
             }
             ReflectPathError::InvalidIndexSyntax { s } => {
-                write!(f, "not index syntax: `{s}`")
+                write!(f, "非法索引语法：`{s}`")
             }
             ReflectPathError::UnknownField { s } => {
-                write!(f, "given unknown field: `{s}`")
+                write!(f, "未知字段：`{s}`")
             }
             ReflectPathError::NoItemForIndex { s } => {
-                write!(f, "no item for index: `{s}`")
+                write!(f, "索引无对应元素：`{s}`")
             }
             ReflectPathError::InvalidDowncast => {
                 write!(
                     f,
-                    "failed to downcast to the target type after path resolution"
+                    "路径解析后向下转型目标类型失败"
                 )
             }
             ReflectPathError::NotAnArray => {
-                write!(f, "tried to resolve index access, but the reflect type does not implement list API")
+                write!(f, "尝试解析索引访问，但该 reflect 类型未实现列表 API")
             }
         }
     }
 }
 
-/// An error that can occur during "type casting"
+/// 类型转换失败时的错误。
 #[derive(Debug)]
 pub enum CastError {
-    /// Given type does not match expected.
+    /// 给定类型与预期类型不匹配。
     TypeMismatch {
-        /// A name of the field.
+        /// 字段名称。
         property_name: String,
 
-        /// Expected type identifier.
+        /// 预期类型标识符。
         expected_type_id: TypeId,
 
-        /// Actual type identifier.
+        /// 实际类型标识符。
         actual_type_id: TypeId,
     },
 }
@@ -73,7 +73,7 @@ impl Display for CastError {
             CastError::TypeMismatch { property_name, .. } => {
                 write!(
                     f,
-                    "Given type does not match expected for property {property_name:?}"
+                    "属性 {property_name:?} 的类型与预期不匹配"
                 )
             }
         }
@@ -98,14 +98,14 @@ impl Display for SetFieldError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             SetFieldError::NoSuchField { name, value } => {
-                write!(f, "No such field as {name:?} for value {value:?}")
+                write!(f, "值 {value:?} 不存在字段 {name:?}")
             }
             SetFieldError::InvalidValue {
                 field_type_name,
                 value,
             } => write!(
                 f,
-                "Invalid value for field type {field_type_name}: {value:?}"
+                "字段类型 {field_type_name} 的值无效：{value:?}"
             ),
         }
     }
@@ -130,13 +130,13 @@ impl Display for SetFieldByPathError<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             SetFieldByPathError::InvalidPath { value, reason } => {
-                write!(f, "Invalid path: {value:?}. Reason: {reason}")
+                write!(f, "无效路径：{value:?}。原因：{reason}")
             }
             SetFieldByPathError::InvalidValue {
                 field_type_name,
                 value,
             } => {
-                write!(f, "Invalid value: {value:?}. Type: {field_type_name}")
+                write!(f, "无效值：{value:?}。类型：{field_type_name}")
             }
             SetFieldByPathError::SetFieldError(set_field_error) => Display::fmt(set_field_error, f),
         }

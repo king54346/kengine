@@ -13,3 +13,8 @@ quote = "1.0.47"
 proc-macro2 = "1.0"
 convert_case = "0.11.0"
 fxhash = "0.2.1"
+
+# 文档示例需要真正展开这些宏，因此回头依赖 kcore。
+# dev-dependencies 不参与 lib 构建图，Cargo 允许这种回环。
+[dev-dependencies]
+kcore = { path = "../kcore" }

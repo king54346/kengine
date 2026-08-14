@@ -11,25 +11,25 @@ pub use uuid;
 
 use std::path::{Path, PathBuf};
 
-/// Reinterprets a slice of `T` as a slice of bytes.
+/// 将 `T` 类型的切片重新解释为字节切片。
 pub fn array_as_u8_slice<T: Sized>(v: &[T]) -> &'_ [u8] {
-    // SAFETY: Any sized type can be reinterpreted as a byte slice of the same
-    // total length; the lifetime is tied to the input slice.
+    // SAFETY：任何有大小的类型都可以重新解释为相同总长度的字节切片；
+    // 生命周期与输入切片绑定。
     unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
 }
 
-/// Reinterprets a mutable slice of `T` as a mutable slice of bytes.
+/// 将 `T` 类型的可变切片重新解释为可变字节切片。
 pub fn array_as_u8_slice_mut<T: Sized>(v: &mut [T]) -> &'_ mut [u8] {
-    // SAFETY: See `array_as_u8_slice`. `T: Sized` means every bit pattern written
-    // through the byte view stays inside the original allocation.
+    // SAFETY：参见 `array_as_u8_slice`。`T: Sized` 保证通过字节视图写入的
+    // 任何位模式都保持在原始分配范围内。
     unsafe { std::slice::from_raw_parts_mut(v.as_mut_ptr() as *mut u8, std::mem::size_of_val(v)) }
 }
 
-/// Replaces Windows back slashes `\` with forward slashes `/`, so serialized paths
-/// stay portable across all OSes.
+/// 将路径中的 Windows 反斜杠 `\` 替换为正斜杠 `/`，
+/// 使序列化后的路径在所有操作系统上保持一致。
 pub fn replace_slashes<P: AsRef<Path>>(path: P) -> PathBuf {
     if path.as_ref().components().count() == 1 {
-        // The path is a single component, so there is nothing to replace.
+        // 路径只有一个组件，无需替换。
         path.as_ref().to_owned()
     } else {
         let mut result = PathBuf::new();

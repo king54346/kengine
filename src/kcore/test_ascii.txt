@@ -1,0 +1,73 @@
+FTAX:0;
+__ROOT__[]
+{
+	SharedResource[Id<u64:1>]
+	{
+		RcData[Data<u16:0>]
+		{
+			Kind[Id<u32:1>]
+			{
+				0[Data<u64:555>]{}
+			}
+		}
+	}
+	SharedResourceArc[Id<u64:2>]
+	{
+		ArcData[Data<u16:0>]
+		{
+			Kind[Id<u32:1>]
+			{
+				0[Data<u64:555>]{}
+			}
+		}
+	}
+	Objects[Length<u32:2>]
+	{
+		Item0[Boolean<bool:true>NumU8<u8:123>NumI8<i8:-123>NumU16<u16:123>NumI16<i16:-123>NumU32<u32:123>NumI32<i32:-123>NumU64<u64:123>NumI64<i64:-123>NumF32<f32:123.321>NumF64<f64:123.321>Quat<quat:-0.71828705; 0.31062245; 0.44443506; 0.43595284>Mat4<mat4:3; 0; 0; 0; 0; 3; 0; 0; 0; 0; 3; 0; 0; 0; 0; 1>Mat3<mat3:3; 0; 0; 0; 3; 0; 0; 0; 1>Uuid<uuid:51a582c0-30d7-4dbc-b5a0-da8ea186edce>Complex<complex:1; 0>Mat2<mat2:2; 0; 0; 1>Vec2U8<vec2u8:1; 2>Vec2I8<vec2i8:-1; -2>Vec2U16<vec2u16:1; 2>Vec2I16<vec2i16:-1; -2>Vec2U32<vec2u32:1; 2>Vec2I32<vec2i32:-1; -2>Vec2U64<vec2u64:1; 2>Vec2I64<vec2i64:-1; -2>Vec3U8<vec3u8:1; 2; 3>Vec3I8<vec3i8:-1; -2; -3>Vec3U16<vec3u16:1; 2; 3>Vec3I16<vec3i16:-1; -2; -3>Vec3U32<vec3u32:1; 2; 3>Vec3I32<vec3i32:-1; -2; -3>Vec3U64<vec3u64:1; 2; 3>Vec3I64<vec3i64:-1; -2; -3>Vec4U8<vec4u8:1; 2; 3; 4>Vec4I8<vec4i8:-1; -2; -3; -4>Vec4U16<vec4u16:1; 2; 3; 4>Vec4I16<vec4i16:-1; -2; -3; -4>Vec4U32<vec4u32:1; 2; 3; 4>Vec4I32<vec4i32:-1; -2; -3; -4>Vec4U64<vec4u64:1; 2; 3; 4>Vec4I64<vec4i64:-1; -2; -3; -4>String<str:"This Is A String With Reserved Characters <>:;{}[\\\\\] and \"quotes\" many \"\"\"quotes\"\"\"\" and line\nbreak	tabs				">Vec2F32<vec2f32:123.321; 234.432>Vec2F64<vec2f64:123.321; 234.432>Vec3F32<vec3f32:123.321; 234.432; 567.765>Vec3F64<vec3f64:123.321; 234.432; 567.765>Vec4F32<vec4f32:123.321; 234.432; 567.765; 890.098>Vec4F64<vec4f64:123.321; 234.432; 567.765; 890.098>]
+		{
+			Array[Length<u32:4>Item0<u8:1>Item1<u8:2>Item2<u8:3>Item3<u8:4>]{}
+			SharedResource[IsSome<u8:1>]
+			{
+				Data[Id<u64:1>]{}
+			}
+			SharedResourceArc[IsSome<u8:1>]
+			{
+				Data[Id<u64:2>]{}
+			}
+			Weaks[]
+			{
+				WeakResourceArc[IsSome<u8:1>]
+				{
+					Data[Id<u64:2>]{}
+				}
+				WeakResourceRc[IsSome<u8:1>]
+				{
+					Data[Id<u64:1>]{}
+				}
+			}
+		}
+		Item1[Boolean<bool:true>NumU8<u8:123>NumI8<i8:-123>NumU16<u16:123>NumI16<i16:-123>NumU32<u32:123>NumI32<i32:-123>NumU64<u64:123>NumI64<i64:-123>NumF32<f32:123.321>NumF64<f64:123.321>Quat<quat:-0.71828705; 0.31062245; 0.44443506; 0.43595284>Mat4<mat4:3; 0; 0; 0; 0; 3; 0; 0; 0; 0; 3; 0; 0; 0; 0; 1>Mat3<mat3:3; 0; 0; 0; 3; 0; 0; 0; 1>Uuid<uuid:51a582c0-30d7-4dbc-b5a0-da8ea186edce>Complex<complex:1; 0>Mat2<mat2:2; 0; 0; 1>Vec2U8<vec2u8:1; 2>Vec2I8<vec2i8:-1; -2>Vec2U16<vec2u16:1; 2>Vec2I16<vec2i16:-1; -2>Vec2U32<vec2u32:1; 2>Vec2I32<vec2i32:-1; -2>Vec2U64<vec2u64:1; 2>Vec2I64<vec2i64:-1; -2>Vec3U8<vec3u8:1; 2; 3>Vec3I8<vec3i8:-1; -2; -3>Vec3U16<vec3u16:1; 2; 3>Vec3I16<vec3i16:-1; -2; -3>Vec3U32<vec3u32:1; 2; 3>Vec3I32<vec3i32:-1; -2; -3>Vec3U64<vec3u64:1; 2; 3>Vec3I64<vec3i64:-1; -2; -3>Vec4U8<vec4u8:1; 2; 3; 4>Vec4I8<vec4i8:-1; -2; -3; -4>Vec4U16<vec4u16:1; 2; 3; 4>Vec4I16<vec4i16:-1; -2; -3; -4>Vec4U32<vec4u32:1; 2; 3; 4>Vec4I32<vec4i32:-1; -2; -3; -4>Vec4U64<vec4u64:1; 2; 3; 4>Vec4I64<vec4i64:-1; -2; -3; -4>String<str:"This Is A String With Reserved Characters <>:;{}[\\\\\] and \"quotes\" many \"\"\"quotes\"\"\"\" and line\nbreak	tabs				">Vec2F32<vec2f32:123.321; 234.432>Vec2F64<vec2f64:123.321; 234.432>Vec3F32<vec3f32:123.321; 234.432; 567.765>Vec3F64<vec3f64:123.321; 234.432; 567.765>Vec4F32<vec4f32:123.321; 234.432; 567.765; 890.098>Vec4F64<vec4f64:123.321; 234.432; 567.765; 890.098>]
+		{
+			Array[Length<u32:4>Item0<u8:1>Item1<u8:2>Item2<u8:3>Item3<u8:4>]{}
+			SharedResource[IsSome<u8:1>]
+			{
+				Data[Id<u64:1>]{}
+			}
+			SharedResourceArc[IsSome<u8:1>]
+			{
+				Data[Id<u64:2>]{}
+			}
+			Weaks[]
+			{
+				WeakResourceArc[IsSome<u8:1>]
+				{
+					Data[Id<u64:2>]{}
+				}
+				WeakResourceRc[IsSome<u8:1>]
+				{
+					Data[Id<u64:1>]{}
+				}
+			}
+		}
+	}
+}

@@ -1,4 +1,4 @@
-//! Possible errors that may occur during serialization/deserialization.
+//! 序列化/反序列化过程中可能发生的错误。
 
 use crate::io::FileError;
 use crate::visitor::Visitor;
@@ -10,92 +10,82 @@ use std::{
     string::FromUtf8Error,
 };
 
-/// Errors that may occur while reading or writing [`crate::visitor::Visitor`].
+/// 读写 [`crate::visitor::Visitor`] 时可能发生的错误。
 #[derive(Debug)]
 pub enum VisitError {
-    /// An error that occured for multiple reasons, when there are multiple potential ways
-    /// to visit a node, and all of them lead to errors.
+    /// 多种原因导致的错误集合（当有多种访问方式且均失败时产生）。
     Multiple(Vec<VisitError>),
-    /// An [std::io::Error] occured while reading or writing a file with Visitor data.
+    /// 读写 Visitor 数据文件时发生的 I/O 错误。
     Io(std::io::Error),
-    /// When a field is encoded as bytes, the field data is prefixed by an identifying byte
-    /// to allow the bytes to be decoded. This error happens when an identifying byte is
-    /// expected during decoding, but an unknown value is found in that byte.
+    /// 字段以字节形式编码时，字节前缀用于标识字段类型；
+    /// 此错误表示解码时在该字节位置发现了未知值。
     UnknownFieldType(u8),
-    /// Attempting to visit a field on a read-mode Visitor when no field in the visitor data
-    /// has the given name.
+    /// 在读取模式下访问一个不存在的字段名。
     FieldDoesNotExist(String),
-    /// Attempting to visit a field on a write-mode Visitor when a field already has the
-    /// given name.
+    /// 在写入模式下访问一个已存在的字段名（重复）。
     FieldAlreadyExists(String),
-    /// Attempting to enter a region on a write-mode Visitor when a region already has the
-    /// given name.
+    /// 在写入模式下进入一个已存在的区域（重复）。
     RegionAlreadyExists(String),
-    /// Current node handle is invalid and does not lead to a real node.
+    /// 当前节点句柄无效，不指向任何真实节点。
     InvalidCurrentNode,
-    /// Attempting to visit a field using a read-mode Visitor when that field was originally
-    /// written using a value of a different type.
+    /// 在读取模式下访问字段时，该字段原本是以不同类型写入的。
     FieldTypeDoesNotMatch {
-        /// expected [`crate::visitor::FieldKind`] variant name, for instance "FieldKind::F64"
+        /// 预期的 [`crate::visitor::FieldKind`] 变体名，例如 "FieldKind::F64"。
         expected: &'static str,
-        /// Debug representation of actual [`crate::visitor::FieldKind`]
+        /// 实际 [`crate::visitor::FieldKind`] 的 Debug 表示。
         actual: String,
     },
-    /// Attempting to enter a region on a read-mode Visitor when no region in the visitor's data
-    /// has the given name.
+    /// 在读取模式下进入一个不存在的区域。
     RegionDoesNotExist(String),
-    /// The Visitor tried to leave is current node, but somehow it had no current node. This should never happen.
+    /// Visitor 尝试离开当前节点，但没有当前节点（正常情况下不应发生）。
     NoActiveNode,
-    /// The [`crate::Visitor::MAGIC_BINARY_CURRENT`], [`crate::Visitor::MAGIC_ASCII_CURRENT`].
-    /// bytes were missing from the beginning of encoded Visitor data.
+    /// Visitor 数据开头缺少魔数（[`crate::Visitor::MAGIC_BINARY_CURRENT`] 或
+    /// [`crate::Visitor::MAGIC_ASCII_CURRENT`]）。
     NotSupportedFormat,
-    /// Some sequence of bytes was not in UTF8 format.
+    /// 某段字节序列不是合法的 UTF-8 格式。
     InvalidName,
-    /// Visitor data can be self-referential, such as when the data contains multiple `Rc` references
-    /// to a single shared value. This causes the visitor to store the data once and then later references
-    /// to the same value point back to its first occurrence. This error occurs if one of these references
-    /// points to a value of the wrong type.
+    /// Visitor 数据可能存在自引用（如多个 `Rc` 指向同一共享值）。
+    /// 此时 Visitor 只存储一次数据，后续引用回指到首次出现位置。
+    /// 此错误表示某个引用回指到了类型不匹配的值。
     TypeMismatch {
-        /// The type that was visiting when the error occurred.
+        /// 发生错误时正在访问的类型。
         expected: &'static str,
-        /// The type that was stored in the `Rc` or `Arc`.
+        /// `Rc` 或 `Arc` 中实际存储的类型。
         actual: &'static str,
     },
-    /// Attempting to visit a mutably borrowed RefCell.
+    /// 尝试访问一个已被可变借用的 RefCell。
     RefCellAlreadyMutableBorrowed,
-    /// A plain-text error message that could indicate almost anything.
+    /// 纯文本错误消息，可表示几乎任何情况。
     User(String),
-    /// `Rc` and `Arc` values store an "Id" value in the Visitor data which is based in their internal pointer.
-    /// This error indicates that while reading this data, one of those Id values was discovered by be 0.
+    /// `Rc` 和 `Arc` 在 Visitor 数据中存储基于内部指针的 ID；
+    /// 此错误表示读取时发现某个 ID 值为 0。
     UnexpectedRcNullIndex,
-    /// A poison error occurred while trying to visit a mutex.
+    /// 尝试访问互斥锁时发生毒化错误。
     PoisonedMutex,
-    /// A FileLoadError was encountered while trying to decode Visitor data from a file.
+    /// 尝试从文件解码 Visitor 数据时遇到文件加载错误。
     FileLoadError(FileError),
-    /// Integer parsing error.
+    /// 整数解析错误。
     ParseIntError(ParseIntError),
-    /// Floating point number parsing error.
+    /// 浮点数解析错误。
     ParseFloatError(ParseFloatError),
-    /// An error occurred when trying to decode base64-encoded data.
+    /// Base64 数据解码错误。
     DecodeError(DecodeError),
-    /// An error occurred when trying to parse uuid from a string.
+    /// UUID 字符串解析错误。
     UuidError(uuid::Error),
-    /// Arbitrary error.
+    /// 任意错误。
     Any(Box<dyn Error + Send + Sync>),
-    /// Unhandled enum variant. Typically, means that a match arm of non-exhaustive pattern is not
-    /// handled.
+    /// 未处理的枚举变体（通常意味着非穷举匹配中缺少某个分支）。
     UnhandledEnumVariant,
 }
 
 impl Error for VisitError {}
 
 impl VisitError {
-    /// Create a [`VisitError::FieldDoesNotExist`] containing the given field name and the
-    /// breadcrumbs of the current visitor node.
+    /// 创建包含字段名和当前 Visitor 节点路径的 [`VisitError::FieldDoesNotExist`]。
     pub fn field_does_not_exist(name: &str, visitor: &Visitor) -> Self {
         Self::FieldDoesNotExist(visitor.breadcrumbs() + " > " + name)
     }
-    /// Create an error from two errors.
+    /// 将两个错误合并为一个 [`VisitError::Multiple`]。
     pub fn multiple(self, other: Self) -> Self {
         match (self, other) {
             (Self::Multiple(mut a), Self::Multiple(mut b)) => {
@@ -119,44 +109,40 @@ impl Display for VisitError {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         match self {
             Self::Multiple(errs) => {
-                write!(f, "multiple errors:[")?;
+                write!(f, "多个错误：[")?;
                 for err in errs {
                     write!(f, "{err};")?;
                 }
                 write!(f, "]")
             }
-            Self::Io(io) => write!(f, "io error: {io}"),
-            Self::UnknownFieldType(type_index) => write!(f, "unknown field type {type_index}"),
-            Self::FieldDoesNotExist(name) => write!(f, "field does not exist: {name}"),
-            Self::FieldAlreadyExists(name) => write!(f, "field already exists {name}"),
-            Self::RegionAlreadyExists(name) => write!(f, "region already exists {name}"),
-            Self::InvalidCurrentNode => write!(f, "invalid current node"),
+            Self::Io(io) => write!(f, "I/O 错误：{io}"),
+            Self::UnknownFieldType(type_index) => write!(f, "未知字段类型 {type_index}"),
+            Self::FieldDoesNotExist(name) => write!(f, "字段不存在：{name}"),
+            Self::FieldAlreadyExists(name) => write!(f, "字段已存在：{name}"),
+            Self::RegionAlreadyExists(name) => write!(f, "区域已存在：{name}"),
+            Self::InvalidCurrentNode => write!(f, "无效的当前节点"),
             Self::FieldTypeDoesNotMatch { expected, actual } => write!(
                 f,
-                "field type does not match. expected: {expected}, actual: {actual}"
+                "字段类型不匹配。预期：{expected}，实际：{actual}"
             ),
-            Self::RegionDoesNotExist(name) => write!(f, "region does not exist: {name}"),
-            Self::NoActiveNode => write!(f, "no active node"),
-            Self::NotSupportedFormat => write!(f, "not supported format"),
-            Self::InvalidName => write!(f, "invalid name"),
+            Self::RegionDoesNotExist(name) => write!(f, "区域不存在：{name}"),
+            Self::NoActiveNode => write!(f, "无活跃节点"),
+            Self::NotSupportedFormat => write!(f, "不支持的格式"),
+            Self::InvalidName => write!(f, "非法名称"),
             Self::TypeMismatch { expected, actual } => {
-                write!(f, "type mismatch. expected: {expected}, actual: {actual}")
+                write!(f, "类型不匹配。预期：{expected}，实际：{actual}")
             }
-            Self::RefCellAlreadyMutableBorrowed => write!(f, "ref cell already mutable borrowed"),
-            Self::User(msg) => write!(f, "user defined error: {msg}"),
-            Self::UnexpectedRcNullIndex => write!(f, "unexpected rc null index"),
-            Self::PoisonedMutex => write!(f, "attempt to lock poisoned mutex"),
-            Self::FileLoadError(e) => write!(f, "file load error: {e:?}"),
-            Self::ParseIntError(e) => write!(f, "unable to parse integer: {e:?}"),
-            Self::ParseFloatError(e) => write!(f, "unable to parse float: {e:?}"),
-            Self::DecodeError(e) => write!(f, "base64 decoding error: {e:?}"),
-            Self::UuidError(e) => write!(f, "uuid error: {e:?}"),
-            Self::Any(e) => {
-                write!(f, "{e}")
-            }
-            VisitError::UnhandledEnumVariant => {
-                write!(f, "unhandled enum variant")
-            }
+            Self::RefCellAlreadyMutableBorrowed => write!(f, "RefCell 已被可变借用"),
+            Self::User(msg) => write!(f, "用户自定义错误：{msg}"),
+            Self::UnexpectedRcNullIndex => write!(f, "Rc 空索引（意外）"),
+            Self::PoisonedMutex => write!(f, "尝试锁定已毒化的互斥锁"),
+            Self::FileLoadError(e) => write!(f, "文件加载错误：{e:?}"),
+            Self::ParseIntError(e) => write!(f, "无法解析整数：{e:?}"),
+            Self::ParseFloatError(e) => write!(f, "无法解析浮点数：{e:?}"),
+            Self::DecodeError(e) => write!(f, "Base64 解码错误：{e:?}"),
+            Self::UuidError(e) => write!(f, "UUID 错误：{e:?}"),
+            Self::Any(e) => write!(f, "{e}"),
+            VisitError::UnhandledEnumVariant => write!(f, "未处理的枚举变体"),
         }
     }
 }

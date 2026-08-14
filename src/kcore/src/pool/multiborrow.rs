@@ -42,8 +42,8 @@ where
     T: ?Sized,
 {
     fn drop(&mut self) {
-        // SAFETY: This is safe, because this ref lifetime is managed by the borrow checker,
-        // so it cannot outlive the pool record.
+        // SAFETY：安全，因为此引用的生命周期由借用检查器管理，
+        // 不可能超过对应的 pool 记录的生命周期。
         unsafe {
             self.ref_counter.decrement();
         }
@@ -93,16 +93,14 @@ where
     T: ?Sized,
 {
     fn drop(&mut self) {
-        // SAFETY: This is safe, because this ref lifetime is managed by the borrow checker,
-        // so it cannot outlive the pool record.
+        // SAFETY：安全，原因同上。
         unsafe {
             self.ref_counter.increment();
         }
     }
 }
 
-/// Multi-borrow context allows you to get as many **unique** references to elements in
-/// a pool as you want.
+/// 多借用上下文，允许同时获取对象池中任意数量的**唯一**引用。
 pub struct MultiBorrowContext<'a, T, P = Option<T>>
 where
     T: Sized,
@@ -158,7 +156,7 @@ where
             return Err(PoolError::MutablyBorrowed(handle.into()));
         }
 
-        // SAFETY: We've enforced borrowing rules by the previous check.
+        // SAFETY：已通过前面的检查强制借用规则。
         let payload_container = unsafe { &*record.payload.0.get() };
 
         let Some(payload) = payload_container.as_ref() else {
@@ -176,12 +174,10 @@ where
         })
     }
 
-    /// Tries to get a mutable reference to a pool element located at the given handle. The method could
-    /// fail in the two main reasons:
+    /// 尝试获取指定句柄对应池元素的不可变引用。以下两种情况会失败：
     ///
-    /// 1) A reference to an element is already taken - returning multiple mutable references to the
-    /// same element is forbidden by Rust safety rules.
-    /// 2) A given handle is invalid.
+    /// 1) 该元素已被可变借用——Rust 安全规则禁止。
+    /// 2) 给定句柄无效。
     #[inline]
     pub fn try_get<'b, U>(&'b self, handle: Handle<U>) -> Result<Ref<'a, 'b, U>, PoolError>
     where
@@ -231,15 +227,14 @@ where
             _ => (),
         }
 
-        // SAFETY: We've enforced borrowing rules by the previous check.
+        // SAFETY：已通过前面的检查强制借用规则。
         let payload_container = unsafe { &mut *record.payload.0.get() };
 
         let Some(payload) = payload_container.as_mut() else {
             return Err(PoolError::Empty(handle.into()));
         };
 
-        // SAFETY: It is safe to access the counter because of borrow checker guarantees that
-        // the record is alive.
+        // SAFETY：借用检查器保证记录仍然存活，因此访问计数器是安全的。
         unsafe {
             record.ref_counter.decrement();
         }
@@ -279,9 +274,8 @@ where
             return Err(PoolError::InvalidGeneration(handle.generation));
         }
 
-        // The record must be non-borrowed to be freed.
-        // SAFETY: It is safe to access the counter because of borrow checker guarantees that
-        // the record is alive.
+        // 释放前记录不能处于借用状态。
+        // SAFETY：借用检查器保证记录仍然存活，因此访问计数器是安全的。
         let current_ref_count = unsafe { record.ref_counter.get() };
         match current_ref_count.cmp(&0) {
             Ordering::Less => {
@@ -293,7 +287,7 @@ where
             _ => (),
         }
 
-        // SAFETY: We've enforced borrowing rules by the previous check.
+        // SAFETY：已通过前面的检查强制借用规则。
         let payload_container = unsafe { &mut *record.payload.0.get() };
 
         let Some(payload) = payload_container.take() else {
@@ -311,8 +305,8 @@ where
     T: Sized + Reflect,
     P: PayloadContainer<Element = T> + 'static,
 {
-    /// Tries to borrow a node at the given handle and downcast it to the specified type. If downcasting
-    /// it is not possible, tries to find a field of the specified type.
+    /// 尝试借用指定句柄的节点，并向下转型为指定类型。
+    /// 若转型失败，则尝试查找该类型的字段。
     #[inline]
     pub fn try_get_or_field_ref<'b: 'a, C>(
         &'b self,
@@ -328,8 +322,8 @@ where
         })
     }
 
-    /// Tries to borrow a node at the given handle and downcast it to the specified type. If downcasting
-    /// it is not possible, tries to find a field of the specified type.
+    /// 尝试借用指定句柄的节点，并向下转型为指定类型（可变版本）。
+    /// 若转型失败，则尝试查找该类型的字段。
     #[inline]
     pub fn try_get_or_field_mut<'b: 'a, C>(
         &'b self,
@@ -372,7 +366,7 @@ mod test {
 
         let ctx = pool.begin_multi_borrow();
 
-        // Test empty.
+        // 测试空槽位。
         {
             assert_eq!(
                 ctx.try_get(d).as_deref(),
@@ -384,7 +378,7 @@ mod test {
             );
         }
 
-        // Test immutable borrowing of the same element.
+        // 测试对同一元素的多个不可变借用。
         {
             let ref_a_1 = ctx.try_get(a);
             let ref_a_2 = ctx.try_get(a);
@@ -392,7 +386,7 @@ mod test {
             assert_eq!(ref_a_2.as_deref(), Ok(&val_a));
         }
 
-        // Test immutable borrowing of the same element with the following mutable borrowing.
+        // 测试先不可变借用、再尝试可变借用同一元素。
         {
             let ref_a_1 = ctx.try_get(a);
             assert_eq!(unsafe { ref_a_1.as_ref().unwrap().ref_counter.get() }, 1);
@@ -418,15 +412,15 @@ mod test {
             );
         }
 
-        // Test immutable and mutable borrowing.
+        // 测试不可变借用与可变借用混合。
         {
-            // Borrow two immutable refs to the same element.
+            // 对同一元素取两个不可变引用。
             let ref_a_1 = ctx.try_get(a);
             let ref_a_2 = ctx.try_get(a);
             assert_eq!(ref_a_1.as_deref(), Ok(&val_a));
             assert_eq!(ref_a_2.as_deref(), Ok(&val_a));
 
-            // Borrow immutable ref to other element.
+            // 对另一元素取可变引用。
             let mut ref_b_1 = ctx.try_get_mut(b);
             let mut ref_b_2 = ctx.try_get_mut(b);
             assert_eq!(ref_b_1.as_deref_mut(), Ok(&mut val_b));
