@@ -203,7 +203,7 @@ mod test {
 
     #[test]
     fn sphere_aabb_is_unit_cube() {
-        let aabb = Mesh::sphere(16, 24).compute_aabb();
+        let aabb = Mesh::sphere(16, 24).aabb();
 
         assert!((aabb.size() - Vec3::ONE).length() < 1e-3);
     }

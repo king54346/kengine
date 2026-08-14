@@ -1,4 +1,12 @@
-//! 场景图：一棵由 [`Node`] 组成的树，底层用 [`kcore::pool::Pool`] 存储。
+//! kscene —— 场景图。
+//!
+//! 一棵由 [`Node`] 组成的树，底层用 [`kcore::pool::Pool`] 存储。
+//! 节点持有局部变换，世界变换与包围盒由 [`Scene::update`] 沿树自上而下算出。
+//!
+//! 本 crate **不依赖 wgpu**：渲染器通过 [`Scene::visible_meshes`] 拿到中立的
+//! 绘制项列表，场景图本身不知道渲染后端的存在。
+
+#![warn(missing_docs)]
 
 mod node;
 mod transform;
@@ -13,6 +21,7 @@ use kcore::pool::{Handle, Pool};
 use kgltf::Model;
 use kmaterial::Material;
 use kmath::{Mat4, Vec3};
+use kpbr::Environment;
 use std::ops::{Index, IndexMut};
 
 /// 场景的方向光设置。
@@ -24,8 +33,10 @@ pub struct Lighting {
     pub direction: Vec3,
     /// 光照颜色。
     pub color: Vec3,
-    /// 环境光强度，避免背光面全黑。
-    pub ambient: f32,
+    /// 光照强度。PBR 下高光很依赖它，太低会显得整体发灰。
+    pub intensity: f32,
+    /// 环境光。避免背光面全黑，暂时代替尚未实现的 IBL。
+    pub environment: Environment,
 }
 
 impl Default for Lighting {
@@ -33,16 +44,25 @@ impl Default for Lighting {
         Self {
             direction: Vec3::new(-0.5, -1.0, -0.3).normalize(),
             color: Vec3::ONE,
-            ambient: 0.12,
+            intensity: 3.0,
+            environment: Environment::default(),
         }
     }
 }
 
 /// 渲染器每帧收集到的一个绘制项。
-pub(crate) struct RenderItem<'a> {
+///
+/// 这是场景图与渲染器之间的唯一接口——渲染器不认识 [`Node`]，
+/// 只消费这份中立的列表，因此两者不会互相纠缠。
+#[derive(Debug)]
+pub struct RenderItem<'a> {
+    /// 待绘制的网格。
     pub mesh: &'a Mesh,
+    /// 材质；为 [`None`] 时渲染器使用标准材质。
     pub material: Option<&'a Material>,
+    /// 世界变换矩阵。
     pub transform: Mat4,
+    /// 世界空间包围盒，用于剔除。
     pub aabb: Aabb,
 }
 
@@ -271,7 +291,7 @@ impl Scene {
     }
 
     /// 场景中第一个启用且可见的相机，返回（世界变换, 相机参数）。
-    pub(crate) fn active_camera(&self) -> Option<(Mat4, Camera)> {
+    pub fn active_camera(&self) -> Option<(Mat4, Camera)> {
         self.nodes.iter().find_map(|node| match node.camera() {
             Some(camera) if camera.enabled && node.global_visible => {
                 Some((node.global_transform, *camera))
@@ -281,7 +301,7 @@ impl Scene {
     }
 
     /// 遍历所有需要绘制的节点。
-    pub(crate) fn visible_meshes(&self) -> impl Iterator<Item = RenderItem<'_>> {
+    pub fn visible_meshes(&self) -> impl Iterator<Item = RenderItem<'_>> {
         self.nodes.iter().filter_map(|node| {
             node.mesh()
                 .filter(|_| node.global_visible)

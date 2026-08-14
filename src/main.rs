@@ -72,7 +72,7 @@ struct Game {
 }
 
 impl Plugin for Game {
-    fn init(&mut self, ctx: &mut PluginContext) {
+    fn init(&mut self, ctx: &mut Context) {
         // ── 输入映射：逻辑里只认动作名，不认具体按键 ──
         let bindings = ctx.input.bindings_mut();
         bindings.bind_action("pause", KeyCode::Space);
@@ -103,8 +103,8 @@ impl Plugin for Game {
             Node::new("Camera")
                 .with_camera(Camera::default())
                 .with_transform(Transform::looking_at(
-                    Vec3::new(0.0, 2.0, 5.0),
-                    Vec3::ZERO,
+                    Vec3::new(0.0, 2.6, 8.0),
+                    Vec3::new(0.0, 1.6, 0.0),
                     Vec3::Y,
                 )),
         );
@@ -149,6 +149,34 @@ impl Plugin for Game {
                 .with_scale(Vec3::splat(8.0)),
         );
 
+        // PBR 参数网格：横向粗糙度递增，纵向从电介质到金属。
+        // 这是检验 PBR 是否正确最直观的排布。
+        let sphere = Mesh::sphere(24, 32);
+        const COLUMNS: usize = 7;
+        const ROWS: usize = 2;
+        for row in 0..ROWS {
+            let metallic = row as f32 / (ROWS - 1) as f32;
+            for column in 0..COLUMNS {
+                // 粗糙度不取到 0，完全光滑的表面在只有一盏方向光时几乎全黑。
+                let roughness = 0.05 + column as f32 / (COLUMNS - 1) as f32 * 0.95;
+                ctx.scene.add_node(
+                    Node::new(format!("Pbr{row}_{column}"))
+                        .with_mesh(sphere.clone())
+                        .with_material(if metallic > 0.5 {
+                            PbrMaterial::metal(Vec3::new(1.0, 0.766, 0.336), roughness)
+                        } else {
+                            PbrMaterial::dielectric(Vec3::new(0.24, 0.42, 0.85), roughness)
+                        })
+                        .with_position(Vec3::new(
+                            (column as f32 - (COLUMNS - 1) as f32 / 2.0) * 1.3,
+                            2.4 + row as f32 * 1.3,
+                            -3.0,
+                        ))
+                        .with_scale(Vec3::splat(1.1)),
+                );
+            }
+        }
+
         // 一圈球体，其中大半在视野外——用来观察视锥剔除是否真的生效。
         let ring_mesh = Mesh::sphere(12, 18);
         for index in 0..48 {
@@ -157,11 +185,7 @@ impl Plugin for Game {
             ctx.scene.add_node(
                 Node::new(format!("Ring{index}"))
                     .with_mesh(ring_mesh.clone())
-                    .with_material(
-                        Material::standard()
-                            .with_base_color(Vec4::new(0.4, 0.9, 0.5, 1.0))
-                            .with_roughness(0.4),
-                    )
+                    .with_material(PbrMaterial::dielectric(Vec3::new(0.4, 0.9, 0.5), 0.4))
                     .with_position(Vec3::new(
                         angle.cos() * radius,
                         -0.4,
@@ -173,7 +197,7 @@ impl Plugin for Game {
         klog::info!("WASD 移动，Q/E 升降，空格暂停，R 重置，C 打印剔除统计，Esc 退出");
     }
 
-    fn update(&mut self, ctx: &mut PluginContext) {
+    fn update(&mut self, ctx: &mut Context) {
         // glTF 模型在后台加载，就绪的那一帧实例化进场景。
         if !self.model_spawned
             && let Some(handle) = &self.model
@@ -251,7 +275,20 @@ impl Plugin for Game {
 fn main() {
     klog::init(None);
 
-    let mut executor = Executor::new().with_title("kengine demo");
-    executor.add_plugin(Game::default());
-    executor.run();
+    // 除了完整插件，也可以往指定阶段直接挂一段逻辑。
+    // 这里演示在帧末统计平均帧率——物理、动画这类系统同样按这种方式接入。
+    let mut frames = 0u32;
+    let mut next_report = 5.0;
+
+    App::new()
+        .with_title("kengine demo")
+        .add_plugin(Game::default())
+        .add_system(Stage::FrameEnd, move |ctx| {
+            frames += 1;
+            if ctx.elapsed >= next_report {
+                klog::info!("平均帧率：{:.0} FPS", frames as f32 / ctx.elapsed);
+                next_report += 5.0;
+            }
+        })
+        .run();
 }

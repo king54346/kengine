@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "src/kapp",
     "src/kasset",
     "src/kcamera",
     "src/kcore",
@@ -9,6 +10,10 @@ members = [
     "src/kgltf",
     "src/kmaterial",
     "src/kmesh",
+    "src/kpbr",
+    "src/krender",
+    "src/kscene",
+    "src/kwinit",
     "src/kmath",
     "src/kshader",
     "src/ktask",
@@ -21,20 +26,21 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bytemuck = { version = "1.25.2", features = ["derive"] }
+kapp = { path = "src/kapp" }
 kasset = { path = "src/kasset" }
 kcamera = { path = "src/kcamera" }
 kcore = { path = "src/kcore" }
-kinput = { path = "src/kinput" }
-klog  = { path = "src/klog" }
 kgltf = { path = "src/kgltf" }
+kinput = { path = "src/kinput" }
+klog = { path = "src/klog" }
 kmaterial = { path = "src/kmaterial" }
-kmesh = { path = "src/kmesh" }
 kmath = { path = "src/kmath" }
+kmesh = { path = "src/kmesh" }
+kpbr = { path = "src/kpbr" }
+krender = { path = "src/krender" }
+kscene = { path = "src/kscene" }
 kshader = { path = "src/kshader" }
 ktask = { path = "src/ktask" }
 ktexture = { path = "src/ktexture" }
-pollster = "1.0.1"
-wgpu = "30.0.0"
+kwinit = { path = "src/kwinit" }
 winit = "0.30.13"
-

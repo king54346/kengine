@@ -1034,6 +1034,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kapp"
+version = "0.1.0"
+dependencies = [
+ "kasset",
+ "kinput",
+ "klog",
+ "krender",
+ "kscene",
+ "kwinit",
+ "pollster",
+ "winit",
+]
+
+[[package]]
 name = "kasset"
 version = "0.1.0"
 dependencies = [
@@ -1086,7 +1100,7 @@ dependencies = [
 name = "kengine"
 version = "0.1.0"
 dependencies = [
- "bytemuck",
+ "kapp",
  "kasset",
  "kcamera",
  "kcore",
@@ -1096,11 +1110,13 @@ dependencies = [
  "kmaterial",
  "kmath",
  "kmesh",
+ "kpbr",
+ "krender",
+ "kscene",
  "kshader",
  "ktask",
  "ktexture",
- "pollster",
- "wgpu",
+ "kwinit",
  "winit",
 ]
 
@@ -1184,6 +1200,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "kpbr"
+version = "0.1.0"
+dependencies = [
+ "kmaterial",
+ "kmath",
+ "kshader",
+]
+
+[[package]]
+name = "krender"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "kcamera",
+ "kcore",
+ "klog",
+ "kmaterial",
+ "kmath",
+ "kmesh",
+ "kpbr",
+ "kscene",
+ "kshader",
+ "ktexture",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "kscene"
+version = "0.1.0"
+dependencies = [
+ "kcamera",
+ "kcore",
+ "kgltf",
+ "kmaterial",
+ "kmath",
+ "kmesh",
+ "kpbr",
+]
+
+[[package]]
 name = "kshader"
 version = "0.1.0"
 dependencies = [
@@ -1213,6 +1270,14 @@ dependencies = [
  "kasset",
  "kcore",
  "klog",
+]
+
+[[package]]
+name = "kwinit"
+version = "0.1.0"
+dependencies = [
+ "klog",
+ "winit",
 ]
 
 [[package]]
