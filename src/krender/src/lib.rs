@@ -20,7 +20,7 @@ use particle::ParticleResources;
 use post::PostProcess;
 use kparticle::GpuParticle;
 use klight::{GpuLight, MAX_LIGHTS, shadow::ShadowSettings};
-use kmesh::Vertex;
+use kmesh::{MorphDelta, SkinVertex, Vertex};
 use kscene::Scene;
 
 /// 顶点属性布局。字段顺序必须与 [`Vertex`] 及着色器的 `@location` 一致。
@@ -37,6 +37,21 @@ fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
         array_stride: size_of::<Vertex>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &VERTEX_ATTRIBUTES,
+    }
+}
+
+/// 蒙皮属性的布局。关节号用 `Uint16x4`——骨架不会有六万根骨头，
+/// 用 u32 只是白白让每个顶点多背 8 个字节。
+const SKIN_ATTRIBUTES: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![
+    5 => Uint16x4,
+    6 => Float32x4,
+];
+
+fn skin_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: size_of::<SkinVertex>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &SKIN_ATTRIBUTES,
     }
 }
 use bytemuck::{Pod, Zeroable};
@@ -80,6 +95,9 @@ struct ShadowGlobals {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ShadowObject {
     model: [[f32; 4]; 4],
+    /// x = 骨骼矩阵起点，其余为对齐填充。深度 pass 也要蒙皮，
+    /// 否则角色动起来了，影子还保持绑定姿态。
+    skin: [u32; 4],
 }
 
 /// 天空 pass 的全局量，对应 `sky.wgsl` 的 `SkyGlobals`。
@@ -103,13 +121,24 @@ struct ObjectUniforms {
     normal_scale: f32,
     occlusion_strength: f32,
     emissive: [f32; 4],
+    /// x = 本实例的骨骼矩阵在全局数组里的起点，其余为对齐填充。
+    ///
+    /// 蒙皮实例各有一套骨骼矩阵，但它们拼在同一个缓冲里，
+    /// 靠这个偏移各取各的——于是同一个蒙皮网格的多个实例仍然能合批。
+    skin: [u32; 4],
 }
 
 /// 已上传显存的网格。
 struct GpuMesh {
     vertex_buffer: wgpu::Buffer,
+    /// 蒙皮属性，作为第二个顶点缓冲。静态网格没有。
+    skin_buffer: Option<wgpu::Buffer>,
     index_buffer: wgpu::Buffer,
     index_count: u32,
+    /// 本网格的形变增量在全局形变缓冲中的起点。
+    morph_offset: u32,
+    /// 形变目标数量，0 表示没有形变。
+    morph_count: u32,
 }
 
 /// 本帧一个待绘制对象。
@@ -117,6 +146,8 @@ struct DrawCall {
     mesh_id: Uuid,
     /// 材质贴图绑定组的缓存键（五张贴图 id 的组合）。
     texture_key: [Uuid; 5],
+    /// 是否走蒙皮管线。蒙皮与静态的顶点布局不同，不能混在一批里。
+    skinned: bool,
     uniforms: ObjectUniforms,
 }
 
@@ -128,6 +159,8 @@ struct DrawCall {
 struct Batch {
     mesh_id: Uuid,
     texture_key: [Uuid; 5],
+    /// 是否走蒙皮管线。
+    skinned: bool,
     /// 本批第一个实例在存储缓冲中的下标。
     first: u32,
     /// 实例数量。
@@ -180,8 +213,11 @@ fn build_batches(draws: &[DrawCall], instances: &mut Vec<ObjectUniforms>) -> Vec
     let mut order: Vec<u32> = (0..draws.len() as u32).collect();
     order.sort_unstable_by(|&a, &b| {
         let (a, b) = (&draws[a as usize], &draws[b as usize]);
-        a.mesh_id
-            .cmp(&b.mesh_id)
+        // 蒙皮排在最前：它决定用哪条管线，比网格和贴图更「贵」，
+        // 先按它分开能把管线切换降到一次。
+        a.skinned
+            .cmp(&b.skinned)
+            .then_with(|| a.mesh_id.cmp(&b.mesh_id))
             .then_with(|| a.texture_key.cmp(&b.texture_key))
     });
 
@@ -194,12 +230,17 @@ fn build_batches(draws: &[DrawCall], instances: &mut Vec<ObjectUniforms>) -> Vec
         instances.push(draw.uniforms);
         match batches.last_mut() {
             // 排序保证同一批的对象连续出现，所以只用跟上一批比。
-            Some(last) if last.mesh_id == draw.mesh_id && last.texture_key == draw.texture_key => {
+            Some(last)
+                if last.mesh_id == draw.mesh_id
+                    && last.texture_key == draw.texture_key
+                    && last.skinned == draw.skinned =>
+            {
                 last.count += 1;
             }
             _ => batches.push(Batch {
                 mesh_id: draw.mesh_id,
                 texture_key: draw.texture_key,
+                skinned: draw.skinned,
                 first: instances.len() as u32 - 1,
                 count: 1,
             }),
@@ -237,6 +278,23 @@ pub struct Renderer {
     object_bind_group: wgpu::BindGroup,
     /// 当前对象缓冲能容纳的实例数。
     object_capacity: u64,
+    /// 蒙皮管线。顶点布局多一路，只能单独开一条。
+    skinned_pipeline: wgpu::RenderPipeline,
+    /// 所有蒙皮实例的骨骼矩阵，拼在一个缓冲里。
+    joint_buffer: wgpu::Buffer,
+    joint_capacity: u64,
+    /// 逐帧复用的骨骼矩阵暂存区。
+    joint_scratch: Vec<[[f32; 4]; 4]>,
+    /// 所有带形变的网格的增量，按顶点优先排列，只增不减。
+    morph_buffer: wgpu::Buffer,
+    morph_capacity: u64,
+    /// 已经写进形变缓冲的元素数，新网格从这里往后追加。
+    morph_used: u64,
+    /// 每实例的形变权重，逐帧重写。
+    morph_weight_buffer: wgpu::Buffer,
+    morph_weight_capacity: u64,
+    /// 逐帧复用的权重暂存区。
+    morph_weight_scratch: Vec<f32>,
 
     /// 环境 BRDF 查找表，启动时在 CPU 上算好后上传。
     brdf_bind_group: wgpu::BindGroup,
@@ -299,11 +357,24 @@ struct ShadowResources {
     object_buffer: wgpu::Buffer,
     object_bind_group: wgpu::BindGroup,
     object_capacity: u64,
+    /// 蒙皮深度管线。
+    skinned_pipeline: wgpu::RenderPipeline,
+    joint_buffer: wgpu::Buffer,
+    joint_capacity: u64,
+    morph_buffer: wgpu::Buffer,
+    morph_capacity: u64,
+    morph_weight_buffer: wgpu::Buffer,
+    morph_weight_capacity: u64,
 }
 
 impl Renderer {
     /// 初始容量：够画 256 个物体，不够时自动翻倍。
     const INITIAL_CAPACITY: u64 = 256;
+    /// 骨骼矩阵的初始容量，够放几个中等骨架。
+    const INITIAL_JOINTS: u64 = 256;
+    /// 形变增量的初始容量。一上来就给大一点：一个带形变的网格
+    /// 动辄就是「顶点数 × 目标数」个元素。
+    const INITIAL_MORPH: u64 = 4096;
 
     /// 创建渲染器并配置交换链。
     pub async fn new(window: Arc<Window>) -> Self {
@@ -390,20 +461,64 @@ impl Renderer {
         // 同网格同贴图的对象因此能合并成一次绘制。
         let object_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("kengine object layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: NonZeroU64::new(size_of::<ObjectUniforms>() as u64),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(size_of::<ObjectUniforms>() as u64),
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                // 骨骼矩阵与对象数据同组：绑定组上限是 4，已经用满了
+                // （全局 / 对象 / 材质贴图 / BRDF+阴影），只能挤进来。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(size_of::<[[f32; 4]; 4]>() as u64),
+                    },
+                    count: None,
+                },
+                // 形变增量与形变权重。同样只能挤在 group(1) 里：绑定组上限是 4。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(size_of::<MorphDelta>() as u64),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(size_of::<f32>() as u64),
+                    },
+                    count: None,
+                },
+            ],
         });
 
-        let (object_buffer, object_bind_group) =
-            Self::create_object_storage(&device, &object_layout, Self::INITIAL_CAPACITY);
+        let joint_buffer = create_joint_storage(&device, Self::INITIAL_JOINTS);
+        let morph_buffer = create_morph_storage(&device, Self::INITIAL_MORPH);
+        let morph_weight_buffer = create_morph_weight_storage(&device, Self::INITIAL_CAPACITY);
+        let (object_buffer, object_bind_group) = Self::create_object_storage(
+            &device,
+            &object_layout,
+            Self::INITIAL_CAPACITY,
+            &joint_buffer,
+            &morph_buffer,
+            &morph_weight_buffer,
+        );
 
         // ── group(2)：材质贴图 ──
         // 材质贴图：基础色 / 法线 / 金属度粗糙度 / 遮蔽 / 自发光，共用一个采样器。
@@ -493,46 +608,24 @@ impl Renderer {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("kengine render pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Option::from(vertex_layout())],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    // 主 pass 画到 HDR 离屏目标，不是直接画到屏幕。
-                    format: post::HDR_FORMAT,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Option::from(true),
-                depth_compare: Option::from(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        // 静态与蒙皮各一条管线：两者的顶点布局不同（蒙皮多一路顶点缓冲），
+        // 而顶点布局是管线状态的一部分，没法在一条管线里切换。
+        let pipeline = create_standard_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            "vs_main",
+            &[Option::from(vertex_layout())],
+            "kengine render pipeline",
+        );
+        let skinned_pipeline = create_standard_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            "vs_skinned",
+            &[Option::from(vertex_layout()), Option::from(skin_layout())],
+            "kengine skinned pipeline",
+        );
 
         // ── 阴影 pass ──
         let shadow = create_shadow_resources(&device, ShadowSettings::default());
@@ -653,6 +746,16 @@ impl Renderer {
             object_buffer,
             object_bind_group,
             object_capacity: Self::INITIAL_CAPACITY,
+            skinned_pipeline,
+            joint_buffer,
+            joint_capacity: Self::INITIAL_JOINTS,
+            joint_scratch: Vec::new(),
+            morph_buffer,
+            morph_capacity: Self::INITIAL_MORPH,
+            morph_used: 0,
+            morph_weight_buffer,
+            morph_weight_capacity: Self::INITIAL_CAPACITY,
+            morph_weight_scratch: Vec::new(),
             brdf_bind_group,
             shadow,
             post,
@@ -809,11 +912,18 @@ impl Renderer {
         // 放在循环里等于每个对象都重新分配一遍。
         let default_material = Material::standard();
         let mut draws = Vec::with_capacity(visible.len());
+        // 所有蒙皮实例的骨骼矩阵拼进同一个数组，各实例记下自己的起点。
+        let mut joints = std::mem::take(&mut self.joint_scratch);
+        joints.clear();
+        let mut morph_weights = std::mem::take(&mut self.morph_weight_scratch);
+        morph_weights.clear();
         for item in visible {
             stats.triangles += item.mesh.triangle_count() as u32;
 
             let mesh = item.mesh;
             if !self.meshes.contains_key(&mesh.id()) {
+                // 形变增量是随网格一次性上传的静态数据，追加到全局缓冲末尾。
+                let (morph_offset, morph_count) = self.upload_morph_targets(mesh);
                 let gpu_mesh = GpuMesh {
                     vertex_buffer: self.device.create_buffer_init(
                         &wgpu::util::BufferInitDescriptor {
@@ -822,6 +932,15 @@ impl Renderer {
                             usage: wgpu::BufferUsages::VERTEX,
                         },
                     ),
+                    // 蒙皮属性单独一路顶点缓冲，静态网格没有这一路。
+                    skin_buffer: mesh.skin().map(|skin| {
+                        self.device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("kengine skin buffer"),
+                                contents: bytemuck::cast_slice(skin),
+                                usage: wgpu::BufferUsages::VERTEX,
+                            })
+                    }),
                     index_buffer: self.device.create_buffer_init(
                         &wgpu::util::BufferInitDescriptor {
                             label: Some("kengine index buffer"),
@@ -830,6 +949,8 @@ impl Renderer {
                         },
                     ),
                     index_count: mesh.index_count(),
+                    morph_offset,
+                    morph_count,
                 };
                 self.meshes.insert(mesh.id(), gpu_mesh);
             }
@@ -837,10 +958,36 @@ impl Renderer {
             let material = item.material.unwrap_or(&default_material);
             let texture_key = self.ensure_material_textures(material);
 
+            // 形变权重逐实例写进权重缓冲：同一个网格的两个实例可以有不同的表情。
+            let morph = self
+                .meshes
+                .get(&mesh.id())
+                .map(|gpu| (gpu.morph_offset, gpu.morph_count))
+                .unwrap_or((0, 0));
+            let weight_offset = morph_weights.len() as u32;
+            if morph.1 > 0 {
+                morph_weights.extend(
+                    (0..morph.1 as usize)
+                        .map(|index| item.morph_weights.get(index).copied().unwrap_or(0.0)),
+                );
+            }
+
+            // 只有网格自己也带蒙皮属性时才走蒙皮管线：
+            // 骨架挂在没有蒙皮顶点的网格上是导入出的错，按静态画至少不会崩。
+            let skin_offset = match item.skin.filter(|_| mesh.is_skinned()) {
+                Some(matrices) => {
+                    let offset = joints.len() as u32;
+                    joints.extend(matrices.iter().map(|m| m.to_cols_array_2d()));
+                    Some(offset)
+                }
+                None => None,
+            };
+
             let model = item.transform;
             draws.push(DrawCall {
                 mesh_id: mesh.id(),
                 texture_key,
+                skinned: skin_offset.is_some(),
                 uniforms: ObjectUniforms {
                     model: model.to_cols_array_2d(),
                     // 逆转置，保证非均匀缩放下法线方向仍然正确。
@@ -864,6 +1011,7 @@ impl Renderer {
                         .unwrap_or(Vec3::ZERO)
                         .extend(0.0)
                         .to_array(),
+                    skin: [skin_offset.unwrap_or(0), morph.0, morph.1, weight_offset],
                 },
             });
         }
@@ -873,14 +1021,66 @@ impl Renderer {
         let batches = build_batches(&draws, &mut instances);
         stats.draw_calls = batches.len() as u32;
 
+        // 骨骼矩阵超出容量时翻倍。它排在对象缓冲之前，
+        // 因为对象绑定组引用了骨骼缓冲，换了缓冲就得重建绑定组。
+        let joint_grew = joints.len() as u64 > self.joint_capacity;
+        if joint_grew {
+            let capacity = (joints.len() as u64).next_power_of_two();
+            self.joint_buffer = create_joint_storage(&self.device, capacity);
+            self.joint_capacity = capacity;
+        }
+
         // 对象数超出缓冲容量时翻倍扩容。
         if draws.len() as u64 > self.object_capacity {
             let capacity = (draws.len() as u64).next_power_of_two();
-            let (buffer, bind_group) =
-                Self::create_object_storage(&self.device, &self.object_layout, capacity);
+            let (buffer, bind_group) = Self::create_object_storage(
+                &self.device,
+                &self.object_layout,
+                capacity,
+                &self.joint_buffer,
+                &self.morph_buffer,
+                &self.morph_weight_buffer,
+            );
             self.object_buffer = buffer;
             self.object_bind_group = bind_group;
             self.object_capacity = capacity;
+        } else if joint_grew {
+            // 对象缓冲没换但骨骼缓冲换了，绑定组仍然指着旧的，得重建。
+            self.object_bind_group = create_object_bind_group(
+                &self.device,
+                &self.object_layout,
+                &self.object_buffer,
+                &self.joint_buffer,
+                &self.morph_buffer,
+                &self.morph_weight_buffer,
+            );
+        }
+
+        if !joints.is_empty() {
+            self.queue
+                .write_buffer(&self.joint_buffer, 0, bytemuck::cast_slice(&joints));
+        }
+
+        // 形变权重每帧重写；缓冲不够就翻倍，并重建引用它的绑定组。
+        if morph_weights.len() as u64 > self.morph_weight_capacity {
+            let capacity = (morph_weights.len() as u64).next_power_of_two();
+            self.morph_weight_buffer = create_morph_weight_storage(&self.device, capacity);
+            self.morph_weight_capacity = capacity;
+            self.object_bind_group = create_object_bind_group(
+                &self.device,
+                &self.object_layout,
+                &self.object_buffer,
+                &self.joint_buffer,
+                &self.morph_buffer,
+                &self.morph_weight_buffer,
+            );
+        }
+        if !morph_weights.is_empty() {
+            self.queue.write_buffer(
+                &self.morph_weight_buffer,
+                0,
+                bytemuck::cast_slice(&morph_weights),
+            );
         }
 
         // 一次写完整个数组。逐对象写在上万实例时，光是写入调用本身就很可观。
@@ -919,6 +1119,10 @@ impl Renderer {
         // 算进来的话读到的就是显示器刷新率，不是 CPU 的准备耗时。
         stats.prepare_micros = prepare_start.elapsed().as_micros() as u32;
         self.stats = stats;
+        let joint_count = joints.len();
+        self.joint_scratch = joints;
+        let morph_weight_count = morph_weights.len();
+        self.morph_weight_scratch = morph_weights;
 
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
@@ -947,16 +1151,73 @@ impl Renderer {
         // ── 阴影深度 pass ──
         // 从光源视角把所有可见物体画一遍，只写深度。
         if shadow_enabled {
-            if draws.len() as u64 > self.shadow.object_capacity {
-                let capacity = (draws.len() as u64).next_power_of_two();
+            // 深度 pass 有自己的一份骨骼矩阵缓冲：它与主 pass 分属不同的绑定组布局，
+            // 共用一个缓冲反而要多传一层引用。数据是同一份，写两遍。
+            let shadow_joints_grew = joint_count as u64 > self.shadow.joint_capacity;
+            if shadow_joints_grew {
+                let capacity = (joint_count as u64).next_power_of_two();
+                self.shadow.joint_buffer = create_joint_storage(&self.device, capacity);
+                self.shadow.joint_capacity = capacity;
+            }
+            // 深度 pass 有自己的一份形变权重缓冲，数据同主 pass。
+            let shadow_weights_grew =
+                morph_weight_count as u64 > self.shadow.morph_weight_capacity;
+            if shadow_weights_grew {
+                let capacity = (morph_weight_count as u64).next_power_of_two();
+                self.shadow.morph_weight_buffer =
+                    create_morph_weight_storage(&self.device, capacity);
+                self.shadow.morph_weight_capacity = capacity;
+            }
+            // 形变增量是静态数据，主 pass 那边可能已经扩过容，这里跟上。
+            let shadow_morph_stale = self.shadow.morph_capacity != self.morph_capacity;
+            if shadow_morph_stale {
+                self.shadow.morph_buffer = create_morph_storage(&self.device, self.morph_capacity);
+                self.shadow.morph_capacity = self.morph_capacity;
+            }
+
+            if draws.len() as u64 > self.shadow.object_capacity
+                || shadow_joints_grew
+                || shadow_weights_grew
+                || shadow_morph_stale
+            {
+                let capacity = (draws.len() as u64)
+                    .next_power_of_two()
+                    .max(self.shadow.object_capacity);
                 let (buffer, bind_group) = create_shadow_object_storage(
                     &self.device,
                     &self.shadow.object_layout,
                     capacity,
+                    &self.shadow.joint_buffer,
+                    &self.shadow.morph_buffer,
+                    &self.shadow.morph_weight_buffer,
                 );
                 self.shadow.object_buffer = buffer;
                 self.shadow.object_bind_group = bind_group;
                 self.shadow.object_capacity = capacity;
+            }
+            if joint_count > 0 {
+                self.queue.write_buffer(
+                    &self.shadow.joint_buffer,
+                    0,
+                    bytemuck::cast_slice(&self.joint_scratch),
+                );
+            }
+            if morph_weight_count > 0 {
+                self.queue.write_buffer(
+                    &self.shadow.morph_weight_buffer,
+                    0,
+                    bytemuck::cast_slice(&self.morph_weight_scratch),
+                );
+            }
+            // 形变增量只在网格新上传时变，用一次拷贝把主 pass 的那份同步过来。
+            if self.morph_used > 0 {
+                encoder.copy_buffer_to_buffer(
+                    &self.morph_buffer,
+                    0,
+                    &self.shadow.morph_buffer,
+                    0,
+                    self.morph_used * size_of::<MorphDelta>() as u64,
+                );
             }
 
             self.queue.write_buffer(
@@ -978,6 +1239,7 @@ impl Renderer {
                 .iter()
                 .map(|instance| ShadowObject {
                     model: instance.model,
+                    skin: instance.skin,
                 })
                 .collect();
             if !shadow_objects.is_empty() {
@@ -1004,17 +1266,33 @@ impl Renderer {
                 multiview_mask: None,
             });
 
-            pass.set_pipeline(&self.shadow.pipeline);
             pass.set_bind_group(0, &self.shadow.globals_bind_group, &[]);
             pass.set_bind_group(1, &self.shadow.object_bind_group, &[]);
 
             // 深度 pass 与贴图无关，本可以按网格合并得更狠，
             // 但沿用主 pass 的分批能保证两边的实例下标一一对应。
+            let mut current_skinned = None;
             for batch in &batches {
                 let Some(gpu_mesh) = self.meshes.get(&batch.mesh_id) else {
                     continue;
                 };
+                // 批次已按蒙皮与否排过序，管线最多切换一次。
+                if current_skinned != Some(batch.skinned) {
+                    pass.set_pipeline(if batch.skinned {
+                        &self.shadow.skinned_pipeline
+                    } else {
+                        &self.shadow.pipeline
+                    });
+                    current_skinned = Some(batch.skinned);
+                }
+
                 pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
+                if batch.skinned {
+                    let Some(skin) = gpu_mesh.skin_buffer.as_ref() else {
+                        continue;
+                    };
+                    pass.set_vertex_buffer(1, skin.slice(..));
+                }
                 pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(
                     0..gpu_mesh.index_count,
@@ -1060,6 +1338,7 @@ impl Renderer {
             pass.set_bind_group(1, &self.object_bind_group, &[]);
             pass.set_bind_group(3, &self.brdf_bind_group, &[]);
 
+            let mut current_skinned = Some(false);
             for batch in &batches {
                 let Some(gpu_mesh) = self.meshes.get(&batch.mesh_id) else {
                     continue;
@@ -1069,8 +1348,24 @@ impl Renderer {
                     continue;
                 };
 
+                if current_skinned != Some(batch.skinned) {
+                    pass.set_pipeline(if batch.skinned {
+                        &self.skinned_pipeline
+                    } else {
+                        &self.pipeline
+                    });
+                    // 换管线不影响已绑定的组，它们的布局是同一个。
+                    current_skinned = Some(batch.skinned);
+                }
+
                 pass.set_bind_group(2, texture_bind_group, &[]);
                 pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
+                if batch.skinned {
+                    let Some(skin) = gpu_mesh.skin_buffer.as_ref() else {
+                        continue;
+                    };
+                    pass.set_vertex_buffer(1, skin.slice(..));
+                }
                 pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 // 实例范围的起点即 `@builtin(instance_index)` 的起始值。
                 pass.draw_indexed(
@@ -1098,6 +1393,61 @@ impl Renderer {
         self.queue.present(output);
 
         RenderOutcome::Ok
+    }
+
+    /// 把一个网格的形变增量追加到全局缓冲，返回（起点, 目标数）。
+    ///
+    /// 排列成**顶点优先**：`[顶点0的所有目标][顶点1的所有目标]…`。
+    /// 着色器读一个顶点的全部形变时只碰一段连续内存；
+    /// 反过来按目标优先排的话，每个目标都要跳一次整段顶点数据。
+    fn upload_morph_targets(&mut self, mesh: &kmesh::Mesh) -> (u32, u32) {
+        let targets = mesh.morph_targets();
+        if targets.is_empty() {
+            return (0, 0);
+        }
+
+        let deltas = pack_morph_deltas(mesh);
+        let offset = self.morph_used;
+        let required = offset + deltas.len() as u64;
+        if required > self.morph_capacity {
+            // 已经上传的增量还得留着（别的网格在用），所以扩容要把旧数据搬过去。
+            let capacity = required.next_power_of_two();
+            let buffer = create_morph_storage(&self.device, capacity);
+            if self.morph_used > 0 {
+                let mut encoder =
+                    self.device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("kengine morph grow"),
+                        });
+                encoder.copy_buffer_to_buffer(
+                    &self.morph_buffer,
+                    0,
+                    &buffer,
+                    0,
+                    self.morph_used * size_of::<MorphDelta>() as u64,
+                );
+                self.queue.submit(std::iter::once(encoder.finish()));
+            }
+            self.morph_buffer = buffer;
+            self.morph_capacity = capacity;
+            self.object_bind_group = create_object_bind_group(
+                &self.device,
+                &self.object_layout,
+                &self.object_buffer,
+                &self.joint_buffer,
+                &self.morph_buffer,
+                &self.morph_weight_buffer,
+            );
+        }
+
+        self.queue.write_buffer(
+            &self.morph_buffer,
+            offset * size_of::<MorphDelta>() as u64,
+            bytemuck::cast_slice(&deltas),
+        );
+        self.morph_used = required;
+
+        (offset as u32, targets.len() as u32)
     }
 
     /// 确保材质用到的贴图都已上传，返回绑定组缓存键。
@@ -1183,6 +1533,9 @@ impl Renderer {
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
         capacity: u64,
+        joints: &wgpu::Buffer,
+        morphs: &wgpu::Buffer,
+        morph_weights: &wgpu::Buffer,
     ) -> (wgpu::Buffer, wgpu::BindGroup) {
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("kengine object buffer"),
@@ -1191,16 +1544,8 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("kengine object bind group"),
-            layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                // 绑定整个缓冲：着色器侧是变长数组，实例号即下标。
-                resource: buffer.as_entire_binding(),
-            }],
-        });
-
+        let bind_group =
+            create_object_bind_group(device, layout, &buffer, joints, morphs, morph_weights);
         (buffer, bind_group)
     }
 
@@ -1224,6 +1569,144 @@ impl Renderer {
         });
         texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
+}
+
+
+/// 建一条标准着色管线。静态与蒙皮只差入口函数与顶点布局。
+fn create_standard_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    entry_point: &str,
+    buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
+    label: &str,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some(entry_point),
+            compilation_options: Default::default(),
+            buffers,
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                // 主 pass 画到 HDR 离屏目标，不是直接画到屏幕。
+                format: post::HDR_FORMAT,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Option::from(true),
+            depth_compare: Option::from(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// 建骨骼矩阵缓冲。容量至少为 1——空缓冲绑不上去。
+fn create_joint_storage(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("kengine joint buffer"),
+        size: size_of::<[[f32; 4]; 4]>() as u64 * capacity.max(1),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+/// 把对象数组与骨骼矩阵数组绑进同一个绑定组。
+fn create_object_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    objects: &wgpu::Buffer,
+    joints: &wgpu::Buffer,
+    morphs: &wgpu::Buffer,
+    morph_weights: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("kengine object bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                // 绑定整个缓冲：着色器侧是变长数组，实例号即下标。
+                resource: objects.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: joints.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: morphs.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: morph_weights.as_entire_binding(),
+            },
+        ],
+    })
+}
+
+/// 把网格的形变增量排成**顶点优先**的一维数组：
+/// `[顶点0的目标0, 顶点0的目标1, …, 顶点1的目标0, …]`。
+///
+/// 着色器按 `起点 + 顶点号 × 目标数 + 目标号` 寻址，读一个顶点的全部形变
+/// 只碰一段连续内存；反过来按目标优先排的话，每多一个目标就要跳一次整段顶点数据。
+fn pack_morph_deltas(mesh: &kmesh::Mesh) -> Vec<MorphDelta> {
+    let targets = mesh.morph_targets();
+    let vertex_count = mesh.vertices().len();
+
+    let mut deltas = Vec::with_capacity(vertex_count * targets.len());
+    for vertex in 0..vertex_count {
+        for target in targets {
+            deltas.push(target.deltas()[vertex]);
+        }
+    }
+    deltas
+}
+
+/// 建形变增量缓冲。
+fn create_morph_storage(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("kengine morph buffer"),
+        size: size_of::<MorphDelta>() as u64 * capacity.max(1),
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            // 扩容时要把已有的数据搬过去：形变增量是随网格一次性上传的，
+            // 重新收集一遍就得回头去问每个网格要数据。
+            | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    })
+}
+
+/// 建形变权重缓冲。
+fn create_morph_weight_storage(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("kengine morph weight buffer"),
+        size: size_of::<f32>() as u64 * capacity.max(1),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 /// 标准着色器的完整源码：kpbr 的 BRDF 函数 + 引擎自己的顶点/片元入口。
@@ -1308,19 +1791,60 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
 
     let object_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("kengine shadow object layout"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                has_dynamic_offset: false,
-                min_binding_size: NonZeroU64::new(size_of::<ShadowObject>() as u64),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(size_of::<ShadowObject>() as u64),
+                },
+                count: None,
             },
-            count: None,
-        }],
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(size_of::<[[f32; 4]; 4]>() as u64),
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(size_of::<MorphDelta>() as u64),
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(size_of::<f32>() as u64),
+                },
+                count: None,
+            },
+        ],
     });
-    let (object_buffer, object_bind_group) =
-        create_shadow_object_storage(device, &object_layout, Renderer::INITIAL_CAPACITY);
+    let joint_buffer = create_joint_storage(device, Renderer::INITIAL_JOINTS);
+    let morph_buffer = create_morph_storage(device, Renderer::INITIAL_MORPH);
+    let morph_weight_buffer = create_morph_weight_storage(device, Renderer::INITIAL_CAPACITY);
+    let (object_buffer, object_bind_group) = create_shadow_object_storage(
+        device,
+        &object_layout,
+        Renderer::INITIAL_CAPACITY,
+        &joint_buffer,
+        &morph_buffer,
+        &morph_weight_buffer,
+    );
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("kengine shadow pipeline layout"),
@@ -1328,14 +1852,61 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
         immediate_size: 0,
     });
 
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("kengine shadow pipeline"),
-        layout: Some(&pipeline_layout),
+    let pipeline = create_shadow_pipeline(
+        device,
+        &pipeline_layout,
+        &shader,
+        "shadow_vs",
+        &[Option::from(vertex_layout())],
+        "kengine shadow pipeline",
+    );
+
+    let skinned_pipeline = create_shadow_pipeline(
+        device,
+        &pipeline_layout,
+        &shader,
+        "shadow_skinned_vs",
+        &[Option::from(vertex_layout()), Option::from(skin_layout())],
+        "kengine skinned shadow pipeline",
+    );
+
+    ShadowResources {
+        settings,
+        pipeline,
+        skinned_pipeline,
+        joint_buffer,
+        joint_capacity: Renderer::INITIAL_JOINTS,
+        morph_buffer,
+        morph_capacity: Renderer::INITIAL_MORPH,
+        morph_weight_buffer,
+        morph_weight_capacity: Renderer::INITIAL_CAPACITY,
+        depth_view,
+        globals_buffer,
+        globals_bind_group,
+        object_layout,
+        object_buffer,
+        object_bind_group,
+        object_capacity: Renderer::INITIAL_CAPACITY,
+    }
+}
+
+/// 建一条深度 pass 管线。静态与蒙皮只差入口函数与顶点布局。
+fn create_shadow_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    entry_point: &str,
+    buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
+    label: &str,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
         vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("shadow_vs"),
+            module: shader,
+            entry_point: Some(entry_point),
             compilation_options: Default::default(),
-            buffers: &[Option::from(vertex_layout())],
+            buffers,
         },
         // 深度 pass 不需要片元着色器。
         fragment: None,
@@ -1343,7 +1914,7 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
-            // 只渲染背面：让深度值落在物体背side，可显著减少自阴影条纹。
+            // 只渲染背面：让深度值落在物体背面，可显著减少自阴影条纹。
             cull_mode: Some(wgpu::Face::Front),
             polygon_mode: wgpu::PolygonMode::Fill,
             unclipped_depth: false,
@@ -1359,25 +1930,16 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
         cache: None,
-    });
-
-    ShadowResources {
-        settings,
-        pipeline,
-        depth_view,
-        globals_buffer,
-        globals_bind_group,
-        object_layout,
-        object_buffer,
-        object_bind_group,
-        object_capacity: Renderer::INITIAL_CAPACITY,
-    }
+    })
 }
 
 fn create_shadow_object_storage(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     capacity: u64,
+    joints: &wgpu::Buffer,
+    morphs: &wgpu::Buffer,
+    morph_weights: &wgpu::Buffer,
 ) -> (wgpu::Buffer, wgpu::BindGroup) {
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("kengine shadow object buffer"),
@@ -1388,10 +1950,24 @@ fn create_shadow_object_storage(
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("kengine shadow object bind group"),
         layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: buffer.as_entire_binding(),
-        }],
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: joints.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: morphs.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: morph_weights.as_entire_binding(),
+            },
+        ],
     });
     (buffer, bind_group)
 }
@@ -1613,9 +2189,10 @@ mod test {
             64 + 16 * 3 + 64 + 16 + size_of::<GpuEnvironment>() + 64 * MAX_LIGHTS
         );
         assert_eq!(size_of::<Globals>() % 16, 0);
-        // ObjectUniforms：mat4x4(64) × 2 + base_color(16) + f32 × 4 + emissive(16) = 176。
+        // ObjectUniforms：mat4x4(64) × 2 + base_color(16) + f32 × 4 + emissive(16)
+        //                 + 骨骼偏移(16) = 192。
         // 四个 f32 恰好凑满 16 字节，emissive 才能落在 vec4 要求的对齐边界上。
-        assert_eq!(size_of::<ObjectUniforms>(), 176);
+        assert_eq!(size_of::<ObjectUniforms>(), 192);
         assert_eq!(size_of::<ObjectUniforms>() % 16, 0);
     }
 
@@ -1679,7 +2256,16 @@ mod test {
         DrawCall {
             mesh_id: Uuid::from_u128(mesh),
             texture_key: [Uuid::from_u128(texture); 5],
+            skinned: false,
             uniforms: ObjectUniforms::zeroed(),
+        }
+    }
+
+    /// 同上，但走蒙皮管线。
+    fn skinned_draw(mesh: u128, texture: u128) -> DrawCall {
+        DrawCall {
+            skinned: true,
+            ..draw(mesh, texture)
         }
     }
 
@@ -1791,6 +2377,134 @@ mod test {
         assert_eq!(stats.instances_per_draw(), 25.0);
         // 一帧什么都没画时不能除出 NaN。
         assert_eq!(RenderStats::default().instances_per_draw(), 0.0);
+    }
+
+    #[test]
+    fn skinned_and_static_objects_never_share_a_batch() {
+        // 两者的顶点布局不同，共用一批就会用错管线。
+        let (batches, _) = batch(&[draw(1, 1), skinned_draw(1, 1), draw(1, 1)]);
+
+        assert_eq!(batches.len(), 2);
+        // 排序把静态排在前、蒙皮排在后，管线因此最多切换一次。
+        assert!(!batches[0].skinned && batches[0].count == 2);
+        assert!(batches[1].skinned && batches[1].count == 1);
+    }
+
+    #[test]
+    fn skinned_instances_of_the_same_mesh_still_batch() {
+        // 每个蒙皮实例有自己的一套骨骼矩阵，但矩阵在同一个缓冲里、
+        // 各自记着偏移，所以同网格的多个角色仍然能一次画完。
+        let (batches, _) = batch(&[skinned_draw(1, 1), skinned_draw(1, 1)]);
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].count, 2);
+    }
+
+    #[test]
+    fn shadow_object_layout_matches_the_shader() {
+        // model(64) + 骨骼偏移(16)
+        assert_eq!(size_of::<ShadowObject>(), 80);
+        assert_eq!(size_of::<ShadowObject>() % 16, 0);
+    }
+
+    #[test]
+    fn shaders_expose_the_skinning_entry_points() {
+        // 这两个名字硬编码在建管线的代码里。
+        let standard = Shader::from_wgsl(standard_shader()).unwrap();
+        assert!(standard_shader().contains("fn vs_skinned"));
+        assert!(standard_shader().contains("var<storage, read> joint_matrices"));
+        let _ = standard;
+
+        let shadow = shadow_shader_source();
+        assert!(shadow.contains("fn shadow_skinned_vs"));
+        assert!(shadow.contains("var<storage, read> shadow_joints"));
+    }
+
+    #[test]
+    fn skin_vertex_layout_matches_the_mesh_data() {
+        // 顶点缓冲的跨距必须与 kmesh 的结构体一致，否则读到的是错位的数据。
+        assert_eq!(
+            skin_layout().array_stride,
+            size_of::<SkinVertex>() as wgpu::BufferAddress
+        );
+        // 蒙皮属性接在标准顶点的 5 个位置之后。
+        assert_eq!(skin_layout().attributes[0].shader_location, 5);
+        assert_eq!(skin_layout().attributes[1].shader_location, 6);
+    }
+
+    #[test]
+    fn morph_deltas_are_packed_vertex_major() {
+        use kmesh::{MorphTarget, Vertex};
+
+        // 两个顶点、两个形变目标，增量用可辨认的数值填。
+        let vertices = vec![Vertex::default(); 2];
+        let mesh = kmesh::Mesh::new(vertices, vec![0, 1, 0]).with_morph_targets(
+            vec![
+                MorphTarget::new(
+                    "a",
+                    vec![
+                        MorphDelta {
+                            position: [1.0, 0.0, 0.0],
+                            ..Default::default()
+                        },
+                        MorphDelta {
+                            position: [2.0, 0.0, 0.0],
+                            ..Default::default()
+                        },
+                    ],
+                ),
+                MorphTarget::new(
+                    "b",
+                    vec![
+                        MorphDelta {
+                            position: [10.0, 0.0, 0.0],
+                            ..Default::default()
+                        },
+                        MorphDelta {
+                            position: [20.0, 0.0, 0.0],
+                            ..Default::default()
+                        },
+                    ],
+                ),
+            ],
+            vec![0.0, 0.0],
+        );
+
+        let packed = pack_morph_deltas(&mesh);
+
+        // 顶点优先：同一顶点的两个目标相邻，着色器才能一段连续内存读完。
+        assert_eq!(packed.len(), 4);
+        assert_eq!(packed[0].position[0], 1.0); // 顶点 0 / 目标 a
+        assert_eq!(packed[1].position[0], 10.0); // 顶点 0 / 目标 b
+        assert_eq!(packed[2].position[0], 2.0); // 顶点 1 / 目标 a
+        assert_eq!(packed[3].position[0], 20.0); // 顶点 1 / 目标 b
+    }
+
+    #[test]
+    fn packing_a_mesh_without_morph_targets_is_empty() {
+        assert!(pack_morph_deltas(&kmesh::Mesh::cube()).is_empty());
+    }
+
+    #[test]
+    fn shaders_apply_morph_targets() {
+        // 形变在顶点着色器里叠加，两条主管线与两条深度管线都要有。
+        let standard = standard_shader();
+        assert!(standard.contains("fn apply_morph"));
+        assert!(standard.contains("var<storage, read> morph_deltas"));
+        assert!(standard.contains("var<storage, read> morph_weights"));
+        // 形变要按顶点号取增量，缺了这个 builtin 就只能整块网格一起变形。
+        assert!(standard.contains("@builtin(vertex_index)"));
+
+        let shadow = shadow_shader_source();
+        assert!(shadow.contains("fn shadow_morph_position"));
+        assert!(shadow.contains("@builtin(vertex_index)"));
+    }
+
+    #[test]
+    fn morph_delta_matches_the_shader_layout() {
+        // WGSL 侧是两个 vec3 各补齐到 16 字节，CPU 侧必须一致。
+        assert_eq!(size_of::<MorphDelta>(), 32);
+        assert_eq!(size_of::<MorphDelta>() % 16, 0);
     }
 
     #[test]

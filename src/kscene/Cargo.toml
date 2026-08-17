@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+kanim = { path = "../kanim" }
 kcamera = { path = "../kcamera" }
 kcore = { path = "../kcore" }
 kgltf = { path = "../kgltf" }
@@ -14,4 +15,9 @@ kmesh = { path = "../kmesh" }
 kparticle = { path = "../kparticle" }
 kpbr = { path = "../kpbr" }
 # 剔除分片并行要用线程池，因此必须开多线程实现。
+ktask = { path = "../ktask", features = ["multi_threaded"] }
+
+[dev-dependencies]
+# 用 assets/Soldier.glb 做骨骼动画的集成测试，加载器要走资源管理器。
+kasset = { path = "../kasset" }
 ktask = { path = "../ktask", features = ["multi_threaded"] }

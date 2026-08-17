@@ -288,6 +288,9 @@ impl AppHandler for App {
         let dt = now.duration_since(runtime.last_frame).as_secs_f32();
         runtime.last_frame = now;
 
+        // ── Animation：动画改的是局部变换，必须排在世界变换重算之前 ──
+        runtime.scene.tick_animations(dt);
+
         // ── Transform：插件可能改了层级或变换，重算世界矩阵与包围盒 ──
         runtime.scene.update();
         // 粒子紧跟其后：世界空间的粒子出生时要用节点的世界变换，

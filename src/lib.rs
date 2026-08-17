@@ -44,6 +44,7 @@
 //! | `kasset` | 异步资源加载 | ❌ |
 //! | `kmesh` / `ktexture` / `kmaterial` / `kshader` / `kgltf` / `kpbr` | 资源与渲染数据 | ❌ |
 //! | `kparticle` | 粒子模拟（列式存储 + 并行） | ❌ |
+//! | `kanim` | 骨骼动画（曲线 / 姿态 / 状态机 / IK） | ❌ |
 //! | `kinput` | 输入采集与映射 | ❌ |
 //! | `klight` | 光源与衰减 | ❌ |
 //! | `kmath` / `kcore` / `ktask` / `klog` | 基础设施 | ❌ |
@@ -51,6 +52,7 @@
 #![warn(missing_docs)]
 
 pub use kapp;
+pub use kanim;
 pub use kasset;
 pub use kcamera;
 pub use kcore;
@@ -85,12 +87,18 @@ pub mod prelude {
     pub use kinput::{Binding, Input, KeyCode, MouseButton};
     pub use kmaterial::{Material, MaterialValue};
     pub use kmath::{Aabb, Mat4, Quat, Vec2, Vec3, Vec4};
-    pub use kmesh::{Mesh, Vertex};
+    // 动画状态机的 `State` 与阶段调度的 `Stage` 容易混淆，这里按原名导出，
+    // 用的时候看得见它来自哪个体系。
+    pub use kanim::{
+        AnimationClip, Animator, BlendTree, Condition, IkChain, Parameters, State, StateMachine,
+        Transition,
+    };
+    pub use kmesh::{Mesh, SkinVertex, Vertex};
     pub use kparticle::{BlendMode, ColorGradient, Curve, Emitter, EmitterShape, ParticleSystem, Space};
     pub use kpbr::{Environment, PbrMaterial};
     pub use krender::RenderStats;
     pub use klight::{Light, LightKind};
-    pub use kscene::{Node, Scene, Transform};
+    pub use kscene::{AnimationPlayer, Node, Scene, Skin, Transform};
     pub use kshader::{Shader, ShaderLoader};
     pub use ktexture::{Sampler, Texture, TextureLoader};
     pub use winit::event::WindowEvent;

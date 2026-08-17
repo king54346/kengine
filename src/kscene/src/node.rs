@@ -5,6 +5,7 @@ use klight::Light;
 use kcore::pool::Handle;
 use kmaterial::Material;
 use kmath::{Aabb, Mat4, Vec3};
+use crate::skin::{AnimationPlayer, Skin};
 use kparticle::ParticleSystem;
 
 /// 场景树中的一个节点。
@@ -25,6 +26,15 @@ pub struct Node {
     pub(crate) camera: Option<Camera>,
     pub(crate) light: Option<Light>,
     pub(crate) particles: Option<Box<ParticleSystem>>,
+    /// 骨架。有它的节点走蒙皮渲染路径。
+    pub(crate) skin: Option<Box<Skin>>,
+    /// 动画播放器，通常挂在模型的根节点上。
+    pub(crate) animator: Option<Box<AnimationPlayer>>,
+    /// 当前的形变权重，与网格的形变目标一一对应。
+    ///
+    /// 存在节点而不是网格上：网格是共享资源，同一张脸的两个实例
+    /// 要能各做各的表情。
+    pub(crate) morph_weights: Vec<f32>,
     pub(crate) parent: Handle<Node>,
     pub(crate) children: Vec<Handle<Node>>,
     pub(crate) global_transform: Mat4,
@@ -54,6 +64,9 @@ impl Node {
             // 装箱：粒子系统里有九个数组，直接内联会把每个 Node 撑大一大截，
             // 而绝大多数节点根本没有粒子。
             particles: None,
+            skin: None,
+            animator: None,
+            morph_weights: Vec::new(),
             parent: Handle::NONE,
             children: Vec::new(),
             global_transform: Mat4::IDENTITY,
@@ -63,7 +76,10 @@ impl Node {
     }
 
     /// 挂上网格，使该节点可被绘制。
+    ///
+    /// 网格带形变目标时，权重初始化为网格自带的默认值。
     pub fn with_mesh(mut self, mesh: Mesh) -> Self {
+        self.morph_weights = mesh.morph_weights().to_vec();
         self.mesh = Some(mesh);
         self
     }
@@ -89,6 +105,18 @@ impl Node {
     /// 挂上粒子系统。发射器的位置与朝向取自本节点的世界变换。
     pub fn with_particles(mut self, particles: ParticleSystem) -> Self {
         self.particles = Some(Box::new(particles));
+        self
+    }
+
+    /// 挂上骨架，使该节点的网格随骨骼变形。
+    pub fn with_skin(mut self, skin: Skin) -> Self {
+        self.skin = Some(Box::new(skin));
+        self
+    }
+
+    /// 挂上动画播放器。
+    pub fn with_animator(mut self, animator: AnimationPlayer) -> Self {
+        self.animator = Some(Box::new(animator));
         self
     }
 
@@ -153,6 +181,60 @@ impl Node {
     /// 粒子系统的可变引用，可在运行时改参数或手动喷发。
     pub fn particles_mut(&mut self) -> Option<&mut ParticleSystem> {
         self.particles.as_deref_mut()
+    }
+
+    /// 骨架的只读引用。
+    pub fn skin(&self) -> Option<&Skin> {
+        self.skin.as_deref()
+    }
+
+    /// 骨架的可变引用。
+    pub fn skin_mut(&mut self) -> Option<&mut Skin> {
+        self.skin.as_deref_mut()
+    }
+
+    /// 动画播放器的只读引用。
+    pub fn animator(&self) -> Option<&AnimationPlayer> {
+        self.animator.as_deref()
+    }
+
+    /// 动画播放器的可变引用，用来切剪辑、调权重。
+    pub fn animator_mut(&mut self) -> Option<&mut AnimationPlayer> {
+        self.animator.as_deref_mut()
+    }
+
+    /// 当前的形变权重。
+    pub fn morph_weights(&self) -> &[f32] {
+        &self.morph_weights
+    }
+
+    /// 形变权重的可变引用。
+    pub fn morph_weights_mut(&mut self) -> &mut [f32] {
+        &mut self.morph_weights
+    }
+
+    /// 设置某个形变目标的权重。序号越界时忽略。
+    ///
+    /// 不夹到 `[0, 1]`：glTF 规范并不限制取值范围，
+    /// 超出范围会得到夸张的外插效果，有时正是想要的。
+    pub fn set_morph_weight(&mut self, index: usize, weight: f32) {
+        if let Some(slot) = self.morph_weights.get_mut(index) {
+            *slot = weight;
+        }
+    }
+
+    /// 按形变目标的名字设置权重，返回是否找到了这个名字。
+    pub fn set_morph_weight_by_name(&mut self, name: &str, weight: f32) -> bool {
+        let Some(index) = self.mesh.as_ref().and_then(|mesh| mesh.find_morph_target(name)) else {
+            return false;
+        };
+        self.set_morph_weight(index, weight);
+        true
+    }
+
+    /// 按名字找形变目标的序号。
+    pub fn find_morph_target(&self, name: &str) -> Option<usize> {
+        self.mesh.as_ref()?.find_morph_target(name)
     }
 
     /// 父节点句柄；根节点返回 [`Handle::NONE`]。

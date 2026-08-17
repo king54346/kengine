@@ -9,12 +9,16 @@ kcore = { path = "../kcore" }
 klog = { path = "../klog" }
 kmaterial = { path = "../kmaterial" }
 kmath = { path = "../kmath" }
+kanim = { path = "../kanim" }
 kmesh = { path = "../kmesh" }
 ktexture = { path = "../ktexture" }
-# names 用于保留节点名，utils 提供顶点数据读取器。
+# names 用于保留节点名，utils 提供顶点数据读取器，
+# extras 用于读取形变目标的名字（glTF 把 targetNames 放在 mesh.extras 里）。
 # 关掉默认特性里的 import：文件读取要走 kasset 的 ResourceIo，而非直接碰 std::fs。
-gltf = { version = "1.4.1", default-features = false, features = ["names", "utils"] }
+gltf = { version = "1.4.1", default-features = false, features = ["names", "utils", "extras"] }
 base64 = "0.23.1"
+# 只用来解析 mesh.extras 里的 targetNames，glTF 规范没给它专门的字段。
+serde_json = "1.0"
 
 [dev-dependencies]
 ktask = { path = "../ktask", features = ["multi_threaded"] }

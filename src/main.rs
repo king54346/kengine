@@ -2,7 +2,8 @@
 //!
 //! 引擎负责窗口、事件循环、输入采集和渲染；这个文件里只有游戏逻辑。
 //!
-//! 操作：WASD 移动方块，Q/E 升降，空格暂停自转，R 重置，C 打印统计，Esc 退出。
+//! 操作：WASD 移动方块，Q/E 升降，空格暂停自转，R 重置，C 打印统计，
+//! F 喷一团火花，1/2/3 切换士兵的动作，M 让狮子闭嘴/张嘴，Esc 退出。
 //!
 //! 加 `--stress N` 可以再铺 N 个共享网格的方块，用来观察空间划分、
 //! 并行剔除与实例化在万级对象下的表现：
@@ -77,10 +78,28 @@ struct Game {
     model: Option<Resource<Model>>,
     model_spawned: bool,
     stats_reported: bool,
+    /// 下一次自动汇报统计的时刻。
+    report_at: f32,
     /// 绕场景转圈的点光源，用来观察多光源与衰减。
     lamp: Handle<Node>,
     /// 相加混合的火花，按 F 手动喷一团。
     sparks: Handle<Node>,
+    /// 异步加载的骨骼动画模型。
+    soldier: Option<Resource<Model>>,
+    soldier_node: Handle<Node>,
+    soldier_spawned: bool,
+    /// 驱动士兵动作的状态机与参数。
+    locomotion: Option<StateMachine>,
+    parameters: Parameters,
+    /// 目标移动速度，1/2/3 键切换；状态机据此选动作。
+    target_speed: f32,
+    /// 异步加载的形变目标模型。
+    lion: Option<Resource<Model>>,
+    lion_spawned: bool,
+    /// 带各个形变的节点：嘴、左眼、右眼、舌头。
+    lion_morphs: Vec<(Handle<Node>, String)>,
+    /// 形变是否自动张合。
+    lion_talking: bool,
     paused: bool,
 }
 
@@ -121,16 +140,169 @@ impl Game {
         klog::info!("压力测试：额外生成 {} 个方块", self.stress);
     }
 
+    /// 士兵就绪的那一帧：实例化进场景，并搭一个 Idle ⇄ Walk ⇄ Run 状态机。
+    fn spawn_soldier(&mut self, ctx: &mut Context) {
+        let Some(model) = self.soldier.as_ref().and_then(Resource::data_ref) else {
+            return;
+        };
+        self.soldier_spawned = true;
+        // 士兵进场后再汇报一次统计，好确认蒙皮那条管线确实在画东西。
+        // 统计读到的是上一帧的结果，所以要等一帧之后再看。
+        self.stats_reported = false;
+        self.report_at = ctx.elapsed + 1.0;
+
+        let root = ctx.scene.root();
+        self.soldier_node = ctx.scene.instantiate_model(&model, root);
+        ctx.scene[self.soldier_node].transform.position = Vec3::new(0.0, -1.0, -1.0);
+
+        // 剪辑序号要问播放器要——状态机记的是序号，不是名字。
+        let Some(player) = ctx.scene[self.soldier_node].animator() else {
+            klog::warn!("士兵模型没有动画");
+            return;
+        };
+        let animator = player.animator();
+        let (Some(idle), Some(walk), Some(run)) = (
+            animator.clip_index("Idle"),
+            animator.clip_index("Walk"),
+            animator.clip_index("Run"),
+        ) else {
+            klog::warn!("士兵模型缺少 Idle/Walk/Run 之一");
+            return;
+        };
+
+        let mut machine = StateMachine::new();
+        let idle_state = machine.add_state(State::clip("Idle", idle));
+        // 移动状态内部是一维混合空间：速度在走与跑之间连续过渡，
+        // 而不是到某个阈值突然换一套动作。
+        let moving = machine.add_state(State::new(
+            "Moving",
+            BlendTree::blend_space_1d(
+                "speed",
+                [(1.0, BlendTree::Clip(walk)), (4.0, BlendTree::Clip(run))],
+            ),
+        ));
+        machine.add_transition(Transition::new(
+            idle_state,
+            moving,
+            0.25,
+            Condition::greater("speed", 0.1),
+        ));
+        machine.add_transition(Transition::new(
+            moving,
+            idle_state,
+            0.25,
+            Condition::less("speed", 0.1),
+        ));
+
+        self.locomotion = Some(machine);
+        klog::info!("士兵已载入：{} 个动画，按 1/2/3 切换站立/行走/奔跑", animator.clips().len());
+    }
+
+    /// 每帧把状态机算出的权重交给播放器。
+    fn drive_soldier(&mut self, ctx: &mut Context) {
+        let Some(machine) = self.locomotion.as_mut() else {
+            return;
+        };
+
+        // 速度平滑过渡，免得混合空间的坐标突跳。
+        let current = self.parameters.float("speed");
+        let speed = current + (self.target_speed - current) * (ctx.dt * 6.0).min(1.0);
+        self.parameters.set_float("speed", speed);
+
+        machine.update(ctx.dt, &self.parameters);
+        let weights = machine.weights(&self.parameters);
+
+        let Some(player) = ctx.scene[self.soldier_node].animator_mut() else {
+            return;
+        };
+        player.animator_mut().apply_weights(&weights);
+    }
+
+    /// 狮子就绪的那一帧：实例化进场景，并记下带形变的节点。
+    fn spawn_lion(&mut self, ctx: &mut Context) {
+        let Some(model) = self.lion.as_ref().and_then(Resource::data_ref) else {
+            return;
+        };
+        self.lion_spawned = true;
+        self.lion_talking = true;
+
+        let root = ctx.scene.root();
+        let handle = ctx.scene.instantiate_model(&model, root);
+
+        // 形变分散在几个网格上（嘴、眼睛、舌头各一个），逐个记下来。
+        let mut stack = vec![handle];
+        while let Some(node) = stack.pop() {
+            stack.extend_from_slice(ctx.scene[node].children());
+            let Some(mesh) = ctx.scene[node].mesh() else {
+                continue;
+            };
+            for target in mesh.morph_targets() {
+                self.lion_morphs.push((node, target.name().to_string()));
+            }
+        }
+
+        let names: Vec<&str> = self
+            .lion_morphs
+            .iter()
+            .map(|(_, name)| name.as_str())
+            .collect();
+        // 模型自带的坐标尺度五花八门（这头狮子的局部坐标就在几十的量级上），
+        // 所以先量出它的实际范围，再按需要的大小和位置摆过去。
+        ctx.scene.update();
+        let mut bounds = Aabb::EMPTY;
+        let mut stack = vec![handle];
+        while let Some(node) = stack.pop() {
+            stack.extend_from_slice(ctx.scene[node].children());
+            let aabb = ctx.scene[node].global_aabb();
+            if !aabb.is_empty() {
+                bounds = bounds.union(&aabb);
+            }
+        }
+
+        if !bounds.is_empty() {
+            const TARGET_HEIGHT: f32 = 2.2;
+            let scale = TARGET_HEIGHT / bounds.size().max_element().max(1e-6);
+            let target = Vec3::new(3.4, 0.6, -1.0);
+            ctx.scene[handle].transform.scale = Vec3::splat(scale);
+            // 量到的中心是缩放前的，摆位时要按同样的比例折算回去。
+            ctx.scene[handle].transform.position = target - bounds.center() * scale;
+        }
+
+        klog::info!(
+            "狮子已载入：{} 个形变目标 {:?}，按 M 开关自动张合",
+            names.len(),
+            names
+        );
+    }
+
+    /// 让狮子的形变权重随时间起伏。
+    fn drive_lion(&mut self, ctx: &mut Context) {
+        if !self.lion_talking || self.lion_morphs.is_empty() {
+            return;
+        }
+
+        for (index, (handle, name)) in self.lion_morphs.iter().enumerate() {
+            // 每个形变错开相位，看起来像在说话、眨眼。
+            let phase = ctx.elapsed * 2.0 + index as f32 * 1.3;
+            let weight = (phase.sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+            let Some(node) = ctx.scene.try_get_mut(*handle) else {
+                continue;
+            };
+            node.set_morph_weight_by_name(name, weight);
+        }
+    }
+
     /// 打印一帧的渲染统计。
     fn report(ctx: &Context) {
         let stats = ctx.stats;
         klog::info!(
-            "绘制 {} / 剔除 {} / 共 {}；三角形 {}；绘制调用 {}（平均 {:.1} 个/次）；\
-             剔除 {} µs，CPU 准备 {} µs",
+            "绘制 {} / 剔除 {} / 共 {}；三角形 {}；粒子 {}；\
+             绘制调用 {}（平均 {:.1} 个/次）；剔除 {} µs，CPU 准备 {} µs",
             stats.drawn,
             stats.culled,
             stats.total(),
             stats.triangles,
+            stats.particles,
             stats.draw_calls,
             stats.instances_per_draw(),
             stats.cull_micros,
@@ -148,6 +320,10 @@ impl Plugin for Game {
         bindings.bind_action("reset", KeyCode::KeyR);
         bindings.bind_action("stats", KeyCode::KeyC);
         bindings.bind_action("burst", KeyCode::KeyF);
+        bindings.bind_action("stand", KeyCode::Digit1);
+        bindings.bind_action("walk", KeyCode::Digit2);
+        bindings.bind_action("run", KeyCode::Digit3);
+        bindings.bind_action("morph", KeyCode::KeyM);
         bindings.bind_axis("horizontal", KeyCode::KeyD, KeyCode::KeyA);
         bindings.bind_axis("forward", KeyCode::KeyW, KeyCode::KeyS);
         bindings.bind_axis("vertical", KeyCode::KeyE, KeyCode::KeyQ);
@@ -159,6 +335,8 @@ impl Plugin for Game {
         ctx.resources.add_loader(GltfLoader);
         self.config = Some(ctx.resources.request("assets/demo.level"));
         self.model = Some(ctx.resources.request("assets/gem.glb"));
+        self.soldier = Some(ctx.resources.request("assets/Soldier.glb"));
+        self.lion = Some(ctx.resources.request("assets/lion.glb"));
 
         // 程序化生成的棋盘格贴图，直接登记为资源，无需外部图片文件。
         let checker = ctx.resources.register(
@@ -360,11 +538,39 @@ impl Plugin for Game {
         self.spawn_stress_field(ctx);
 
         klog::info!(
-            "WASD 移动，Q/E 升降，空格暂停，R 重置，C 打印剔除统计，F 喷一团火花，Esc 退出"
+            "WASD 移动，Q/E 升降，空格暂停，R 重置，C 打印统计，F 喷火花，\
+             1/2/3 切换士兵动作，M 开关狮子形变，Esc 退出"
         );
     }
 
     fn update(&mut self, ctx: &mut Context) {
+        // 骨骼动画模型同样是异步加载的，就绪后建状态机。
+        if !self.soldier_spawned {
+            self.spawn_soldier(ctx);
+        }
+        self.drive_soldier(ctx);
+
+        // 形变目标模型同样是异步加载的。
+        if !self.lion_spawned {
+            self.spawn_lion(ctx);
+        }
+        self.drive_lion(ctx);
+
+        if ctx.input.action_just_pressed("morph") {
+            self.lion_talking = !self.lion_talking;
+            klog::info!("狮子形变{}", if self.lion_talking { "已开启" } else { "已停止" });
+        }
+
+        if ctx.input.action_just_pressed("stand") {
+            self.target_speed = 0.0;
+        }
+        if ctx.input.action_just_pressed("walk") {
+            self.target_speed = 1.0;
+        }
+        if ctx.input.action_just_pressed("run") {
+            self.target_speed = 4.0;
+        }
+
         // glTF 模型在后台加载，就绪的那一帧实例化进场景。
         if !self.model_spawned
             && let Some(handle) = &self.model
@@ -382,7 +588,7 @@ impl Plugin for Game {
         }
 
         // 启动 2 秒后自动汇报一次渲染统计，方便无人值守时确认剔除生效。
-        if !self.stats_reported && ctx.elapsed > 2.0 {
+        if !self.stats_reported && ctx.elapsed > self.report_at.max(2.0) {
             self.stats_reported = true;
             Self::report(ctx);
         }

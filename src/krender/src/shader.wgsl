@@ -31,12 +31,30 @@ struct ObjectUniforms {
     occlusion_strength: f32,
     // rgb = 自发光颜色，a 保留
     emissive: vec4<f32>,
+    // x = 骨骼矩阵起点，y = 形变增量起点，z = 形变目标数，w = 形变权重起点
+    skin: vec4<u32>,
+};
+
+// 一个顶点在某个形变目标下的增量。两个 vec3 各自补齐到 16 字节。
+struct MorphDelta {
+    position: vec3<f32>,
+    padding0: f32,
+    normal: vec3<f32>,
+    padding1: f32,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
 // 每个实例一份，用 instance_index 寻址。存储缓冲而非 uniform：
 // 一次 draw 就能画完一批同网格同贴图的对象，不必逐个切换动态偏移。
 @group(1) @binding(0) var<storage, read> objects: array<ObjectUniforms>;
+// 所有蒙皮实例的骨骼矩阵拼在一起，各实例按自己的偏移取用。
+// 静态渲染时这里绑的是一个占位缓冲，谁也不会去读。
+@group(1) @binding(1) var<storage, read> joint_matrices: array<mat4x4<f32>>;
+// 所有带形变的网格的增量拼在一起，按「顶点优先」排列：
+// 同一顶点的各个目标相邻，读一个顶点的全部形变只碰一段连续内存。
+@group(1) @binding(2) var<storage, read> morph_deltas: array<MorphDelta>;
+// 每个实例一段形变权重，实例自己记着起点。
+@group(1) @binding(3) var<storage, read> morph_weights: array<f32>;
 @group(2) @binding(0) var base_color_texture: texture_2d<f32>;
 @group(2) @binding(1) var base_color_sampler: sampler;
 @group(2) @binding(2) var normal_texture: texture_2d<f32>;
@@ -58,6 +76,51 @@ struct VertexInput {
     @location(4) tangent: vec4<f32>,
 };
 
+// 蒙皮顶点属性，作为第二个顶点缓冲送进来。只有蒙皮管线声明它。
+struct SkinInput {
+    @location(5) joints: vec4<u32>,
+    @location(6) weights: vec4<f32>,
+};
+
+// 线性混合蒙皮：顶点的最终变换是四个关节矩阵的加权和。
+// 权重在导入时已经归一化，这里直接相加即可。
+fn skin_matrix(joints: vec4<u32>, weights: vec4<f32>, offset: u32) -> mat4x4<f32> {
+    return weights.x * joint_matrices[offset + joints.x]
+        + weights.y * joint_matrices[offset + joints.y]
+        + weights.z * joint_matrices[offset + joints.z]
+        + weights.w * joint_matrices[offset + joints.w];
+}
+
+// 把形变增量叠加到顶点上。没有形变目标时（count = 0）整个循环不执行。
+//
+// 形变发生在蒙皮之前：形变改的是绑定姿态下的网格形状，
+// 骨骼再把这个形状带到世界里——顺序反了，张嘴的幅度会被骨骼的缩放放大。
+fn apply_morph(
+    vertex_index: u32,
+    offset: u32,
+    count: u32,
+    weight_offset: u32,
+    position: ptr<function, vec3<f32>>,
+    normal: ptr<function, vec3<f32>>,
+) {
+    if (count == 0u) {
+        return;
+    }
+
+    let base = offset + vertex_index * count;
+    for (var i = 0u; i < count; i = i + 1u) {
+        let weight = morph_weights[weight_offset + i];
+        // 权重为 0 的目标占多数（一张脸几十个表情通常只有几个在起作用），
+        // 跳过它们能省下大量无用的读取。
+        if (weight == 0.0) {
+            continue;
+        }
+        let delta = morph_deltas[base + i];
+        *position = *position + delta.position * weight;
+        *normal = *normal + delta.normal * weight;
+    }
+}
+
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_position: vec3<f32>,
@@ -71,17 +134,73 @@ struct VertexOutput {
 };
 
 @vertex
-fn vs_main(in: VertexInput, @builtin(instance_index) instance: u32) -> VertexOutput {
+fn vs_main(
+    in: VertexInput,
+    @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) instance: u32,
+) -> VertexOutput {
     let object = objects[instance];
-    let world_position = object.model * vec4<f32>(in.position, 1.0);
+
+    var position = in.position;
+    var normal = in.normal;
+    apply_morph(
+        vertex_index,
+        object.skin.y,
+        object.skin.z,
+        object.skin.w,
+        &position,
+        &normal,
+    );
+
+    let world_position = object.model * vec4<f32>(position, 1.0);
 
     var out: VertexOutput;
     out.instance = instance;
     out.clip_position = globals.view_proj * world_position;
     out.world_position = world_position.xyz;
-    out.world_normal = (object.normal_matrix * vec4<f32>(in.normal, 0.0)).xyz;
+    out.world_normal = (object.normal_matrix * vec4<f32>(normal, 0.0)).xyz;
     // 切线随模型矩阵变换即可，不需要逆转置——它是切向而非法向。
     out.world_tangent = (object.model * vec4<f32>(in.tangent.xyz, 0.0)).xyz;
+    out.tangent_handedness = in.tangent.w;
+    out.uv = in.uv;
+    out.color = in.color;
+    return out;
+}
+
+@vertex
+fn vs_skinned(
+    in: VertexInput,
+    skin: SkinInput,
+    @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) instance: u32,
+) -> VertexOutput {
+    let object = objects[instance];
+
+    // 先形变再蒙皮：形变改的是绑定姿态下的形状，骨骼再把它带到世界里。
+    var position = in.position;
+    var normal = in.normal;
+    apply_morph(
+        vertex_index,
+        object.skin.y,
+        object.skin.z,
+        object.skin.w,
+        &position,
+        &normal,
+    );
+
+    // 骨骼矩阵已经包含了模型在世界里的位姿，所以蒙皮网格的 model 是单位阵；
+    // 这里仍然乘上它，是为了让两条路径保持同一个公式。
+    let model = object.model * skin_matrix(skin.joints, skin.weights, object.skin.x);
+    let world_position = model * vec4<f32>(position, 1.0);
+
+    var out: VertexOutput;
+    out.instance = instance;
+    out.clip_position = globals.view_proj * world_position;
+    // 骨骼变换是刚体的（旋转加平移），逆转置等于它自己的 3×3 部分，
+    // 所以法线直接乘 model 即可。骨骼带非均匀缩放时这里会有偏差。
+    out.world_normal = (model * vec4<f32>(normal, 0.0)).xyz;
+    out.world_tangent = (model * vec4<f32>(in.tangent.xyz, 0.0)).xyz;
+    out.world_position = world_position.xyz;
     out.tangent_handedness = in.tangent.w;
     out.uv = in.uv;
     out.color = in.color;

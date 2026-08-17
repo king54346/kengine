@@ -1,13 +1,14 @@
 //! glTF 导入实现。
 
 use crate::{
-    model::{MeshPart, Model, ModelNode, NodeTransform},
+    model::{MeshPart, Model, ModelNode, ModelSkin, NodeTransform},
     uri,
 };
+use kanim::{AnimationClip, Channel, Curve, Interpolation, Track};
 use kasset::{LoadError, Resource, ResourceIo};
 use kmaterial::Material;
-use kmath::{Quat, Vec3, Vec4};
-use kmesh::{Mesh, Vertex};
+use kmath::{Mat4, Quat, Vec3, Vec4};
+use kmesh::{Mesh, MorphDelta, MorphTarget, SkinVertex, Vertex};
 use ktexture::Texture;
 use std::{
     path::{Path, PathBuf},
@@ -28,16 +29,219 @@ pub(crate) async fn import(
     let materials = import_materials(&gltf, &textures);
     let (meshes, primitive_ranges) = import_meshes(&gltf, &buffers)?;
     let (nodes, roots) = import_nodes(&gltf, &primitive_ranges);
+    let skins = import_skins(&gltf, &buffers);
+    let animations = import_animations(&gltf, &buffers);
 
     klog::debug!(
-        "glTF 已导入：{}（{} 网格 / {} 材质 / {} 节点）",
+        "glTF 已导入：{}（{} 网格 / {} 材质 / {} 节点 / {} 骨架 / {} 动画）",
         path.display(),
         meshes.len(),
         materials.len(),
-        nodes.len()
+        nodes.len(),
+        skins.len(),
+        animations.len()
     );
 
-    Ok(Model::new(meshes, materials, nodes, roots))
+    Ok(Model::new(meshes, materials, nodes, roots)
+        .with_skins(skins)
+        .with_animations(animations))
+}
+
+/// 从 `mesh.extras` 里读形变目标的名字。
+///
+/// 这是 glTF 的约定俗成而非规范强制，读不到就返回空——调用方会退回占位名。
+fn read_target_names(mesh: &gltf::Mesh<'_>) -> Vec<String> {
+    let Some(extras) = mesh.extras().as_ref() else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(extras.get()) else {
+        return Vec::new();
+    };
+
+    value
+        .get("targetNames")
+        .and_then(serde_json::Value::as_array)
+        .map(|names| {
+            names
+                .iter()
+                .map(|name| name.as_str().unwrap_or_default().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 读一个图元的全部形变目标。
+///
+/// glTF 允许目标只带位置不带法线，这时法线增量按零处理——
+/// 形状变了而法线不变，光照会有点假，但总比没有形变强。
+fn read_morph_targets<'a, F>(
+    primitive: &gltf::Primitive<'_>,
+    reader: &gltf::mesh::Reader<'a, 'a, F>,
+    vertex_count: usize,
+    names: &[String],
+) -> Vec<MorphTarget>
+where
+    F: Clone + Fn(gltf::Buffer<'a>) -> Option<&'a [u8]>,
+{
+    if primitive.morph_targets().len() == 0 {
+        return Vec::new();
+    }
+
+    reader
+        .read_morph_targets()
+        .enumerate()
+        .map(|(index, (positions, normals, _tangents))| {
+            let positions: Vec<[f32; 3]> = positions.map(Iterator::collect).unwrap_or_default();
+            let normals: Vec<[f32; 3]> = normals.map(Iterator::collect).unwrap_or_default();
+
+            let deltas: Vec<MorphDelta> = (0..vertex_count)
+                .map(|vertex| MorphDelta {
+                    position: positions.get(vertex).copied().unwrap_or([0.0; 3]),
+                    normal: normals.get(vertex).copied().unwrap_or([0.0; 3]),
+                    ..Default::default()
+                })
+                .collect();
+
+            let name = names
+                .get(index)
+                .filter(|name| !name.is_empty())
+                .cloned()
+                .unwrap_or_else(|| format!("Target{index}"));
+            MorphTarget::new(name, deltas)
+        })
+        .collect()
+}
+
+/// 导入骨架：关节列表与逆绑定矩阵。
+fn import_skins(gltf: &gltf::Gltf, buffers: &[Vec<u8>]) -> Vec<ModelSkin> {
+    gltf.skins()
+        .map(|skin| {
+            let joints: Vec<usize> = skin.joints().map(|joint| joint.index()).collect();
+
+            let reader = skin.reader(|buffer| buffers.get(buffer.index()).map(Vec::as_slice));
+            let mut inverse_bind: Vec<Mat4> = reader
+                .read_inverse_bind_matrices()
+                .map(|matrices| matrices.map(|m| Mat4::from_cols_array_2d(&m)).collect())
+                .unwrap_or_default();
+
+            // glTF 允许省略逆绑定矩阵，此时按单位矩阵处理；
+            // 数量不足也补齐，免得后面按关节号取矩阵时越界。
+            inverse_bind.resize(joints.len(), Mat4::IDENTITY);
+
+            ModelSkin {
+                joints,
+                inverse_bind,
+                skeleton: skin.skeleton().map(|node| node.index()),
+            }
+        })
+        .collect()
+}
+
+/// 导入动画剪辑。
+///
+/// glTF 的一个 channel 正好对应一条轨道：目标是节点，路径是 TRS 之一。
+/// 目标用**节点序号**而不是名字——名字可以重复，也可以为空。
+fn import_animations(gltf: &gltf::Gltf, buffers: &[Vec<u8>]) -> Vec<AnimationClip> {
+    gltf.animations()
+        .enumerate()
+        .map(|(index, animation)| {
+            let name = animation
+                .name()
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("Animation{index}"));
+
+            let mut tracks = Vec::new();
+            for channel in animation.channels() {
+                let target = channel.target().node().index();
+                let interpolation = match channel.sampler().interpolation() {
+                    gltf::animation::Interpolation::Linear => Interpolation::Linear,
+                    gltf::animation::Interpolation::Step => Interpolation::Step,
+                    gltf::animation::Interpolation::CubicSpline => Interpolation::CubicSpline,
+                };
+
+                let reader =
+                    channel.reader(|buffer| buffers.get(buffer.index()).map(Vec::as_slice));
+                let Some(times) = reader.read_inputs() else {
+                    klog::warn!("动画 {name} 的某个通道缺少时间轴，已跳过");
+                    continue;
+                };
+                let times: Vec<f32> = times.collect();
+                let Some(outputs) = reader.read_outputs() else {
+                    klog::warn!("动画 {name} 的某个通道缺少采样值，已跳过");
+                    continue;
+                };
+
+                let channel = match outputs {
+                    gltf::animation::util::ReadOutputs::Translations(values) => {
+                        Curve::new(times, values.map(Vec3::from_array).collect(), interpolation)
+                            .map(Channel::Position)
+                    }
+                    gltf::animation::util::ReadOutputs::Scales(values) => {
+                        Curve::new(times, values.map(Vec3::from_array).collect(), interpolation)
+                            .map(Channel::Scale)
+                    }
+                    gltf::animation::util::ReadOutputs::Rotations(values) => Curve::new(
+                        times,
+                        values
+                            .into_f32()
+                            // glTF 的四元数是 [x, y, z, w] 顺序。
+                            .map(|q| Quat::from_xyzw(q[0], q[1], q[2], q[3]))
+                            .collect(),
+                        interpolation,
+                    )
+                    .map(Channel::Rotation),
+                    gltf::animation::util::ReadOutputs::MorphTargetWeights(values) => {
+                        // 一个 weights 通道同时驱动 N 个形变目标，采样值是交错排列的。
+                        // 这里拆成 N 条标量轨道：曲线的值类型因此保持定长，
+                        // 混合逻辑也不用为「变长数组」单开一套。
+                        let values: Vec<f32> = values.into_f32().collect();
+                        let frames = times.len();
+                        // 三次样条每帧存三份（n 个入切线、n 个值、n 个出切线），
+                        // 算目标个数时要把这三份除掉。
+                        let per_frame = if interpolation == Interpolation::CubicSpline {
+                            3
+                        } else {
+                            1
+                        };
+                        let count = values.len() / (frames * per_frame).max(1);
+
+                        for slot in 0..count {
+                            let weights: Vec<f32> = (0..frames)
+                                .flat_map(|frame| {
+                                    let base = frame * count * per_frame;
+                                    if per_frame == 3 {
+                                        // 拆出这个目标的「入切线, 值, 出切线」三元组。
+                                        vec![
+                                            values[base + slot],
+                                            values[base + count + slot],
+                                            values[base + count * 2 + slot],
+                                        ]
+                                    } else {
+                                        vec![values[base + slot]]
+                                    }
+                                })
+                                .collect();
+
+                            if let Some(curve) = Curve::new(times.clone(), weights, interpolation) {
+                                tracks.push(Track {
+                                    target,
+                                    channel: Channel::MorphWeight { index: slot, curve },
+                                });
+                            }
+                        }
+                        None
+                    }
+                };
+
+                match channel {
+                    Some(channel) => tracks.push(Track { target, channel }),
+                    None => continue,
+                }
+            }
+
+            AnimationClip::new(name, tracks)
+        })
+        .collect()
 }
 
 /// 加载全部缓冲区。GLB 的内嵌 BIN 块、data URI 与外部 .bin 都在这里统一。
@@ -166,6 +370,10 @@ fn import_meshes(
 
     for source in gltf.meshes() {
         let mut parts = Vec::new();
+        // 形变目标的名字藏在 mesh.extras 的 targetNames 里——
+        // glTF 规范没给它专门的字段，只能自己从扩展数据里挖。
+        let target_names = read_target_names(&source);
+        let default_weights: Vec<f32> = source.weights().map(<[f32]>::to_vec).unwrap_or_default();
 
         for primitive in source.primitives() {
             // 只处理三角形；点、线等模式暂不支持。
@@ -216,6 +424,12 @@ fn import_meshes(
                 })
                 .collect();
 
+            // 蒙皮属性：两个都在才算数，缺一个就当静态网格处理。
+            let joints: Option<Vec<[u16; 4]>> =
+                reader.read_joints(0).map(|j| j.into_u16().collect());
+            let weights: Option<Vec<[f32; 4]>> =
+                reader.read_weights(0).map(|w| w.into_f32().collect());
+
             let indices: Vec<u32> = match reader.read_indices() {
                 Some(indices) => indices.into_u32().collect(),
                 // 没有索引缓冲时按顶点顺序组成三角形。
@@ -234,6 +448,26 @@ fn import_meshes(
             // 同样，缺少 TANGENT 时法线贴图无法工作，按 UV 反推一份。
             if tangents.is_none() {
                 mesh.recompute_tangents();
+            }
+
+            // ── 形变目标 ──
+            let morph_targets = read_morph_targets(&primitive, &reader, mesh.vertices().len(), &target_names);
+            if !morph_targets.is_empty() {
+                mesh = mesh.with_morph_targets(morph_targets, default_weights.clone());
+            }
+
+            if let (Some(joints), Some(weights)) = (joints, weights) {
+                let skin: Vec<SkinVertex> = (0..mesh.vertices().len())
+                    .map(|index| SkinVertex {
+                        joints: joints.get(index).copied().unwrap_or([0; 4]),
+                        weights: weights
+                            .get(index)
+                            .copied()
+                            .unwrap_or([1.0, 0.0, 0.0, 0.0]),
+                    })
+                    .collect();
+                // 权重的归一化交给 `with_skin`，它对所有来源一视同仁。
+                mesh = mesh.with_skin(skin);
             }
 
             parts.push(MeshPart {
@@ -272,6 +506,7 @@ fn import_nodes(
                     .and_then(|mesh| primitive_ranges.get(mesh.index()))
                     .cloned()
                     .unwrap_or_default(),
+                skin: source.skin().map(|skin| skin.index()),
             }
         })
         .collect();

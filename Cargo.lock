@@ -1034,6 +1034,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kanim"
+version = "0.1.0"
+dependencies = [
+ "kmath",
+]
+
+[[package]]
 name = "kapp"
 version = "0.1.0"
 dependencies = [
@@ -1100,6 +1107,7 @@ dependencies = [
 name = "kengine"
 version = "0.1.0"
 dependencies = [
+ "kanim",
  "kapp",
  "kasset",
  "kcamera",
@@ -1128,6 +1136,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "gltf",
+ "kanim",
  "kasset",
  "kcore",
  "klog",
@@ -1136,6 +1145,7 @@ dependencies = [
  "kmesh",
  "ktask",
  "ktexture",
+ "serde_json",
 ]
 
 [[package]]
@@ -1258,6 +1268,8 @@ dependencies = [
 name = "kscene"
 version = "0.1.0"
 dependencies = [
+ "kanim",
+ "kasset",
  "kcamera",
  "kcore",
  "kgltf",

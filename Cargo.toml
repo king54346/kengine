@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "src/kanim",
     "src/kapp",
     "src/kasset",
     "src/kcamera",
@@ -28,6 +29,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+kanim = { path = "src/kanim" }
 kapp = { path = "src/kapp" }
 kasset = { path = "src/kasset" }
 kcamera = { path = "src/kcamera" }

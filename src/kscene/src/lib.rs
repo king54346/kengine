@@ -10,6 +10,7 @@
 
 mod cull;
 mod node;
+mod skin;
 mod transform;
 
 pub use kcamera::{Camera, Frustum, Projection};
@@ -17,13 +18,15 @@ pub use kmesh::{Mesh, Vertex};
 pub use kmath::{Aabb, Intersection};
 pub use kparticle::ParticleSystem;
 pub use node::Node;
+pub use skin::{AnimationPlayer, Skin};
 pub use transform::Transform;
 
 use cull::SceneCulling;
 use kcore::pool::{Handle, Pool};
+use kanim::Animator;
 use kgltf::Model;
 use kmaterial::Material;
-use kmath::Mat4;
+use kmath::{Mat4, Quat, Vec3};
 use klight::Light;
 use kpbr::Environment;
 use std::ops::{Index, IndexMut};
@@ -39,9 +42,17 @@ pub struct RenderItem<'a> {
     /// 材质；为 [`None`] 时渲染器使用标准材质。
     pub material: Option<&'a Material>,
     /// 世界变换矩阵。
+    ///
+    /// 蒙皮网格这里是**单位阵**：按 glTF 规范，蒙皮网格自身节点的变换应当被忽略，
+    /// 模型的位姿已经含在骨骼矩阵里了。着色器统一算 `model × skin × 顶点`，
+    /// 静态网格的 skin 视为单位阵，两条路径因此共用一个公式。
     pub transform: Mat4,
     /// 世界空间包围盒，用于剔除。
     pub aabb: Aabb,
+    /// 骨骼矩阵；静态网格为 [`None`]。
+    pub skin: Option<&'a [Mat4]>,
+    /// 形变权重，与网格的形变目标一一对应；没有形变时是空切片。
+    pub morph_weights: &'a [f32],
 }
 
 /// 渲染器每帧收集到的一个粒子系统。
@@ -58,6 +69,15 @@ pub struct ParticleItem<'a> {
     pub aabb: Aabb,
 }
 
+/// 绘制项该用的模型矩阵：蒙皮网格用单位阵，其余用节点的世界变换。
+fn skinned_transform(node: &Node) -> Mat4 {
+    if node.skin().is_some() {
+        Mat4::IDENTITY
+    } else {
+        node.global_transform
+    }
+}
+
 /// 一个场景。
 ///
 /// 场景创建时自带一个名为 `__root` 的根节点，[`Scene::add_node`] 默认挂在它下面。
@@ -67,6 +87,37 @@ pub struct Scene {
     environment: Environment,
     /// 剔除加速结构，由 [`Scene::update`] 维护。
     culling: SceneCulling,
+    /// 挂了特殊组件的节点句柄，由 [`Scene::update`] 顺带收集。
+    index: NodeIndex,
+}
+
+/// 按组件分类的节点句柄索引。
+///
+/// 光源、相机、粒子这些组件通常只挂在个位数的节点上，但为了找到它们
+/// 而每帧把整个节点池扫一遍，代价是把几兆字节的节点数据灌进缓存——
+/// 万级场景下这不只是慢，它还会把紧随其后的剔除所需的数据挤出缓存。
+///
+/// [`Scene::update`] 本来就要沿树走一遍，顺手记下句柄是免费的。
+#[derive(Default)]
+struct NodeIndex {
+    /// 可见且带网格的节点，按树的深度优先顺序排列。
+    drawables: Vec<Handle<Node>>,
+    lights: Vec<Handle<Node>>,
+    cameras: Vec<Handle<Node>>,
+    particles: Vec<Handle<Node>>,
+    skinned: Vec<Handle<Node>>,
+    animators: Vec<Handle<Node>>,
+}
+
+impl NodeIndex {
+    fn clear(&mut self) {
+        self.drawables.clear();
+        self.lights.clear();
+        self.cameras.clear();
+        self.particles.clear();
+        self.skinned.clear();
+        self.animators.clear();
+    }
 }
 
 impl Default for Scene {
@@ -85,6 +136,7 @@ impl Scene {
             root,
             environment: Environment::default(),
             culling: SceneCulling::default(),
+            index: NodeIndex::default(),
         }
     }
 
@@ -174,16 +226,77 @@ impl Scene {
     pub fn instantiate_model(&mut self, model: &Model, parent: Handle<Node>) -> Handle<Node> {
         let roots = model.roots();
 
+        // 模型里的节点序号到场景句柄的映射。骨架的关节、动画的目标都是按序号引用的，
+        // 建好这张表才能把它们接到具体的实例上。没被实例化的节点留 `Handle::NONE`。
+        let mut mapping = vec![Handle::NONE; model.nodes().len()];
+
         // 单根模型直接实例化，不额外套一层。
-        if let [only] = roots {
-            return self.instantiate_model_node(model, *only, parent);
+        let root = if let [only] = roots {
+            self.instantiate_model_node(model, *only, parent, &mut mapping)
+        } else {
+            let container = self.add_node_with_parent(Node::new("Model"), parent);
+            for &node in roots {
+                self.instantiate_model_node(model, node, container, &mut mapping);
+            }
+            container
+        };
+
+        self.attach_skins(model, &mapping);
+        self.attach_animator(model, root, mapping);
+        root
+    }
+
+    /// 给实例化出来的蒙皮网格节点挂上骨架。
+    fn attach_skins(&mut self, model: &Model, mapping: &[Handle<Node>]) {
+        for (index, source) in model.nodes().iter().enumerate() {
+            let Some(skin_index) = source.skin else {
+                continue;
+            };
+            let Some(skin) = model.skin(skin_index) else {
+                continue;
+            };
+
+            let joints: Vec<Handle<Node>> = skin
+                .joints
+                .iter()
+                .map(|&joint| mapping.get(joint).copied().unwrap_or(Handle::NONE))
+                .collect();
+            let skin = Skin::new(joints, skin.inverse_bind.clone());
+
+            // 几何体被拆成多个子节点时（多材质），每一块都要各自的骨架。
+            let handle = mapping.get(index).copied().unwrap_or(Handle::NONE);
+            let children: Vec<Handle<Node>> = self
+                .try_get(handle)
+                .map(|node| node.children.clone())
+                .unwrap_or_default();
+
+            if let Ok(node) = self.nodes.try_borrow_mut(handle)
+                && node.mesh.is_some()
+            {
+                node.skin = Some(Box::new(skin.clone()));
+                continue;
+            }
+            for child in children {
+                if let Ok(node) = self.nodes.try_borrow_mut(child)
+                    && node.mesh.is_some()
+                {
+                    node.skin = Some(Box::new(skin.clone()));
+                }
+            }
+        }
+    }
+
+    /// 给模型根节点挂上动画播放器。
+    fn attach_animator(&mut self, model: &Model, root: Handle<Node>, mapping: Vec<Handle<Node>>) {
+        if model.animations().is_empty() {
+            return;
         }
 
-        let container = self.add_node_with_parent(Node::new("Model"), parent);
-        for &root in roots {
-            self.instantiate_model_node(model, root, container);
+        // 剪辑数据由 Arc 共享：同一个模型实例化多份时，各自只多出播放进度。
+        let animator = Animator::new(model.animations().clone());
+        if let Ok(node) = self.nodes.try_borrow_mut(root) {
+            node.animator = Some(Box::new(AnimationPlayer::new(animator, mapping)));
         }
-        container
     }
 
     fn instantiate_model_node(
@@ -191,6 +304,7 @@ impl Scene {
         model: &Model,
         index: usize,
         parent: Handle<Node>,
+        mapping: &mut [Handle<Node>],
     ) -> Handle<Node> {
         let Some(source) = model.node(index) else {
             return Handle::NONE;
@@ -223,6 +337,9 @@ impl Scene {
         }
 
         let handle = self.add_node_with_parent(node, parent);
+        if let Some(slot) = mapping.get_mut(index) {
+            *slot = handle;
+        }
 
         if !single_part {
             for (part_index, part) in source.parts.iter().enumerate() {
@@ -238,7 +355,7 @@ impl Scene {
         }
 
         for &child in &source.children.clone() {
-            self.instantiate_model_node(model, child, handle);
+            self.instantiate_model_node(model, child, handle, mapping);
         }
 
         handle
@@ -267,30 +384,50 @@ impl Scene {
     /// 引擎每帧在插件的 `update` 之后自动调用，通常不需要手动调。
     pub fn update(&mut self) {
         self.culling.begin();
+        self.index.clear();
 
+        // ── 第一趟：沿树算世界变换，顺手把挂了组件的节点分类记下 ──
         let mut stack = vec![(self.root, Mat4::IDENTITY, true)];
         while let Some((handle, parent_matrix, parent_visible)) = stack.pop() {
-            let (global, visible, child_count, drawable) = {
+            let (global, visible, child_count, drawable, components) = {
                 let node = &mut self.nodes[handle];
                 let global = parent_matrix * node.transform.matrix();
                 let visible = parent_visible && node.visible;
                 node.global_transform = global;
                 node.global_visible = visible;
-                // 世界包围盒与世界变换一同更新，剔除时直接取用。
-                node.global_aabb = match node.mesh.as_ref() {
-                    Some(mesh) => mesh.aabb().transform(global),
-                    None => Aabb::EMPTY,
-                };
                 (
                     global,
                     visible,
                     node.children.len(),
                     visible && node.mesh.is_some(),
+                    (
+                        node.light.is_some(),
+                        node.camera.is_some(),
+                        node.particles.is_some(),
+                        node.skin.is_some(),
+                        node.animator.is_some(),
+                    ),
                 )
             };
 
+            let (has_light, has_camera, has_particles, has_skin, has_animator) = components;
             if drawable {
-                self.culling.push(handle, self.nodes[handle].global_aabb);
+                self.index.drawables.push(handle);
+            }
+            if has_light {
+                self.index.lights.push(handle);
+            }
+            if has_camera {
+                self.index.cameras.push(handle);
+            }
+            if has_particles {
+                self.index.particles.push(handle);
+            }
+            if has_skin {
+                self.index.skinned.push(handle);
+            }
+            if has_animator {
+                self.index.animators.push(handle);
             }
 
             // 按下标取子节点而不是克隆整个列表：每帧对上万个节点做一次分配，
@@ -301,7 +438,130 @@ impl Scene {
             }
         }
 
+        // ── 第二趟：骨骼矩阵 ──
+        // 必须等整棵树的世界变换都算完：关节可能在树上任何位置，
+        // 边遍历边算的话，排在蒙皮网格后面的关节还停在上一帧。
+        self.update_skins();
+
+        // ── 第三趟：包围盒与剔除结构 ──
+        // 同样得等骨骼算完——蒙皮网格的包围盒是由关节位置定的。
+        for position in 0..self.index.drawables.len() {
+            let handle = self.index.drawables[position];
+            let aabb = self.compute_bounds(handle);
+            if let Ok(node) = self.nodes.try_borrow_mut(handle) {
+                node.global_aabb = aabb;
+            }
+            self.culling.push(handle, aabb);
+        }
+
         self.culling.commit();
+    }
+
+    /// 重算所有骨架的骨骼矩阵。
+    fn update_skins(&mut self) {
+        for position in 0..self.index.skinned.len() {
+            let handle = self.index.skinned[position];
+            // 先把骨架摘出来：算矩阵要读别的节点，摘出来就不用同时借用整个池子了。
+            let Some(mut skin) = self
+                .nodes
+                .try_borrow_mut(handle)
+                .ok()
+                .and_then(|node| node.skin.take())
+            else {
+                continue;
+            };
+
+            skin.update(|joint| self.try_get(joint).map(Node::global_transform));
+
+            if let Ok(node) = self.nodes.try_borrow_mut(handle) {
+                node.skin = Some(skin);
+            }
+        }
+    }
+
+    /// 算一个可绘制节点的世界包围盒。
+    fn compute_bounds(&self, handle: Handle<Node>) -> Aabb {
+        let Some(node) = self.try_get(handle) else {
+            return Aabb::EMPTY;
+        };
+        let Some(mesh) = node.mesh.as_ref() else {
+            return Aabb::EMPTY;
+        };
+
+        let Some(skin) = node.skin.as_deref() else {
+            // 形变会把顶点推出绑定姿态的包围盒，按当前权重把范围撑开。
+            return mesh
+                .morphed_aabb(node.morph_weights())
+                .transform(node.global_transform);
+        };
+
+        // 蒙皮网格的顶点由骨骼驱动，绑定姿态的包围盒动起来就不准了
+        // ——角色一抬手就会被判定成不可见。改用关节的世界位置定范围，
+        // 再按网格自身的尺寸放宽，把附着在骨头上的皮肉包进去。
+        let mut bounds = Aabb::EMPTY;
+        for &joint in skin.joints() {
+            if let Some(joint) = self.try_get(joint) {
+                bounds.expand(joint.global_position());
+            }
+        }
+        if bounds.is_empty() {
+            return mesh.aabb().transform(node.global_transform);
+        }
+
+        let padding = Vec3::splat(mesh.aabb().half_extents().max_element().max(0.01));
+        Aabb::new(bounds.min - padding, bounds.max + padding)
+    }
+
+    /// 推进场景里所有动画播放器，并把姿态写进目标节点的局部变换。
+    ///
+    /// 必须在 [`Scene::update`] **之前**调用：它改的是局部变换，
+    /// 世界变换要在之后才重算，顺序反了动画就慢一帧。
+    pub fn tick_animations(&mut self, dt: f32) {
+        for position in 0..self.index.animators.len() {
+            let handle = self.index.animators[position];
+            // 同样先摘出来：应用姿态要写别的节点。
+            let Some(mut player) = self
+                .nodes
+                .try_borrow_mut(handle)
+                .ok()
+                .and_then(|node| node.animator.take())
+            else {
+                continue;
+            };
+
+            player.animator_mut().tick(dt);
+
+            for (target, entry) in player.pose().iter() {
+                let node_handle = player.target(target);
+                let Ok(node) = self.nodes.try_borrow_mut(node_handle) else {
+                    continue;
+                };
+                // 没被驱动的分量保持节点原样，不能重置成单位值。
+                if let Some(position) = entry.position {
+                    node.transform.position = position;
+                }
+                if let Some(rotation) = entry.rotation {
+                    node.transform.rotation = rotation;
+                }
+                if let Some(scale) = entry.scale {
+                    node.transform.scale = scale;
+                }
+            }
+
+            // 形变权重走另一张表：它是稀疏的，而且写的是网格上的权重数组，
+            // 不是节点的局部变换。
+            for sample in player.pose().morphs() {
+                let node_handle = player.target(sample.target);
+                let Ok(node) = self.nodes.try_borrow_mut(node_handle) else {
+                    continue;
+                };
+                node.set_morph_weight(sample.index, sample.weight);
+            }
+
+            if let Ok(node) = self.nodes.try_borrow_mut(handle) {
+                node.animator = Some(player);
+            }
+        }
     }
 
     /// 参与剔除判定的对象数，即所有可见且带网格的节点数。
@@ -314,18 +574,112 @@ impl Scene {
     /// 必须在 [`Scene::update`] **之后**调用：世界空间的粒子在出生时就要用到
     /// 节点的世界变换，变换没算就发射的话，第一批粒子会出现在原点。
     pub fn tick_particles(&mut self, dt: f32) {
-        for node in self.nodes.iter_mut() {
-            if node.particles.is_none() {
+        for position in 0..self.index.particles.len() {
+            let handle = self.index.particles[position];
+            let Ok(node) = self.nodes.try_borrow_mut(handle) else {
+                continue;
+            };
+            // 不可见的系统冻结而不是继续烧 CPU；再次可见时从冻结处接着演。
+            if !node.global_visible {
                 continue;
             }
             let world = node.global_transform;
-            let visible = node.global_visible;
             if let Some(system) = node.particles.as_deref_mut() {
-                // 不可见的系统冻结而不是继续烧 CPU；再次可见时从冻结处接着演。
-                if visible {
-                    system.tick(dt, world);
-                }
+                system.tick(dt, world);
             }
+        }
+    }
+
+    /// 解一条双骨 IK 链（肩肘腕、胯膝踝都是这个结构），把结果写回局部旋转。
+    ///
+    /// 要在 [`Scene::update`] **之后**调用——求解读的是世界位置。
+    /// 本链上的世界变换会就地刷新，所以紧接着读末端位置就是准的；
+    /// 但包围盒与剔除结构要等下一次 `update` 才更新。
+    /// 典型的一帧是：动画 → update → IK → 渲染。
+    ///
+    /// `target` 与 `pole` 都是世界坐标。返回是否真的解了（三个节点都有效才解）。
+    pub fn solve_two_bone_ik(
+        &mut self,
+        root: Handle<Node>,
+        mid: Handle<Node>,
+        end: Handle<Node>,
+        target: Vec3,
+        pole: Option<Vec3>,
+        weight: f32,
+    ) -> bool {
+        let (Some(root_node), Some(mid_node), Some(end_node)) =
+            (self.try_get(root), self.try_get(mid), self.try_get(end))
+        else {
+            return false;
+        };
+
+        let solution = kanim::solve_two_bone(
+            root_node.global_position(),
+            mid_node.global_position(),
+            end_node.global_position(),
+            target,
+            pole,
+        )
+        .scaled(weight);
+
+        // 顺序要紧：先转根关节，再转中关节。
+        // 每转完一个都要把它的子树刷新一遍——中关节的旋转增量是世界空间的，
+        // 换算到局部时要除掉父链的世界旋转，而根关节刚刚才动过。
+        self.apply_world_rotation(root, solution.root);
+        self.refresh_subtree(root);
+        self.apply_world_rotation(mid, solution.mid);
+        self.refresh_subtree(mid);
+        true
+    }
+
+    /// 重算一棵子树的世界变换，不碰剔除结构。
+    ///
+    /// 给 IK 这类「改完局部变换要立刻读世界坐标」的场合用；
+    /// 整场景的刷新仍然走 [`Scene::update`]。
+    fn refresh_subtree(&mut self, handle: Handle<Node>) {
+        let Some(node) = self.try_get(handle) else {
+            return;
+        };
+        let parent = node.parent;
+        let parent_matrix = self
+            .try_get(parent)
+            .map(|parent| parent.global_transform)
+            .unwrap_or(Mat4::IDENTITY);
+
+        let mut stack = vec![(handle, parent_matrix)];
+        while let Some((handle, parent_matrix)) = stack.pop() {
+            let (global, child_count) = {
+                let Ok(node) = self.nodes.try_borrow_mut(handle) else {
+                    continue;
+                };
+                let global = parent_matrix * node.transform.matrix();
+                node.global_transform = global;
+                (global, node.children.len())
+            };
+            for index in (0..child_count).rev() {
+                let child = self.nodes[handle].children[index];
+                stack.push((child, global));
+            }
+        }
+    }
+
+    /// 把一个**世界空间**的旋转增量施加到节点上。
+    ///
+    /// 节点存的是局部旋转，所以要把增量换算到父节点的空间里：
+    /// `局部增量 = 父世界旋转⁻¹ × 世界增量 × 父世界旋转`。
+    fn apply_world_rotation(&mut self, handle: Handle<Node>, delta: Quat) {
+        let Some(node) = self.try_get(handle) else {
+            return;
+        };
+        let parent = node.parent;
+        let parent_rotation = self
+            .try_get(parent)
+            .map(|parent| parent.global_transform.to_scale_rotation_translation().1)
+            .unwrap_or(Quat::IDENTITY);
+
+        let local_delta = parent_rotation.inverse() * delta * parent_rotation;
+        if let Ok(node) = self.nodes.try_borrow_mut(handle) {
+            node.transform.rotation = (local_delta * node.transform.rotation).normalize();
         }
     }
 
@@ -334,9 +688,11 @@ impl Scene {
     /// 走线性遍历而不是 BVH：粒子系统通常只有几十个，
     /// 为它们再维护一棵树，维护开销比省下的判定还多。
     pub fn visible_particles(&self, frustum: Option<&Frustum>) -> Vec<ParticleItem<'_>> {
-        self.nodes
+        self.index
+            .particles
             .iter()
-            .filter_map(|node| {
+            .filter_map(|&handle| {
+                let node = self.try_get(handle)?;
                 let system = node.particles()?;
                 if !node.global_visible || system.is_empty() {
                     return None;
@@ -380,18 +736,23 @@ impl Scene {
         node.mesh().map(|mesh| RenderItem {
             mesh,
             material: node.material(),
-            transform: node.global_transform,
+            transform: skinned_transform(node),
             aabb: node.global_aabb,
+            skin: node.skin().map(Skin::matrices),
+            morph_weights: node.morph_weights(),
         })
     }
 
     /// 场景中第一个启用且可见的相机，返回（世界变换, 相机参数）。
     pub fn active_camera(&self) -> Option<(Mat4, Camera)> {
-        self.nodes.iter().find_map(|node| match node.camera() {
-            Some(camera) if camera.enabled && node.global_visible => {
-                Some((node.global_transform, *camera))
+        self.index.cameras.iter().find_map(|&handle| {
+            let node = self.try_get(handle)?;
+            match node.camera() {
+                Some(camera) if camera.enabled && node.global_visible => {
+                    Some((node.global_transform, *camera))
+                }
+                _ => None,
             }
-            _ => None,
         })
     }
 
@@ -413,7 +774,8 @@ impl Scene {
     ///
     /// 数量超过 [`klight::MAX_LIGHTS`] 时由渲染器截断。
     pub fn visible_lights(&self) -> impl Iterator<Item = (&Light, Mat4)> {
-        self.nodes.iter().filter_map(|node| {
+        self.index.lights.iter().filter_map(|&handle| {
+            let node = self.try_get(handle)?;
             node.light()
                 .filter(|light| light.enabled && node.global_visible)
                 .map(|light| (light, node.global_transform))
@@ -430,8 +792,10 @@ impl Scene {
                 .map(|mesh| RenderItem {
                     mesh,
                     material: node.material(),
-                    transform: node.global_transform,
+                    transform: skinned_transform(node),
                     aabb: node.global_aabb,
+                    skin: node.skin().map(Skin::matrices),
+                    morph_weights: node.morph_weights(),
                 })
         })
     }
@@ -1089,8 +1453,540 @@ mod test {
         );
     }
 
+    // ── 骨骼动画（用仓库里的 Soldier.glb 做集成测试）──
 
+    /// 加载 Soldier.glb：49 关节 + Idle/Run/TPose/Walk 四个动画。
+    fn soldier() -> kasset::Resource<Model> {
+        use kasset::{MemoryResourceIo, ResourceManager};
+        use std::sync::Arc;
 
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/Soldier.glb");
+        let bytes = std::fs::read(path).expect("仓库里应当有 assets/Soldier.glb");
 
+        let mut io = MemoryResourceIo::new();
+        io.add("Soldier.glb", bytes);
+        let manager = ResourceManager::with_io(Arc::new(io));
+        manager.add_loader(kgltf::GltfLoader);
+        manager
+            .request_blocking::<Model>("Soldier.glb")
+            .expect("Soldier.glb 应当能加载")
+    }
 
+    /// 把 Soldier 实例化进一个新场景，返回（场景，模型根节点）。
+    fn soldier_scene() -> (Scene, Handle<Node>) {
+        let model = soldier();
+        let model = model.data_ref().unwrap();
+        let mut scene = Scene::new();
+        let root = scene.instantiate_model(&model, scene.root());
+        scene.update();
+        (scene, root)
+    }
+
+    /// 找到场景里第一个蒙皮网格节点。
+    fn find_skinned(scene: &Scene) -> Handle<Node> {
+        scene
+            .nodes()
+            .pair_iter()
+            .find(|(_, node)| node.skin().is_some())
+            .map(|(handle, _)| handle)
+            .expect("应当有蒙皮网格节点")
+    }
+
+    #[test]
+    fn instantiating_a_skinned_model_attaches_skins() {
+        let (scene, _) = soldier_scene();
+
+        let handle = find_skinned(&scene);
+        let node = &scene[handle];
+        let skin = node.skin().unwrap();
+
+        // 网格与骨架必须落在同一个节点上，否则渲染时取不到骨骼矩阵。
+        assert!(node.mesh().is_some());
+        assert_eq!(skin.len(), 49);
+        // 关节句柄都要指向真实存在的节点。
+        assert!(skin.joints().iter().all(|&j| scene.try_get(j).is_some()));
+    }
+
+    #[test]
+    fn instantiating_a_skinned_model_attaches_an_animator() {
+        let (scene, root) = soldier_scene();
+
+        let player = scene[root].animator().expect("模型根节点应当挂上播放器");
+        let names: Vec<&str> = player
+            .animator()
+            .clips()
+            .iter()
+            .map(|clip| clip.name())
+            .collect();
+
+        assert_eq!(names, vec!["Idle", "Run", "TPose", "Walk"]);
+        // 目标映射要覆盖模型的全部节点。
+        assert_eq!(player.targets().len(), 68);
+    }
+
+    #[test]
+    fn playing_an_animation_moves_the_joints() {
+        let (mut scene, root) = soldier_scene();
+        let joint = scene[find_skinned(&scene)].skin().unwrap().joints()[10];
+        let before = scene[joint].transform;
+
+        scene[root]
+            .animator_mut()
+            .unwrap()
+            .animator_mut()
+            .play_by_name("Walk")
+            .expect("应当有 Walk 动画");
+        scene.tick_animations(0.4);
+        scene.update();
+
+        // 走路动画必须真的把骨头转起来。
+        assert_ne!(scene[joint].transform, before);
+    }
+
+    #[test]
+    fn skin_matrices_are_finite_and_follow_the_animation() {
+        let (mut scene, root) = soldier_scene();
+        let handle = find_skinned(&scene);
+
+        scene[root]
+            .animator_mut()
+            .unwrap()
+            .animator_mut()
+            .play_by_name("Run")
+            .unwrap();
+        scene.tick_animations(0.3);
+        scene.update();
+        let running = scene[handle].skin().unwrap().matrices().to_vec();
+
+        assert_eq!(running.len(), 49);
+        assert!(running.iter().all(|m| m.is_finite()), "骨骼矩阵出现了 NaN");
+
+        // 再推进一段时间，姿态应当继续变化。
+        scene.tick_animations(0.3);
+        scene.update();
+        let later = scene[handle].skin().unwrap().matrices();
+        assert!(
+            running.iter().zip(later).any(|(a, b)| a != b),
+            "动画推进了，骨骼矩阵却纹丝不动"
+        );
+    }
+
+    #[test]
+    fn animation_is_deterministic() {
+        let run = |seconds: f32| {
+            let (mut scene, root) = soldier_scene();
+            scene[root]
+                .animator_mut()
+                .unwrap()
+                .animator_mut()
+                .play_by_name("Walk")
+                .unwrap();
+            for _ in 0..(seconds * 60.0) as u32 {
+                scene.tick_animations(1.0 / 60.0);
+            }
+            scene.update();
+            scene[find_skinned(&scene)]
+                .skin()
+                .unwrap()
+                .matrices()
+                .to_vec()
+        };
+
+        // 同样的时间推进必须给出逐位相同的骨骼矩阵。
+        assert_eq!(run(0.5), run(0.5));
+    }
+
+    #[test]
+    fn skinned_meshes_render_with_an_identity_transform() {
+        let (scene, _) = soldier_scene();
+
+        let item = scene
+            .visible_meshes()
+            .find(|item| item.skin.is_some())
+            .expect("应当收集到蒙皮绘制项");
+
+        // 模型位姿在骨骼矩阵里，节点自身的变换按 glTF 规范要被忽略。
+        assert_eq!(item.transform, Mat4::IDENTITY);
+        assert_eq!(item.skin.unwrap().len(), 49);
+    }
+
+    #[test]
+    fn skinned_bounds_follow_the_joints() {
+        let (mut scene, root) = soldier_scene();
+        let handle = find_skinned(&scene);
+
+        // 把整个模型搬走，包围盒必须跟着走——绑定姿态的包围盒是不会动的。
+        let bind_pose = scene[handle].global_aabb();
+        scene[root].transform.position = Vec3::new(50.0, 0.0, 0.0);
+        scene.update();
+        let moved = scene[handle].global_aabb();
+
+        assert!(
+            (moved.center().x - bind_pose.center().x - 50.0).abs() < 1.0,
+            "蒙皮包围盒没跟着模型走：{:?} → {:?}",
+            bind_pose.center(),
+            moved.center()
+        );
+    }
+
+    #[test]
+    fn skinned_bounds_contain_every_joint() {
+        let (mut scene, root) = soldier_scene();
+        scene[root]
+            .animator_mut()
+            .unwrap()
+            .animator_mut()
+            .play_by_name("Run")
+            .unwrap();
+        scene.tick_animations(0.5);
+        scene.update();
+
+        let handle = find_skinned(&scene);
+        let bounds = scene[handle].global_aabb();
+        for &joint in scene[handle].skin().unwrap().joints() {
+            let position = scene[joint].global_position();
+            assert!(
+                bounds.contains(position),
+                "关节 {position:?} 落在包围盒 {bounds:?} 之外，动起来就会被误剔除"
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_instances_share_clips_but_not_progress() {
+        let model = soldier();
+        let model = model.data_ref().unwrap();
+        let mut scene = Scene::new();
+        let first = scene.instantiate_model(&model, scene.root());
+        let second = scene.instantiate_model(&model, scene.root());
+        scene.update();
+
+        // 两个实例各播各的。
+        scene[first]
+            .animator_mut()
+            .unwrap()
+            .animator_mut()
+            .play_by_name("Walk")
+            .unwrap();
+        scene[second]
+            .animator_mut()
+            .unwrap()
+            .animator_mut()
+            .play_by_name("Idle")
+            .unwrap();
+        scene.tick_animations(0.25);
+
+        let first_time = scene[first].animator().unwrap().animator().states()[0].time();
+        assert!((first_time - 0.25).abs() < 1e-5);
+
+        // 各自的骨架也要指向自己的关节，不能串台。
+        let skinned: Vec<Handle<Node>> = scene
+            .nodes()
+            .pair_iter()
+            .filter(|(_, node)| node.skin().is_some())
+            .map(|(handle, _)| handle)
+            .collect();
+        assert_eq!(skinned.len(), 4); // 两个实例 × （身体 + 面罩）
+        assert_ne!(
+            scene[skinned[0]].skin().unwrap().joints()[0],
+            scene[skinned[2]].skin().unwrap().joints()[0]
+        );
+    }
+
+    #[test]
+    fn static_models_get_no_animator() {
+        let mut scene = Scene::new();
+        let model = two_level_model();
+
+        let root = scene.instantiate_model(&model, scene.root());
+        scene.update();
+
+        assert!(scene[root].animator().is_none());
+        assert!(scene.visible_meshes().all(|item| item.skin.is_none()));
+    }
+
+    // ── IK ──
+
+    /// 造一条三节点的链：root →(0,1,0)→ mid →(0,1,0)→ end。
+    fn ik_chain(scene: &mut Scene) -> (Handle<Node>, Handle<Node>, Handle<Node>) {
+        let root = scene.add_node(Node::new("Root"));
+        // 中间关节先往侧面偏一点，免得三点共线、弯曲平面退化。
+        let mid = scene.add_node_with_parent(
+            Node::new("Mid").with_position(Vec3::new(0.2, 1.0, 0.0)),
+            root,
+        );
+        let end = scene.add_node_with_parent(
+            Node::new("End").with_position(Vec3::new(-0.2, 1.0, 0.0)),
+            mid,
+        );
+        scene.update();
+        (root, mid, end)
+    }
+
+    #[test]
+    fn ik_moves_the_end_effector_onto_the_target() {
+        let mut scene = Scene::new();
+        let (root, mid, end) = ik_chain(&mut scene);
+        let target = Vec3::new(1.2, 1.0, 0.0);
+
+        assert!(scene.solve_two_bone_ik(root, mid, end, target, None, 1.0));
+        scene.update();
+
+        let reached = scene[end].global_position();
+        assert!(
+            (reached - target).length() < 1e-3,
+            "末端停在 {reached:?}，没够到 {target:?}"
+        );
+    }
+
+    #[test]
+    fn ik_preserves_bone_lengths() {
+        let mut scene = Scene::new();
+        let (root, mid, end) = ik_chain(&mut scene);
+        let upper = (scene[mid].global_position() - scene[root].global_position()).length();
+        let lower = (scene[end].global_position() - scene[mid].global_position()).length();
+
+        scene.solve_two_bone_ik(root, mid, end, Vec3::new(0.5, 0.5, 0.8), None, 1.0);
+        scene.update();
+
+        // IK 只能转关节，不能把骨头拉长。
+        let new_upper = (scene[mid].global_position() - scene[root].global_position()).length();
+        let new_lower = (scene[end].global_position() - scene[mid].global_position()).length();
+        assert!((new_upper - upper).abs() < 1e-4);
+        assert!((new_lower - lower).abs() < 1e-4);
+    }
+
+    #[test]
+    fn ik_weight_of_zero_changes_nothing() {
+        let mut scene = Scene::new();
+        let (root, mid, end) = ik_chain(&mut scene);
+        let before = scene[end].global_position();
+
+        scene.solve_two_bone_ik(root, mid, end, Vec3::new(2.0, 0.0, 0.0), None, 0.0);
+        scene.update();
+
+        assert!((scene[end].global_position() - before).length() < 1e-5);
+    }
+
+    #[test]
+    fn ik_works_under_a_transformed_parent() {
+        // 整条链挂在一个被旋转和平移过的父节点下：
+        // 求解在世界空间进行，写回的却是局部旋转，换算错了这里就会露馅。
+        let mut scene = Scene::new();
+        let rig = scene.add_node(
+            Node::new("Rig")
+                .with_position(Vec3::new(5.0, 0.0, -3.0))
+                .with_transform(Transform {
+                    position: Vec3::new(5.0, 0.0, -3.0),
+                    rotation: Quat::from_rotation_y(1.1),
+                    scale: Vec3::ONE,
+                }),
+        );
+        let root = scene.add_node_with_parent(Node::new("Root"), rig);
+        let mid = scene.add_node_with_parent(
+            Node::new("Mid").with_position(Vec3::new(0.2, 1.0, 0.0)),
+            root,
+        );
+        let end = scene.add_node_with_parent(
+            Node::new("End").with_position(Vec3::new(-0.2, 1.0, 0.0)),
+            mid,
+        );
+        scene.update();
+
+        let target = scene[root].global_position() + Vec3::new(1.0, 1.0, 0.5);
+        scene.solve_two_bone_ik(root, mid, end, target, None, 1.0);
+        scene.update();
+
+        let reached = scene[end].global_position();
+        assert!(
+            (reached - target).length() < 1e-3,
+            "父节点带旋转时解错了：末端在 {reached:?}，目标 {target:?}"
+        );
+    }
+
+    #[test]
+    fn ik_rejects_invalid_handles() {
+        let mut scene = Scene::new();
+        let (root, mid, _) = ik_chain(&mut scene);
+
+        assert!(!scene.solve_two_bone_ik(root, mid, Handle::NONE, Vec3::ONE, None, 1.0));
+    }
+
+    // ── 形变目标（用仓库里的 lion.glb 做集成测试）──
+
+    /// 加载 lion.glb：4 个网格各带一个形变（mouth / leftEye / rightEye / tongue）。
+    fn lion() -> kasset::Resource<Model> {
+        use kasset::{MemoryResourceIo, ResourceManager};
+        use std::sync::Arc;
+
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/lion.glb");
+        let bytes = std::fs::read(path).expect("仓库里应当有 assets/lion.glb");
+
+        let mut io = MemoryResourceIo::new();
+        io.add("lion.glb", bytes);
+        let manager = ResourceManager::with_io(Arc::new(io));
+        manager.add_loader(kgltf::GltfLoader);
+        manager
+            .request_blocking::<Model>("lion.glb")
+            .expect("lion.glb 应当能加载")
+    }
+
+    /// 实例化 lion，返回（场景，带 mouth 形变的节点）。
+    fn lion_scene() -> (Scene, Handle<Node>) {
+        let model = lion();
+        let model = model.data_ref().unwrap();
+        let mut scene = Scene::new();
+        scene.instantiate_model(&model, scene.root());
+        scene.update();
+
+        let mouth = scene
+            .nodes()
+            .pair_iter()
+            .find(|(_, node)| node.find_morph_target("mouth").is_some())
+            .map(|(handle, _)| handle)
+            .expect("应当有带 mouth 形变的节点");
+        (scene, mouth)
+    }
+
+    #[test]
+    fn instantiating_a_morphed_model_seeds_the_default_weights() {
+        let (scene, mouth) = lion_scene();
+
+        // mouth 的默认权重是 1，实例化时要照搬过来。
+        assert_eq!(scene[mouth].morph_weights(), &[1.0]);
+        assert_eq!(scene[mouth].find_morph_target("mouth"), Some(0));
+    }
+
+    #[test]
+    fn morph_weights_reach_the_render_item() {
+        let (mut scene, mouth) = lion_scene();
+        scene[mouth].set_morph_weight(0, 0.25);
+        scene.update();
+
+        let item = scene
+            .visible_meshes()
+            .find(|item| item.mesh.has_morph_targets())
+            .expect("应当收集到带形变的绘制项");
+
+        assert_eq!(
+            scene
+                .visible_meshes()
+                .filter(|item| !item.morph_weights.is_empty())
+                .count(),
+            4
+        );
+        assert!(item.mesh.morph_target_count() > 0);
+    }
+
+    #[test]
+    fn setting_a_morph_weight_by_name() {
+        let (mut scene, mouth) = lion_scene();
+
+        assert!(scene[mouth].set_morph_weight_by_name("mouth", 0.5));
+        assert_eq!(scene[mouth].morph_weights(), &[0.5]);
+
+        // 名字不存在时如实返回 false，而不是悄悄改错一个。
+        assert!(!scene[mouth].set_morph_weight_by_name("nose", 1.0));
+        assert_eq!(scene[mouth].morph_weights(), &[0.5]);
+    }
+
+    #[test]
+    fn out_of_range_morph_index_is_ignored() {
+        let (mut scene, mouth) = lion_scene();
+
+        scene[mouth].set_morph_weight(99, 1.0);
+
+        assert_eq!(scene[mouth].morph_weights().len(), 1);
+    }
+
+    #[test]
+    fn morph_weight_changes_the_bounds() {
+        let (mut scene, mouth) = lion_scene();
+        scene[mouth].set_morph_weight(0, 0.0);
+        scene.update();
+        let rest = scene[mouth].global_aabb();
+
+        scene[mouth].set_morph_weight(0, 1.0);
+        scene.update();
+        let open = scene[mouth].global_aabb();
+
+        // 形变把顶点推出了绑定姿态的范围，包围盒必须跟着长大，
+        // 否则张嘴的那一刻会被误剔除。
+        assert!(
+            open.size().length() > rest.size().length(),
+            "形变后包围盒没变大：{:?} → {:?}",
+            rest.size(),
+            open.size()
+        );
+    }
+
+    #[test]
+    fn morph_weights_are_per_instance() {
+        let model = lion();
+        let model = model.data_ref().unwrap();
+        let mut scene = Scene::new();
+        scene.instantiate_model(&model, scene.root());
+        scene.instantiate_model(&model, scene.root());
+        scene.update();
+
+        let mouths: Vec<Handle<Node>> = scene
+            .nodes()
+            .pair_iter()
+            .filter(|(_, node)| node.find_morph_target("mouth").is_some())
+            .map(|(handle, _)| handle)
+            .collect();
+        assert_eq!(mouths.len(), 2);
+
+        scene[mouths[0]].set_morph_weight(0, 0.0);
+
+        // 网格是共享资源，但表情得各做各的。
+        assert_eq!(scene[mouths[0]].morph_weights(), &[0.0]);
+        assert_eq!(scene[mouths[1]].morph_weights(), &[1.0]);
+    }
+
+    #[test]
+    fn animation_drives_morph_weights() {
+        use kanim::{AnimationClip, Animator, Channel, Curve, Interpolation, Track};
+        use std::sync::Arc;
+
+        // 合成一个只驱动形变权重的剪辑，挂到 lion 的某个节点上。
+        let (mut scene, mouth) = lion_scene();
+        let clip = AnimationClip::new(
+            "Talk",
+            vec![Track {
+                target: 0,
+                channel: Channel::MorphWeight {
+                    index: 0,
+                    curve: Curve::new(vec![0.0, 1.0], vec![0.0, 1.0], Interpolation::Linear)
+                        .unwrap(),
+                },
+            }],
+        );
+
+        let mut animator = Animator::new(Arc::new(vec![clip]));
+        animator.play(0).unwrap();
+        let player = AnimationPlayer::new(animator, vec![mouth]);
+        let rig = scene.add_node(Node::new("Rig").with_animator(player));
+        let _ = rig;
+        scene.update();
+
+        scene.tick_animations(0.25);
+
+        // 权重被动画写进了目标节点。
+        assert_eq!(scene[mouth].morph_weights(), &[0.25]);
+    }
+
+    #[test]
+    fn meshes_without_morph_targets_have_no_weights() {
+        let mut scene = Scene::new();
+        let cube = scene.add_node(Node::new("Cube").with_mesh(Mesh::cube()));
+        scene.update();
+
+        assert!(scene[cube].morph_weights().is_empty());
+        assert!(
+            scene
+                .visible_meshes()
+                .all(|item| item.morph_weights.is_empty())
+        );
+    }
 }

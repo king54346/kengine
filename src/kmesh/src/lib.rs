@@ -26,7 +26,7 @@ pub const MESH_TYPE_UUID: Uuid = uuid!("5d7e9a32-1c48-4f60-8b93-a2e5c740d816");
 
 /// 常用类型的集中导出。
 pub mod prelude {
-    pub use crate::{Mesh, Vertex};
+    pub use crate::{Mesh, MorphDelta, MorphTarget, SkinVertex, Vertex};
     pub use kmath::Aabb;
 }
 
@@ -96,6 +96,129 @@ impl Vertex {
     }
 }
 
+/// 顶点的蒙皮属性。
+///
+/// 单独一个结构而不是塞进 [`Vertex`]：静态网格占绝大多数，
+/// 让它们每个顶点白背 24 字节不划算。渲染器把它作为**第二个顶点缓冲**绑定，
+/// 只有蒙皮管线才会读它。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct SkinVertex {
+    /// 影响本顶点的四个关节，值是关节在 skin 关节表里的序号。
+    ///
+    /// 用 `u16` 而不是 `u32`：GPU 有原生的 `Uint16x4` 顶点格式，
+    /// 而 6 万多个关节的骨架并不存在。
+    pub joints: [u16; 4],
+    /// 四个关节各自的影响权重，和为 1。
+    pub weights: [f32; 4],
+}
+
+impl Default for SkinVertex {
+    fn default() -> Self {
+        // 全权重给 0 号关节：等价于「刚性绑定在根骨上」，是个安全的兜底。
+        Self {
+            joints: [0; 4],
+            weights: [1.0, 0.0, 0.0, 0.0],
+        }
+    }
+}
+
+impl SkinVertex {
+    /// 权重之和。
+    pub fn weight_sum(&self) -> f32 {
+        self.weights.iter().sum()
+    }
+
+    /// 把权重归一化到和为 1。
+    ///
+    /// glTF 规范要求权重和为 1，但导出器不总是照做；不归一化的话，
+    /// 权重和偏大的顶点会被整体拉离骨骼。
+    pub fn normalize(&mut self) {
+        let sum = self.weight_sum();
+        if sum > f32::EPSILON {
+            for weight in &mut self.weights {
+                *weight /= sum;
+            }
+        } else {
+            // 一个权重都没有：退回刚性绑定，而不是让顶点塌到原点。
+            *self = Self::default();
+        }
+    }
+}
+
+/// 一个顶点在某个形变目标下的增量。
+///
+/// 布局直接给 GPU 用，所以两个 `vec3` 各自补齐到 16 字节——
+/// WGSL 里 `vec3` 的对齐要求就是 16，不补的话两边的字段会错位。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+pub struct MorphDelta {
+    /// 位置增量。
+    pub position: [f32; 3],
+    /// 对齐填充。
+    pub padding0: f32,
+    /// 法线增量。形变后法线也得跟着变，否则光照会露馅。
+    pub normal: [f32; 3],
+    /// 对齐填充。
+    pub padding1: f32,
+}
+
+/// 一个形变目标（blend shape）：一整套逐顶点的增量。
+///
+/// 最终顶点 = 基础顶点 + Σ 权重ᵢ × 增量ᵢ。权重通常在 `[0, 1]`，
+/// 但规范并不限制——超出这个范围会得到夸张的外插效果，有时正是想要的。
+#[derive(Clone, Debug, PartialEq)]
+pub struct MorphTarget {
+    name: String,
+    deltas: Vec<MorphDelta>,
+    /// 位置增量的范围，构造时算好。
+    ///
+    /// 剔除要用：形变会把顶点推出绑定姿态的包围盒，逐顶点重算太贵，
+    /// 按「权重 × 增量范围」放大是个便宜且保守的近似。
+    delta_bounds: Aabb,
+}
+
+impl MorphTarget {
+    /// 用逐顶点增量构造。
+    pub fn new(name: impl Into<String>, deltas: Vec<MorphDelta>) -> Self {
+        let mut delta_bounds = Aabb::EMPTY;
+        for delta in &deltas {
+            delta_bounds.expand(Vec3::from_array(delta.position));
+        }
+
+        Self {
+            name: name.into(),
+            deltas,
+            delta_bounds,
+        }
+    }
+
+    /// 位置增量的范围。权重为 1 时顶点最多被推到这个范围的边界。
+    pub fn delta_bounds(&self) -> Aabb {
+        self.delta_bounds
+    }
+
+    /// 目标名，来自 glTF 的 `targetNames`；没有时是 `Target0` 这样的占位名。
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// 逐顶点增量，与网格顶点一一对应。
+    pub fn deltas(&self) -> &[MorphDelta] {
+        &self.deltas
+    }
+
+    /// 顶点数量。
+    pub fn len(&self) -> usize {
+        self.deltas.len()
+    }
+
+    /// 是否没有任何增量。
+    pub fn is_empty(&self) -> bool {
+        self.deltas.is_empty()
+    }
+}
+
 /// 一份网格数据。
 ///
 /// 克隆共享同一个 `id`，渲染器据此避免重复上传显存——
@@ -106,6 +229,12 @@ pub struct Mesh {
     vertices: Vec<Vertex>,
     /// 索引用 `u32`：真实模型经常超过 65535 个顶点。
     indices: Vec<u32>,
+    /// 蒙皮属性，与 `vertices` 一一对应。静态网格为 [`None`]。
+    skin: Option<Vec<SkinVertex>>,
+    /// 形变目标。每个目标都与 `vertices` 一一对应。
+    morph_targets: Vec<MorphTarget>,
+    /// 形变权重的初始值，与 `morph_targets` 一一对应。
+    morph_weights: Vec<f32>,
     /// 构造时算好的局部包围盒。剔除每帧都要用，不能每次重新遍历顶点。
     aabb: Aabb,
 }
@@ -118,8 +247,128 @@ impl Mesh {
             id: Uuid::new_v4(),
             vertices,
             indices,
+            skin: None,
+            morph_targets: Vec::new(),
+            morph_weights: Vec::new(),
             aabb,
         }
+    }
+
+    /// 附上蒙皮属性，使该网格可以被骨骼驱动。
+    ///
+    /// 数量与顶点数对不上时忽略并告警——宁可退化成静态网格，
+    /// 也不要在渲染时按错位的下标去取关节。
+    pub fn with_skin(mut self, mut skin: Vec<SkinVertex>) -> Self {
+        if skin.len() != self.vertices.len() {
+            return self;
+        }
+        for vertex in &mut skin {
+            vertex.normalize();
+        }
+        self.skin = Some(skin);
+        self
+    }
+
+    /// 蒙皮属性；静态网格返回 [`None`]。
+    pub fn skin(&self) -> Option<&[SkinVertex]> {
+        self.skin.as_deref()
+    }
+
+    /// 是否是蒙皮网格。
+    pub fn is_skinned(&self) -> bool {
+        self.skin.is_some()
+    }
+
+    /// 附上形变目标与它们的初始权重。
+    ///
+    /// 增量数与顶点数对不上的目标会被丢掉：错位的增量会把网格撕开，
+    /// 少一个形变总比整个模型炸掉强。权重数量不足时补 0。
+    pub fn with_morph_targets(
+        mut self,
+        targets: Vec<MorphTarget>,
+        mut weights: Vec<f32>,
+    ) -> Self {
+        let vertex_count = self.vertices.len();
+        let targets: Vec<MorphTarget> = targets
+            .into_iter()
+            .filter(|target| target.len() == vertex_count)
+            .collect();
+
+        weights.resize(targets.len(), 0.0);
+        self.morph_targets = targets;
+        self.morph_weights = weights;
+        self
+    }
+
+    /// 全部形变目标。
+    pub fn morph_targets(&self) -> &[MorphTarget] {
+        &self.morph_targets
+    }
+
+    /// 形变目标数量。
+    pub fn morph_target_count(&self) -> usize {
+        self.morph_targets.len()
+    }
+
+    /// 是否带形变目标。
+    pub fn has_morph_targets(&self) -> bool {
+        !self.morph_targets.is_empty()
+    }
+
+    /// 形变权重的初始值。实例化到场景时以它为起点。
+    pub fn morph_weights(&self) -> &[f32] {
+        &self.morph_weights
+    }
+
+    /// 按名字找形变目标的序号。
+    pub fn find_morph_target(&self, name: &str) -> Option<usize> {
+        self.morph_targets
+            .iter()
+            .position(|target| target.name() == name)
+    }
+
+    /// 按给定权重算出形变后的局部包围盒。
+    ///
+    /// 逐顶点重算太贵（每帧、每个形变网格都要走一遍顶点），
+    /// 这里按「权重 × 该目标的增量范围」把基础包围盒撑开——
+    /// 结果偏保守（可能比实际大），但剔除只怕小不怕大。
+    pub fn morphed_aabb(&self, weights: &[f32]) -> Aabb {
+        if self.morph_targets.is_empty() {
+            return self.aabb;
+        }
+
+        let mut bounds = self.aabb;
+        for (target, weight) in self.morph_targets.iter().zip(weights) {
+            if *weight == 0.0 || target.delta_bounds.is_empty() {
+                continue;
+            }
+            // 权重可以是负的，两个方向都要放开。
+            let extent = target.delta_bounds.min.abs().max(target.delta_bounds.max.abs())
+                * weight.abs();
+            bounds = Aabb::new(bounds.min - extent, bounds.max + extent);
+        }
+        bounds
+    }
+
+    /// 按给定权重算出形变后的某个顶点位置。
+    ///
+    /// GPU 上做的是同一件事，这里供 CPU 侧（包围盒、拾取、测试）使用。
+    pub fn morphed_position(&self, vertex: usize, weights: &[f32]) -> Vec3 {
+        let mut position = self
+            .vertices
+            .get(vertex)
+            .map(Vertex::position)
+            .unwrap_or(Vec3::ZERO);
+
+        for (target, weight) in self.morph_targets.iter().zip(weights) {
+            if *weight == 0.0 {
+                continue;
+            }
+            if let Some(delta) = target.deltas.get(vertex) {
+                position += Vec3::from_array(delta.position) * *weight;
+            }
+        }
+        position
     }
 
     /// 显存缓存键。克隆的网格共享同一个 id。
@@ -308,6 +557,223 @@ impl ResourceData for Mesh {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// 造一个把所有顶点沿 +Y 推 `amount` 的形变目标。
+    fn push_up(name: &str, count: usize, amount: f32) -> MorphTarget {
+        MorphTarget::new(
+            name,
+            vec![
+                MorphDelta {
+                    position: [0.0, amount, 0.0],
+                    normal: [0.0, 0.0, 0.0],
+                    ..Default::default()
+                };
+                count
+            ],
+        )
+    }
+
+    #[test]
+    fn meshes_have_no_morph_targets_by_default() {
+        let mesh = Mesh::cube();
+
+        assert!(!mesh.has_morph_targets());
+        assert_eq!(mesh.morph_target_count(), 0);
+        assert!(mesh.morph_weights().is_empty());
+    }
+
+    #[test]
+    fn morph_targets_attach_with_their_weights() {
+        let mesh = Mesh::cube();
+        let count = mesh.vertices().len();
+
+        let mesh = mesh.with_morph_targets(vec![push_up("mouth", count, 1.0)], vec![0.5]);
+
+        assert!(mesh.has_morph_targets());
+        assert_eq!(mesh.morph_target_count(), 1);
+        assert_eq!(mesh.morph_weights(), &[0.5]);
+        assert_eq!(mesh.find_morph_target("mouth"), Some(0));
+        assert_eq!(mesh.find_morph_target("nope"), None);
+    }
+
+    #[test]
+    fn mismatched_morph_targets_are_dropped() {
+        let mesh = Mesh::cube();
+
+        // 错位的增量会把网格撕开，丢掉这个形变比炸掉整个模型强。
+        let mesh = mesh.with_morph_targets(vec![push_up("bad", 3, 1.0)], vec![1.0]);
+
+        assert_eq!(mesh.morph_target_count(), 0);
+        assert!(mesh.morph_weights().is_empty());
+    }
+
+    #[test]
+    fn missing_weights_default_to_zero() {
+        let mesh = Mesh::cube();
+        let count = mesh.vertices().len();
+
+        let mesh = mesh.with_morph_targets(
+            vec![push_up("a", count, 1.0), push_up("b", count, 2.0)],
+            vec![0.25],
+        );
+
+        assert_eq!(mesh.morph_weights(), &[0.25, 0.0]);
+    }
+
+    #[test]
+    fn morphed_position_accumulates_weighted_deltas() {
+        let mesh = Mesh::plane(1.0);
+        let count = mesh.vertices().len();
+        let base = mesh.vertices()[0].position();
+        let mesh = mesh.with_morph_targets(
+            vec![push_up("a", count, 1.0), push_up("b", count, 10.0)],
+            vec![0.0, 0.0],
+        );
+
+        // 权重全零时形变不该改变任何东西。
+        assert_eq!(mesh.morphed_position(0, &[0.0, 0.0]), base);
+        // 两个目标按权重叠加：0.5×1 + 0.1×10 = 1.5。
+        let morphed = mesh.morphed_position(0, &[0.5, 0.1]);
+        assert!((morphed.y - base.y - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn morphed_position_tolerates_short_weight_slices() {
+        let mesh = Mesh::plane(1.0);
+        let count = mesh.vertices().len();
+        let mesh = mesh.with_morph_targets(
+            vec![push_up("a", count, 1.0), push_up("b", count, 1.0)],
+            vec![0.0, 0.0],
+        );
+
+        // 只给了一个权重：另一个当作 0，而不是 panic。
+        let morphed = mesh.morphed_position(0, &[1.0]);
+        assert!((morphed.y - mesh.vertices()[0].position().y - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn morphed_aabb_grows_with_the_weight() {
+        let mesh = Mesh::plane(1.0);
+        let count = mesh.vertices().len();
+        let base = mesh.aabb();
+        let mesh = mesh.with_morph_targets(vec![push_up("up", count, 2.0)], vec![0.0]);
+
+        // 权重为 0 时包围盒不变。
+        assert_eq!(mesh.morphed_aabb(&[0.0]), base);
+
+        // 权重为 1 时纵向撑开 2。
+        let grown = mesh.morphed_aabb(&[1.0]);
+        assert!((grown.max.y - base.max.y - 2.0).abs() < 1e-5);
+        // 保守起见两个方向都放开，剔除只怕小不怕大。
+        assert!(grown.min.y <= base.min.y);
+    }
+
+    #[test]
+    fn morphed_aabb_covers_the_actual_vertices() {
+        let mesh = Mesh::plane(1.0);
+        let count = mesh.vertices().len();
+        let mesh = mesh.with_morph_targets(vec![push_up("up", count, 3.0)], vec![0.0]);
+
+        let weights = [0.7];
+        let bounds = mesh.morphed_aabb(&weights);
+        for vertex in 0..count {
+            let position = mesh.morphed_position(vertex, &weights);
+            assert!(
+                bounds.contains(position),
+                "顶点 {position:?} 跑出了形变包围盒 {bounds:?}，会被误剔除"
+            );
+        }
+    }
+
+    #[test]
+    fn negative_weights_also_expand_the_bounds() {
+        let mesh = Mesh::plane(1.0);
+        let count = mesh.vertices().len();
+        let mesh = mesh.with_morph_targets(vec![push_up("up", count, 1.0)], vec![0.0]);
+
+        // 权重可以是负的（反向外插），包围盒同样要放开。
+        let bounds = mesh.morphed_aabb(&[-1.0]);
+        for vertex in 0..count {
+            assert!(bounds.contains(mesh.morphed_position(vertex, &[-1.0])));
+        }
+    }
+
+    #[test]
+    fn mesh_without_morph_targets_keeps_its_aabb() {
+        let mesh = Mesh::cube();
+
+        assert_eq!(mesh.morphed_aabb(&[]), mesh.aabb());
+    }
+
+    #[test]
+    fn morph_delta_layout_is_gpu_ready() {
+        // position(12) + 填充(4) + normal(12) + 填充(4)。
+        // WGSL 的 vec3 对齐是 16，不补齐两边字段就会错位。
+        assert_eq!(size_of::<MorphDelta>(), 32);
+        assert_eq!(size_of::<MorphDelta>() % 16, 0);
+    }
+
+    #[test]
+    fn meshes_are_static_by_default() {
+        let mesh = Mesh::cube();
+
+        assert!(!mesh.is_skinned());
+        assert!(mesh.skin().is_none());
+    }
+
+    #[test]
+    fn skin_attaches_when_counts_match() {
+        let mesh = Mesh::cube();
+        let count = mesh.vertices().len();
+
+        let mesh = mesh.with_skin(vec![SkinVertex::default(); count]);
+
+        assert!(mesh.is_skinned());
+        assert_eq!(mesh.skin().unwrap().len(), count);
+    }
+
+    #[test]
+    fn mismatched_skin_is_rejected() {
+        // 错位的关节下标会让整个模型炸开，宁可退化成静态网格。
+        let mesh = Mesh::cube().with_skin(vec![SkinVertex::default(); 3]);
+
+        assert!(!mesh.is_skinned());
+    }
+
+    #[test]
+    fn skin_weights_are_normalised_on_attach() {
+        let mesh = Mesh::plane(1.0);
+        let count = mesh.vertices().len();
+        let unnormalised = SkinVertex {
+            joints: [0, 1, 2, 3],
+            weights: [2.0, 2.0, 0.0, 0.0],
+        };
+
+        let mesh = mesh.with_skin(vec![unnormalised; count]);
+
+        let sum = mesh.skin().unwrap()[0].weight_sum();
+        assert!((sum - 1.0).abs() < 1e-6, "权重和为 {sum}，没有归一化");
+    }
+
+    #[test]
+    fn zero_weights_fall_back_to_rigid_binding() {
+        let mut vertex = SkinVertex {
+            joints: [5, 6, 7, 8],
+            weights: [0.0; 4],
+        };
+
+        vertex.normalize();
+
+        // 权重全零时顶点会塌到原点，退回刚性绑定才是安全的。
+        assert_eq!(vertex.weights, [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(vertex.joints, [0; 4]);
+    }
+
+    #[test]
+    fn skin_vertex_layout_is_compact() {
+        // joints(8) + weights(16)。顶点缓冲的跨距按它算，改了要同步渲染器。
+        assert_eq!(size_of::<SkinVertex>(), 24);
+    }
 
     #[test]
     fn clone_shares_gpu_id() {
