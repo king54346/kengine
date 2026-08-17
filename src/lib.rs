@@ -43,6 +43,7 @@
 //! | `kcamera` | 相机与视锥剔除 | ❌ |
 //! | `kasset` | 异步资源加载 | ❌ |
 //! | `kmesh` / `ktexture` / `kmaterial` / `kshader` / `kgltf` / `kpbr` | 资源与渲染数据 | ❌ |
+//! | `kparticle` | 粒子模拟（列式存储 + 并行） | ❌ |
 //! | `kinput` | 输入采集与映射 | ❌ |
 //! | `klight` | 光源与衰减 | ❌ |
 //! | `kmath` / `kcore` / `ktask` / `klog` | 基础设施 | ❌ |
@@ -60,6 +61,7 @@ pub use klog;
 pub use kmaterial;
 pub use kmath;
 pub use kmesh;
+pub use kparticle;
 pub use kpbr;
 pub use krender;
 pub use kscene;
@@ -84,6 +86,7 @@ pub mod prelude {
     pub use kmaterial::{Material, MaterialValue};
     pub use kmath::{Aabb, Mat4, Quat, Vec2, Vec3, Vec4};
     pub use kmesh::{Mesh, Vertex};
+    pub use kparticle::{BlendMode, ColorGradient, Curve, Emitter, EmitterShape, ParticleSystem, Space};
     pub use kpbr::{Environment, PbrMaterial};
     pub use krender::RenderStats;
     pub use klight::{Light, LightKind};

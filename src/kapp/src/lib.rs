@@ -283,10 +283,16 @@ impl AppHandler for App {
         let Some(runtime) = self.runtime.as_mut() else {
             return FrameOutcome::Continue;
         };
-        runtime.last_frame = Instant::now();
+        // 帧间隔要在重置计时点之前取，重置之后拿到的就恒等于 0 了。
+        let now = Instant::now();
+        let dt = now.duration_since(runtime.last_frame).as_secs_f32();
+        runtime.last_frame = now;
 
         // ── Transform：插件可能改了层级或变换，重算世界矩阵与包围盒 ──
         runtime.scene.update();
+        // 粒子紧跟其后：世界空间的粒子出生时要用节点的世界变换，
+        // 放在 update 之前的话，第一批粒子会出现在原点。
+        runtime.scene.tick_particles(dt);
         exit |= self.run_systems(Stage::Transform);
 
         // ── Culling + Render：剔除在渲染器内部完成 ──

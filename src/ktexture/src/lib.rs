@@ -201,6 +201,32 @@ impl Texture {
         Self::new(size, size, data)
     }
 
+    /// 生成一个边缘柔和的白色圆点，粒子没指定贴图时用它。
+    ///
+    /// `falloff` 控制边缘的软硬：1 是线性衰减，越大边缘越锐、中心越亮。
+    /// 用平方衰减而非硬边圆，是因为硬边在放大后会露出明显的锯齿，
+    /// 而粒子恰恰经常被放得很大。
+    pub fn soft_circle(size: u32, falloff: f32) -> Self {
+        let size = size.max(2);
+        let center = (size - 1) as f32 * 0.5;
+        let falloff = falloff.max(0.01);
+        let mut data = Vec::with_capacity(size as usize * size as usize * 4);
+
+        for y in 0..size {
+            for x in 0..size {
+                let dx = (x as f32 - center) / center;
+                let dy = (y as f32 - center) / center;
+                // 圆外一律为 0，保证方片的四角完全透明、不会露出边框。
+                let distance = (dx * dx + dy * dy).sqrt().min(1.0);
+                let alpha = (1.0 - distance).powf(falloff);
+                let value = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
+                data.extend_from_slice(&[255, 255, 255, value]);
+            }
+        }
+
+        Self::new(size, size, data)
+    }
+
     /// 指定像素格式。
     pub fn with_format(mut self, format: TextureFormat) -> Self {
         self.format = format;
@@ -266,6 +292,52 @@ impl ResourceData for Texture {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// 取某个像素的 RGBA。
+    fn texel(texture: &Texture, x: u32, y: u32) -> [u8; 4] {
+        let offset = ((y * texture.width() + x) * 4) as usize;
+        texture.data()[offset..offset + 4].try_into().unwrap()
+    }
+
+    #[test]
+    fn soft_circle_is_opaque_at_the_center() {
+        // 尺寸为奇数时正中间恰好落在一个像素上，那里必须是全不透明。
+        assert_eq!(texel(&Texture::soft_circle(33, 1.0), 16, 16)[3], 255);
+        // 偶数尺寸下没有像素正对圆心，最近的那个也应当几乎不透明。
+        assert!(texel(&Texture::soft_circle(32, 1.0), 16, 16)[3] > 240);
+    }
+
+    #[test]
+    fn soft_circle_corners_are_fully_transparent() {
+        let texture = Texture::soft_circle(32, 1.0);
+
+        // 四角必须透到底，否则粒子会显出方形边框。
+        for (x, y) in [(0, 0), (31, 0), (0, 31), (31, 31)] {
+            assert_eq!(texel(&texture, x, y)[3], 0, "({x}, {y}) 没有透明");
+        }
+    }
+
+    #[test]
+    fn soft_circle_alpha_decreases_outward() {
+        let texture = Texture::soft_circle(64, 1.0);
+        let center = 32;
+
+        let mut previous = 255u8;
+        for offset in 0..32 {
+            let alpha = texel(&texture, center + offset, center)[3];
+            assert!(alpha <= previous, "第 {offset} 个像素的透明度不该回升");
+            previous = alpha;
+        }
+    }
+
+    #[test]
+    fn soft_circle_falloff_controls_edge_hardness() {
+        let soft = Texture::soft_circle(64, 1.0);
+        let sharp = Texture::soft_circle(64, 4.0);
+
+        // 衰减指数越大，同一位置越暗（边缘更锐、亮区更集中）。
+        assert!(texel(&sharp, 48, 32)[3] < texel(&soft, 48, 32)[3]);
+    }
 
     #[test]
     fn solid_fills_every_pixel() {

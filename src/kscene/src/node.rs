@@ -5,6 +5,7 @@ use klight::Light;
 use kcore::pool::Handle;
 use kmaterial::Material;
 use kmath::{Aabb, Mat4, Vec3};
+use kparticle::ParticleSystem;
 
 /// 场景树中的一个节点。
 ///
@@ -23,6 +24,7 @@ pub struct Node {
     pub(crate) material: Option<Material>,
     pub(crate) camera: Option<Camera>,
     pub(crate) light: Option<Light>,
+    pub(crate) particles: Option<Box<ParticleSystem>>,
     pub(crate) parent: Handle<Node>,
     pub(crate) children: Vec<Handle<Node>>,
     pub(crate) global_transform: Mat4,
@@ -49,6 +51,9 @@ impl Node {
             material: None,
             camera: None,
             light: None,
+            // 装箱：粒子系统里有九个数组，直接内联会把每个 Node 撑大一大截，
+            // 而绝大多数节点根本没有粒子。
+            particles: None,
             parent: Handle::NONE,
             children: Vec::new(),
             global_transform: Mat4::IDENTITY,
@@ -78,6 +83,12 @@ impl Node {
     /// 挂上相机。
     pub fn with_camera(mut self, camera: Camera) -> Self {
         self.camera = Some(camera);
+        self
+    }
+
+    /// 挂上粒子系统。发射器的位置与朝向取自本节点的世界变换。
+    pub fn with_particles(mut self, particles: ParticleSystem) -> Self {
+        self.particles = Some(Box::new(particles));
         self
     }
 
@@ -132,6 +143,16 @@ impl Node {
     /// 光源的可变引用，可在运行时改颜色与强度。
     pub fn light_mut(&mut self) -> Option<&mut Light> {
         self.light.as_mut()
+    }
+
+    /// 粒子系统的只读引用。
+    pub fn particles(&self) -> Option<&ParticleSystem> {
+        self.particles.as_deref()
+    }
+
+    /// 粒子系统的可变引用，可在运行时改参数或手动喷发。
+    pub fn particles_mut(&mut self) -> Option<&mut ParticleSystem> {
+        self.particles.as_deref_mut()
     }
 
     /// 父节点句柄；根节点返回 [`Handle::NONE`]。

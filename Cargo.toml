@@ -11,6 +11,7 @@ members = [
     "src/kgltf",
     "src/kmaterial",
     "src/kmesh",
+    "src/kparticle",
     "src/kpbr",
     "src/krender",
     "src/kscene",
@@ -38,6 +39,7 @@ klog = { path = "src/klog" }
 kmaterial = { path = "src/kmaterial" }
 kmath = { path = "src/kmath" }
 kmesh = { path = "src/kmesh" }
+kparticle = { path = "src/kparticle" }
 kpbr = { path = "src/kpbr" }
 krender = { path = "src/krender" }
 kscene = { path = "src/kscene" }

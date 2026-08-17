@@ -1,0 +1,16 @@
+[package]
+name = "kparticle"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kasset = { path = "../kasset" }
+kmath = { path = "../kmath" }
+ktexture = { path = "../ktexture" }
+# 粒子模拟按列分片并行，需要多线程池。
+ktask = { path = "../ktask", features = ["multi_threaded"] }
+bytemuck = { version = "1.25.2", features = ["derive"] }
+
+[dev-dependencies]
+# 测试里用它算出 WGSL 结构体的真实布局，与 CPU 侧的结构体对拍。
+naga = { version = "30", features = ["wgsl-in"] }

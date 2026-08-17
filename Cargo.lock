@@ -1111,6 +1111,7 @@ dependencies = [
  "kmaterial",
  "kmath",
  "kmesh",
+ "kparticle",
  "kpbr",
  "krender",
  "kscene",
@@ -1210,6 +1211,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kparticle"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "kasset",
+ "kmath",
+ "ktask",
+ "ktexture",
+ "naga",
+]
+
+[[package]]
 name = "kpbr"
 version = "0.1.0"
 dependencies = [
@@ -1232,6 +1245,7 @@ dependencies = [
  "kmaterial",
  "kmath",
  "kmesh",
+ "kparticle",
  "kpbr",
  "kscene",
  "kshader",
@@ -1251,6 +1265,7 @@ dependencies = [
  "kmaterial",
  "kmath",
  "kmesh",
+ "kparticle",
  "kpbr",
  "ktask",
 ]

@@ -15,6 +15,7 @@ mod transform;
 pub use kcamera::{Camera, Frustum, Projection};
 pub use kmesh::{Mesh, Vertex};
 pub use kmath::{Aabb, Intersection};
+pub use kparticle::ParticleSystem;
 pub use node::Node;
 pub use transform::Transform;
 
@@ -40,6 +41,20 @@ pub struct RenderItem<'a> {
     /// 世界变换矩阵。
     pub transform: Mat4,
     /// 世界空间包围盒，用于剔除。
+    pub aabb: Aabb,
+}
+
+/// 渲染器每帧收集到的一个粒子系统。
+///
+/// 与 [`RenderItem`] 一样是中立结构：渲染器不认识 [`Node`]，
+/// 只拿到「一个粒子系统 + 它所在节点的世界变换」。
+#[derive(Debug)]
+pub struct ParticleItem<'a> {
+    /// 粒子系统。
+    pub system: &'a ParticleSystem,
+    /// 所在节点的世界变换。局部空间的粒子要靠它变换到世界。
+    pub transform: Mat4,
+    /// 世界空间包围盒，用于剔除与排序。
     pub aabb: Aabb,
 }
 
@@ -292,6 +307,55 @@ impl Scene {
     /// 参与剔除判定的对象数，即所有可见且带网格的节点数。
     pub fn drawable_count(&self) -> usize {
         self.culling.len()
+    }
+
+    /// 推进场景里所有粒子系统。
+    ///
+    /// 必须在 [`Scene::update`] **之后**调用：世界空间的粒子在出生时就要用到
+    /// 节点的世界变换，变换没算就发射的话，第一批粒子会出现在原点。
+    pub fn tick_particles(&mut self, dt: f32) {
+        for node in self.nodes.iter_mut() {
+            if node.particles.is_none() {
+                continue;
+            }
+            let world = node.global_transform;
+            let visible = node.global_visible;
+            if let Some(system) = node.particles.as_deref_mut() {
+                // 不可见的系统冻结而不是继续烧 CPU；再次可见时从冻结处接着演。
+                if visible {
+                    system.tick(dt, world);
+                }
+            }
+        }
+    }
+
+    /// 遍历所有需要绘制的粒子系统，可选地做视锥剔除。
+    ///
+    /// 走线性遍历而不是 BVH：粒子系统通常只有几十个，
+    /// 为它们再维护一棵树，维护开销比省下的判定还多。
+    pub fn visible_particles(&self, frustum: Option<&Frustum>) -> Vec<ParticleItem<'_>> {
+        self.nodes
+            .iter()
+            .filter_map(|node| {
+                let system = node.particles()?;
+                if !node.global_visible || system.is_empty() {
+                    return None;
+                }
+
+                let aabb = system.world_bounds(node.global_transform);
+                if let Some(frustum) = frustum
+                    && !frustum.intersects(&aabb)
+                {
+                    return None;
+                }
+
+                Some(ParticleItem {
+                    system,
+                    transform: node.global_transform,
+                    aabb,
+                })
+            })
+            .collect()
     }
 
     /// 视锥剔除，返回落在视锥内的绘制项。
@@ -764,6 +828,103 @@ mod test {
             items[0].transform.to_scale_rotation_translation().2,
             Vec3::new(1.0, 2.0, 3.0)
         );
+    }
+
+    /// 一个不受力、寿命够长的粒子系统，便于观察位置。
+    fn test_particles() -> ParticleSystem {
+        use kparticle::Emitter;
+
+        ParticleSystem::new(
+            Emitter::default()
+                .with_rate(60.0)
+                .with_lifetime(10.0)
+                .with_speed(0.0)
+                .with_size(0.2),
+        )
+        .with_seed(1)
+    }
+
+    #[test]
+    fn particles_tick_and_are_collected() {
+        let mut scene = Scene::new();
+        scene.add_node(Node::new("Smoke").with_particles(test_particles()));
+
+        scene.update();
+        // 没推进时一个粒子都没有，自然也收集不到。
+        assert!(scene.visible_particles(None).is_empty());
+
+        scene.tick_particles(0.5);
+
+        let items = scene.visible_particles(None);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].system.alive(), 30);
+    }
+
+    #[test]
+    fn world_space_particles_spawn_at_the_node() {
+        let mut scene = Scene::new();
+        scene.add_node(
+            Node::new("Sparks")
+                .with_particles(test_particles())
+                .with_position(Vec3::new(7.0, 0.0, 0.0)),
+        );
+
+        scene.update();
+        scene.tick_particles(0.1);
+
+        // 世界空间的粒子在出生时就该被搬到节点所在处，
+        // 这也是 tick_particles 必须排在 update 之后的原因。
+        let items = scene.visible_particles(None);
+        assert!((items[0].aabb.center().x - 7.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn hidden_particle_systems_freeze() {
+        let mut scene = Scene::new();
+        let handle = scene.add_node(Node::new("Smoke").with_particles(test_particles()));
+
+        scene.update();
+        scene.tick_particles(0.5);
+        let before = scene[handle].particles().unwrap().alive();
+
+        scene[handle].visible = false;
+        scene.update();
+        scene.tick_particles(5.0);
+
+        // 看不见就不该继续烧 CPU，也不该被收集。
+        assert_eq!(scene[handle].particles().unwrap().alive(), before);
+        assert!(scene.visible_particles(None).is_empty());
+    }
+
+    #[test]
+    fn offscreen_particle_systems_are_culled() {
+        let mut scene = Scene::new();
+        scene.add_node(Node::new("Near").with_particles(test_particles()));
+        scene.add_node(
+            Node::new("Far")
+                .with_particles(test_particles())
+                .with_position(Vec3::new(0.0, 0.0, 900.0)),
+        );
+
+        scene.update();
+        scene.tick_particles(0.5);
+
+        assert_eq!(scene.visible_particles(None).len(), 2);
+        assert_eq!(scene.visible_particles(Some(&test_frustum())).len(), 1);
+    }
+
+    #[test]
+    fn particles_do_not_enter_the_mesh_culling_structure() {
+        let mut scene = Scene::new();
+        scene.add_node(Node::new("Smoke").with_particles(test_particles()));
+
+        scene.update();
+        scene.tick_particles(1.0);
+
+        // 粒子不投影、也不走网格那条批处理路径，
+        // 混进 BVH 只会白白撑大阴影范围。
+        assert_eq!(scene.drawable_count(), 0);
+        assert!(scene.visible_bounds().is_empty());
     }
 
     #[test]

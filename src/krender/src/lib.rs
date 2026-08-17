@@ -8,6 +8,7 @@
 //! - `group(1)`：每个对象的变换与材质参数，用动态偏移在一个大缓冲里寻址
 //! - `group(2)`：材质贴图与采样器，按材质缓存
 
+mod particle;
 mod post;
 mod tonemap;
 
@@ -15,7 +16,9 @@ pub use post::PostSettings;
 pub use tonemap::ToneMapping;
 
 use kcamera::{Camera, Frustum};
+use particle::ParticleResources;
 use post::PostProcess;
+use kparticle::GpuParticle;
 use klight::{GpuLight, MAX_LIGHTS, shadow::ShadowSettings};
 use kmesh::Vertex;
 use kscene::Scene;
@@ -142,6 +145,8 @@ pub struct RenderStats {
     pub triangles: u32,
     /// 实际提交的绘制调用数。批处理生效时会明显小于 [`drawn`](Self::drawn)。
     pub draw_calls: u32,
+    /// 本帧绘制的粒子数。
+    pub particles: u32,
     /// 视锥剔除耗时（微秒）。
     pub cull_micros: u32,
     /// CPU 端准备一帧的总耗时（微秒）：剔除 + 收集 + 分批 + 上传。
@@ -240,6 +245,10 @@ pub struct Renderer {
     shadow: ShadowResources,
     /// 后处理链：主 pass 先画到 HDR 目标，再经 Bloom 与色调映射输出到屏幕。
     post: PostProcess,
+    /// 粒子 pass 的资源。
+    particles: ParticleResources,
+    /// 逐帧复用的粒子暂存区。
+    particle_scratch: Vec<GpuParticle>,
 
     sky_pipeline: wgpu::RenderPipeline,
     sky_buffer: wgpu::Buffer,
@@ -263,7 +272,7 @@ pub struct Renderer {
 ///
 /// 采样设置属于贴图而非材质——像素风贴图要最近邻，普通贴图要线性，
 /// 用一个共用采样器会让这些设置全部失效。
-struct GpuTexture {
+pub(crate) struct GpuTexture {
     view: wgpu::TextureView,
     sampler: wgpu::Sampler,
 }
@@ -622,6 +631,13 @@ impl Renderer {
         let brdf_bind_group =
             create_brdf_lut(&device, &queue, &brdf_layout, &shadow.depth_view);
         let post = PostProcess::new(&device, config.width, config.height, config.format);
+        // 粒子画在主 pass 里，因此目标格式与深度格式都要与主 pass 一致。
+        let particles = ParticleResources::new(
+            &device,
+            &queue,
+            post::HDR_FORMAT,
+            wgpu::TextureFormat::Depth32Float,
+        );
 
         let renderer = Self {
             surface,
@@ -640,6 +656,8 @@ impl Renderer {
             brdf_bind_group,
             shadow,
             post,
+            particles,
+            particle_scratch: Vec::new(),
             sky_pipeline,
             sky_buffer,
             sky_bind_group,
@@ -881,6 +899,22 @@ impl Renderer {
             }]),
         );
 
+        // ── 粒子：收集、排序、上传 ──
+        // 半透明，所以既不进 BVH 也不参与批处理，单独走一条路。
+        let mut particle_items = scene.visible_particles(frustum.as_ref());
+        let mut scratch = std::mem::take(&mut self.particle_scratch);
+        let particle_batches = self.particles.prepare(
+            &self.device,
+            &self.queue,
+            &mut particle_items,
+            view_proj,
+            camera_to_world,
+            &mut scratch,
+        );
+        stats.particles = scratch.len() as u32;
+        stats.draw_calls += particle_batches.len() as u32;
+        self.particle_scratch = scratch;
+
         // 统计在取交换链纹理之前定格：那一步会因垂直同步而阻塞，
         // 算进来的话读到的就是显示器刷新率，不是 CPU 的准备耗时。
         stats.prepare_micros = prepare_start.elapsed().as_micros() as u32;
@@ -1051,6 +1085,10 @@ impl Renderer {
             pass.set_pipeline(&self.sky_pipeline);
             pass.set_bind_group(0, &self.sky_bind_group, &[]);
             pass.draw(0..3, 0..1);
+
+            // 粒子最后画：它们半透明且不写深度，任何在它们之后画的不透明物体
+            // 都会把它们盖掉——包括天空。
+            self.particles.draw(&mut pass, &particle_batches);
         }
 
         // 后处理：Bloom + 色调映射，最终写入交换链。
@@ -1466,7 +1504,7 @@ fn create_brdf_lut(
 }
 
 /// 上传一张贴图，连同按其采样设置建好的采样器一起返回。
-fn upload_texture(
+pub(crate) fn upload_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture: &Texture,

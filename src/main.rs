@@ -79,6 +79,8 @@ struct Game {
     stats_reported: bool,
     /// 绕场景转圈的点光源，用来观察多光源与衰减。
     lamp: Handle<Node>,
+    /// 相加混合的火花，按 F 手动喷一团。
+    sparks: Handle<Node>,
     paused: bool,
 }
 
@@ -145,6 +147,7 @@ impl Plugin for Game {
         bindings.bind_action("quit", KeyCode::Escape);
         bindings.bind_action("reset", KeyCode::KeyR);
         bindings.bind_action("stats", KeyCode::KeyC);
+        bindings.bind_action("burst", KeyCode::KeyF);
         bindings.bind_axis("horizontal", KeyCode::KeyD, KeyCode::KeyA);
         bindings.bind_axis("forward", KeyCode::KeyW, KeyCode::KeyS);
         bindings.bind_axis("vertical", KeyCode::KeyE, KeyCode::KeyQ);
@@ -304,9 +307,61 @@ impl Plugin for Game {
             );
         }
 
+        // ── 粒子：两种混合方式各来一个 ──
+        // 相加混合的火花：亮部会溢出到 Bloom 里。
+        self.sparks = ctx.scene.add_node(
+            Node::new("Sparks")
+                .with_particles(
+                    ParticleSystem::new(
+                        Emitter::cone(18.0)
+                            .with_rate(220.0)
+                            .with_speed((2.5, 4.5))
+                            .with_lifetime((0.6, 1.2))
+                            .with_size((0.05, 0.12)),
+                    )
+                    .with_acceleration(Vec3::new(0.0, -6.0, 0.0))
+                    .with_blend(BlendMode::Additive)
+                    .with_color(ColorGradient::new(
+                        [
+                            (0.0, Vec4::new(4.0, 2.4, 0.6, 1.0)),
+                            (0.35, Vec4::new(3.0, 0.7, 0.1, 1.0)),
+                            (1.0, Vec4::new(0.6, 0.05, 0.0, 0.0)),
+                        ],
+                        Vec4::ONE,
+                    ))
+                    .with_size_curve(Curve::linear(1.0, 0.35))
+                    .with_seed(0xF12E),
+                )
+                .with_position(Vec3::new(3.2, -0.6, 1.0)),
+        );
+
+        // 半透明烟雾：贴着地面缓缓上升、逐渐变大变淡。
+        ctx.scene.add_node(
+            Node::new("Smoke")
+                .with_particles(
+                    ParticleSystem::new(
+                        Emitter::disk(0.6)
+                            .with_rate(28.0)
+                            .with_speed((0.3, 0.7))
+                            .with_spread_degrees(25.0)
+                            .with_lifetime((2.5, 4.0))
+                            .with_size((0.5, 0.9))
+                            .with_rotation_speed((-0.6, 0.6)),
+                    )
+                    .with_acceleration(Vec3::new(0.25, 0.15, 0.0))
+                    .with_damping(0.6)
+                    .with_color(ColorGradient::fade_in_out(Vec3::splat(0.35), 0.25))
+                    .with_size_curve(Curve::linear(0.6, 2.2))
+                    .with_seed(20260817),
+                )
+                .with_position(Vec3::new(-3.4, -0.9, 1.2)),
+        );
+
         self.spawn_stress_field(ctx);
 
-        klog::info!("WASD 移动，Q/E 升降，空格暂停，R 重置，C 打印剔除统计，Esc 退出");
+        klog::info!(
+            "WASD 移动，Q/E 升降，空格暂停，R 重置，C 打印剔除统计，F 喷一团火花，Esc 退出"
+        );
     }
 
     fn update(&mut self, ctx: &mut Context) {
@@ -351,6 +406,15 @@ impl Plugin for Game {
 
         if ctx.input.action_just_pressed("stats") {
             Self::report(ctx);
+        }
+
+        // 一次性喷发：爆炸、受击这类效果都是这么做的，
+        // 与按速率持续生成互不影响。
+        if ctx.input.action_just_pressed("burst") {
+            let world = ctx.scene[self.sparks].global_transform();
+            if let Some(system) = ctx.scene[self.sparks].particles_mut() {
+                system.burst(240, world);
+            }
         }
 
         if ctx.input.action_just_pressed("reset") {
