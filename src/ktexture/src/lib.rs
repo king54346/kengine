@@ -160,6 +160,34 @@ impl Texture {
         Self::solid(1, 1, [255, 255, 255, 255])
     }
 
+    /// 生成凹凸网格状的法线贴图，用于在没有美术资源时验证切线空间是否正确。
+    ///
+    /// 输出的是切线空间法线（`[0,1]` 编码），因此格式必须是线性而非 sRGB。
+    pub fn bumpy_normal(size: u32, cells: u32) -> Self {
+        let size = size.max(2);
+        let cells = cells.max(1) as f32;
+        let mut data = Vec::with_capacity(size as usize * size as usize * 4);
+
+        for y in 0..size {
+            for x in 0..size {
+                // 用两个正弦叠出规则的凹凸，其梯度即为法线的切线分量。
+                let u = x as f32 / size as f32 * cells * std::f32::consts::TAU;
+                let v = y as f32 / size as f32 * cells * std::f32::consts::TAU;
+                let normal = kmath::Vec3::new(-u.sin() * 0.5, -v.sin() * 0.5, 1.0).normalize();
+
+                let encode = |value: f32| ((value * 0.5 + 0.5) * 255.0).clamp(0.0, 255.0) as u8;
+                data.extend_from_slice(&[
+                    encode(normal.x),
+                    encode(normal.y),
+                    encode(normal.z),
+                    255,
+                ]);
+            }
+        }
+
+        Self::new(size, size, data).with_format(TextureFormat::Linear)
+    }
+
     /// 生成棋盘格纹理，便于在没有美术资源时检查 UV 是否正确。
     pub fn checkerboard(size: u32, cell: u32, a: [u8; 4], b: [u8; 4]) -> Self {
         let cell = cell.max(1);
@@ -260,6 +288,28 @@ mod test {
         let texture = Texture::white();
         assert_eq!(texture.id(), texture.clone().id());
         assert_ne!(texture.id(), Texture::white().id());
+    }
+
+    #[test]
+    fn bumpy_normal_is_linear_and_unit_length() {
+        let texture = Texture::bumpy_normal(16, 2);
+
+        // 法线贴图存的是方向数据，走 sRGB 会把数值扭曲。
+        assert_eq!(texture.format(), TextureFormat::Linear);
+
+        for pixel in texture.data().chunks(4) {
+            let decode = |value: u8| value as f32 / 255.0 * 2.0 - 1.0;
+            let normal =
+                kmath::Vec3::new(decode(pixel[0]), decode(pixel[1]), decode(pixel[2]));
+
+            // 量化到 8 位会有误差，放宽到 0.02。
+            assert!(
+                (normal.length() - 1.0).abs() < 0.02,
+                "法线未归一化：{normal:?}"
+            );
+            // 切线空间法线必须朝外（+Z）。
+            assert!(normal.z > 0.0);
+        }
     }
 
     #[test]

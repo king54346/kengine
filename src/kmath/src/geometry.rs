@@ -98,6 +98,43 @@ impl Aabb {
             && point.cmple(self.max).all()
     }
 
+    /// 是否与另一个包围盒相交（接触算相交）。
+    pub fn intersects(&self, other: &Self) -> bool {
+        !self.is_empty()
+            && !other.is_empty()
+            && self.min.cmple(other.max).all()
+            && self.max.cmpge(other.min).all()
+    }
+
+    /// 是否完全包含另一个包围盒。空盒子被视为「被包含」。
+    pub fn contains_aabb(&self, other: &Self) -> bool {
+        if other.is_empty() {
+            return true;
+        }
+        !self.is_empty() && self.min.cmple(other.min).all() && self.max.cmpge(other.max).all()
+    }
+
+    /// 表面积。BVH 的 SAH 代价函数要用它，空盒子返回 0。
+    pub fn surface_area(&self) -> f32 {
+        if self.is_empty() {
+            return 0.0;
+        }
+        let d = self.max - self.min;
+        2.0 * (d.x * d.y + d.y * d.z + d.z * d.x)
+    }
+
+    /// 尺寸最大的那根轴（0 = x，1 = y，2 = z）。
+    pub fn largest_axis(&self) -> usize {
+        let d = self.size();
+        if d.x >= d.y && d.x >= d.z {
+            0
+        } else if d.y >= d.z {
+            1
+        } else {
+            2
+        }
+    }
+
     /// 八个角点。
     pub fn corners(&self) -> [Vec3; 8] {
         let (lo, hi) = (self.min, self.max);
@@ -126,6 +163,33 @@ impl Aabb {
             result.expand(matrix.transform_point3(corner));
         }
         result
+    }
+}
+
+/// 包围盒相对某个查询体（视锥、另一个包围盒……）的位置关系。
+///
+/// 三态而非布尔，是为了让层次结构的遍历能剪枝：节点整个落在查询体**内部**时，
+/// 其下所有图元都可见，无需再逐个判定；落在**外部**时整棵子树都能跳过。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Intersection {
+    /// 完全在外，不可见。
+    Outside,
+    /// 与边界相交，需要继续细分判定。
+    Intersects,
+    /// 完全在内，子树整体接受。
+    Inside,
+}
+
+impl Aabb {
+    /// 本包围盒相对 `other` 的位置关系（把 `other` 当作查询体）。
+    pub fn classify_against(&self, other: &Self) -> Intersection {
+        if !self.intersects(other) {
+            Intersection::Outside
+        } else if other.contains_aabb(self) {
+            Intersection::Inside
+        } else {
+            Intersection::Intersects
+        }
     }
 }
 

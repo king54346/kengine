@@ -44,6 +44,10 @@ pub struct Vertex {
     pub uv: [f32; 2],
     /// 顶点颜色，与材质基础色相乘。
     pub color: [f32; 3],
+    /// 切线，xyz 为方向、w 为副切线的手性（±1）。
+    ///
+    /// 法线贴图需要它来构建切线空间；没有法线贴图时该字段不参与计算。
+    pub tangent: [f32; 4],
 }
 
 impl Default for Vertex {
@@ -53,6 +57,7 @@ impl Default for Vertex {
             normal: [0.0, 1.0, 0.0],
             uv: [0.0; 2],
             color: [1.0; 3],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         }
     }
 }
@@ -65,6 +70,7 @@ impl Vertex {
             normal: normal.to_array(),
             uv,
             color: [1.0; 3],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         }
     }
 
@@ -82,6 +88,11 @@ impl Vertex {
     /// 顶点法线。
     pub fn normal(&self) -> Vec3 {
         Vec3::from_array(self.normal)
+    }
+
+    /// 切线方向（不含手性）。
+    pub fn tangent(&self) -> Vec3 {
+        Vec3::new(self.tangent[0], self.tangent[1], self.tangent[2])
     }
 }
 
@@ -176,6 +187,78 @@ impl Mesh {
             // 退化三角形可能让法线长度为零，此时兜底朝上，避免出现 NaN。
             let normal = vertex.normal();
             vertex.normal = normal.try_normalize().unwrap_or(Vec3::Y).to_array();
+        }
+    }
+
+    /// 根据 UV 与位置生成切线。
+    ///
+    /// glTF 允许网格不带 TANGENT，而法线贴图必须有切线空间才能工作。
+    /// 算法：逐三角形用 UV 差分求切线，累加到顶点后做 Gram-Schmidt 正交化。
+    pub fn recompute_tangents(&mut self) {
+        let mut accumulated = vec![Vec3::ZERO; self.vertices.len()];
+        let mut bitangents = vec![Vec3::ZERO; self.vertices.len()];
+
+        for triangle in self.indices.chunks_exact(3) {
+            let [i0, i1, i2] = [
+                triangle[0] as usize,
+                triangle[1] as usize,
+                triangle[2] as usize,
+            ];
+            if i0 >= self.vertices.len() || i1 >= self.vertices.len() || i2 >= self.vertices.len() {
+                continue;
+            }
+
+            let p0 = self.vertices[i0].position();
+            let edge1 = self.vertices[i1].position() - p0;
+            let edge2 = self.vertices[i2].position() - p0;
+
+            let uv0 = self.vertices[i0].uv;
+            let duv1 = [
+                self.vertices[i1].uv[0] - uv0[0],
+                self.vertices[i1].uv[1] - uv0[1],
+            ];
+            let duv2 = [
+                self.vertices[i2].uv[0] - uv0[0],
+                self.vertices[i2].uv[1] - uv0[1],
+            ];
+
+            // UV 面积为零时无法定出切线方向（例如所有 UV 相同），跳过该三角形。
+            let determinant = duv1[0] * duv2[1] - duv2[0] * duv1[1];
+            if determinant.abs() < 1e-12 {
+                continue;
+            }
+            let r = 1.0 / determinant;
+
+            let tangent = (edge1 * duv2[1] - edge2 * duv1[1]) * r;
+            let bitangent = (edge2 * duv1[0] - edge1 * duv2[0]) * r;
+
+            for index in [i0, i1, i2] {
+                accumulated[index] += tangent;
+                bitangents[index] += bitangent;
+            }
+        }
+
+        for (index, vertex) in self.vertices.iter_mut().enumerate() {
+            let normal = vertex.normal();
+            let accumulated = accumulated[index];
+
+            // Gram-Schmidt：把切线投影到与法线垂直的平面上。
+            let tangent = (accumulated - normal * normal.dot(accumulated))
+                .try_normalize()
+                // 完全无法求出切线时，取一个与法线垂直的任意方向兜底。
+                .unwrap_or_else(|| {
+                    let axis = if normal.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+                    normal.cross(axis).normalize_or(Vec3::X)
+                });
+
+            // 手性：决定副切线取 +（N×T）还是 −（N×T），关系到法线贴图的凹凸方向。
+            let handedness = if normal.cross(tangent).dot(bitangents[index]) < 0.0 {
+                -1.0
+            } else {
+                1.0
+            };
+
+            vertex.tangent = [tangent.x, tangent.y, tangent.z, handedness];
         }
     }
 
@@ -276,6 +359,106 @@ mod test {
         for vertex in mesh.vertices() {
             assert!(vertex.normal().is_finite(), "法线出现了 NaN 或 inf");
         }
+    }
+
+    #[test]
+    fn tangents_align_with_uv_direction() {
+        // XY 平面上的三角形，U 沿 +X、V 沿 +Y，切线应当指向 +X。
+        let vertices = vec![
+            Vertex {
+                position: [0.0, 0.0, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                uv: [0.0, 0.0],
+                ..Default::default()
+            },
+            Vertex {
+                position: [1.0, 0.0, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                uv: [1.0, 0.0],
+                ..Default::default()
+            },
+            Vertex {
+                position: [0.0, 1.0, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                uv: [0.0, 1.0],
+                ..Default::default()
+            },
+        ];
+        let mut mesh = Mesh::new(vertices, vec![0, 1, 2]);
+
+        mesh.recompute_tangents();
+
+        for vertex in mesh.vertices() {
+            assert!(
+                (vertex.tangent() - Vec3::X).length() < 1e-4,
+                "切线应指向 +X，实得 {:?}",
+                vertex.tangent()
+            );
+        }
+    }
+
+    #[test]
+    fn tangents_are_orthogonal_to_normals() {
+        // 切线必须垂直于法线，否则构建出的切线空间是斜的，法线贴图会歪。
+        let mut mesh = Mesh::cube();
+        mesh.recompute_tangents();
+
+        for vertex in mesh.vertices() {
+            let dot = vertex.normal().dot(vertex.tangent());
+            assert!(dot.abs() < 1e-4, "切线与法线不正交：dot = {dot}");
+            assert!((vertex.tangent().length() - 1.0).abs() < 1e-4, "切线未归一化");
+        }
+    }
+
+    #[test]
+    fn degenerate_uv_does_not_produce_nan() {
+        // 三个顶点 UV 完全相同，UV 面积为零，无法定出切线方向。
+        let vertices = vec![
+            Vertex {
+                position: [0.0, 0.0, 0.0],
+                uv: [0.5, 0.5],
+                ..Default::default()
+            },
+            Vertex {
+                position: [1.0, 0.0, 0.0],
+                uv: [0.5, 0.5],
+                ..Default::default()
+            },
+            Vertex {
+                position: [0.0, 1.0, 0.0],
+                uv: [0.5, 0.5],
+                ..Default::default()
+            },
+        ];
+        let mut mesh = Mesh::new(vertices, vec![0, 1, 2]);
+
+        mesh.recompute_tangents();
+
+        for vertex in mesh.vertices() {
+            assert!(vertex.tangent().is_finite(), "退化 UV 产生了 NaN");
+            // 兜底切线仍需垂直于法线。
+            assert!(vertex.normal().dot(vertex.tangent()).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn tangent_handedness_is_recorded() {
+        let mut mesh = Mesh::cube();
+        mesh.recompute_tangents();
+
+        // 手性只能是 ±1，其他值说明计算出了问题。
+        for vertex in mesh.vertices() {
+            assert!(vertex.tangent[3] == 1.0 || vertex.tangent[3] == -1.0);
+        }
+    }
+
+    #[test]
+    fn recompute_tangents_ignores_out_of_range_indices() {
+        let mut mesh = Mesh::new(vec![Vertex::default()], vec![0, 7, 9]);
+
+        mesh.recompute_tangents();
+
+        assert!(mesh.vertices()[0].tangent().is_finite());
     }
 
     #[test]

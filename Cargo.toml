@@ -6,6 +6,7 @@ members = [
     "src/kcore",
     "src/kcore-derive",
     "src/kinput",
+    "src/klight",
     "src/klog",
     "src/kgltf",
     "src/kmaterial",
@@ -32,6 +33,7 @@ kcamera = { path = "src/kcamera" }
 kcore = { path = "src/kcore" }
 kgltf = { path = "src/kgltf" }
 kinput = { path = "src/kinput" }
+klight = { path = "src/klight" }
 klog = { path = "src/klog" }
 kmaterial = { path = "src/kmaterial" }
 kmath = { path = "src/kmath" }

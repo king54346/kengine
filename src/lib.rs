@@ -44,6 +44,7 @@
 //! | `kasset` | 异步资源加载 | ❌ |
 //! | `kmesh` / `ktexture` / `kmaterial` / `kshader` / `kgltf` / `kpbr` | 资源与渲染数据 | ❌ |
 //! | `kinput` | 输入采集与映射 | ❌ |
+//! | `klight` | 光源与衰减 | ❌ |
 //! | `kmath` / `kcore` / `ktask` / `klog` | 基础设施 | ❌ |
 
 #![warn(missing_docs)]
@@ -54,6 +55,7 @@ pub use kcamera;
 pub use kcore;
 pub use kgltf;
 pub use kinput;
+pub use klight;
 pub use klog;
 pub use kmaterial;
 pub use kmath;
@@ -84,7 +86,8 @@ pub mod prelude {
     pub use kmesh::{Mesh, Vertex};
     pub use kpbr::{Environment, PbrMaterial};
     pub use krender::RenderStats;
-    pub use kscene::{Lighting, Node, Scene, Transform};
+    pub use klight::{Light, LightKind};
+    pub use kscene::{Node, Scene, Transform};
     pub use kshader::{Shader, ShaderLoader};
     pub use ktexture::{Sampler, Texture, TextureLoader};
     pub use winit::event::WindowEvent;

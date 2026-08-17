@@ -10,9 +10,11 @@
 //! assert!((t - 5.0).abs() < 1e-6);
 //! ```
 
+mod bvh;
 mod geometry;
 
-pub use geometry::{Aabb, Plane};
+pub use bvh::Bvh;
+pub use geometry::{Aabb, Intersection, Plane};
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
 pub use glam;

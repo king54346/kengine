@@ -7,5 +7,6 @@ edition = "2024"
 kasset = { path = "../kasset" }
 kcore = { path = "../kcore" }
 klog = { path = "../klog" }
+kmath = { path = "../kmath" }
 # 只需要 PNG / JPEG 解码，关掉默认特性以免拖入大量无关格式。
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }

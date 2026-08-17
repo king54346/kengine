@@ -2,7 +2,14 @@
 //!
 //! 引擎负责窗口、事件循环、输入采集和渲染；这个文件里只有游戏逻辑。
 //!
-//! 操作：WASD 移动方块，Q/E 升降，空格暂停自转，R 重置，Esc 退出。
+//! 操作：WASD 移动方块，Q/E 升降，空格暂停自转，R 重置，C 打印统计，Esc 退出。
+//!
+//! 加 `--stress N` 可以再铺 N 个共享网格的方块，用来观察空间划分、
+//! 并行剔除与实例化在万级对象下的表现：
+//!
+//! ```text
+//! cargo run --release -- --stress 20000
+//! ```
 
 use kengine::prelude::*;
 use kcore::uuid::{Uuid, uuid};
@@ -61,6 +68,8 @@ impl ResourceLoader for LevelConfigLoader {
 
 #[derive(Default)]
 struct Game {
+    /// `--stress N` 指定的额外方块数。
+    stress: usize,
     cube: Handle<Node>,
     orbit: Handle<Node>,
     config: Option<Resource<LevelConfig>>,
@@ -68,7 +77,64 @@ struct Game {
     model: Option<Resource<Model>>,
     model_spawned: bool,
     stats_reported: bool,
+    /// 绕场景转圈的点光源，用来观察多光源与衰减。
+    lamp: Handle<Node>,
     paused: bool,
+}
+
+impl Game {
+    /// 铺一片共享同一份网格与材质的方块，用来压测剔除与批处理。
+    ///
+    /// 网格与材质都是克隆的：网格克隆共享同一个 id，显存只占一份；
+    /// 贴图槽也完全一样，于是这一整片方块能合并成**一次**绘制调用。
+    fn spawn_stress_field(&mut self, ctx: &mut Context) {
+        if self.stress == 0 {
+            return;
+        }
+
+        let mesh = Mesh::cube();
+        let material = PbrMaterial::dielectric(Vec3::new(0.7, 0.7, 0.75), 0.6);
+        // 排成一片正方形网格，边长按数量开方推出来。
+        let side = (self.stress as f32).sqrt().ceil() as usize;
+        let spacing = 1.8;
+        let origin = -(side as f32) * spacing * 0.5;
+
+        for index in 0..self.stress {
+            let (x, z) = (index % side, index / side);
+            // 高度错开一点，免得整片方块共面、包围盒退化成一张纸。
+            let height = ((x * 7 + z * 13) % 5) as f32 * 0.25;
+            ctx.scene.add_node(
+                Node::new("Stress")
+                    .with_mesh(mesh.clone())
+                    .with_material(material.clone())
+                    .with_position(Vec3::new(
+                        origin + x as f32 * spacing,
+                        -0.8 + height,
+                        origin + z as f32 * spacing,
+                    ))
+                    .with_scale(Vec3::splat(0.6)),
+            );
+        }
+
+        klog::info!("压力测试：额外生成 {} 个方块", self.stress);
+    }
+
+    /// 打印一帧的渲染统计。
+    fn report(ctx: &Context) {
+        let stats = ctx.stats;
+        klog::info!(
+            "绘制 {} / 剔除 {} / 共 {}；三角形 {}；绘制调用 {}（平均 {:.1} 个/次）；\
+             剔除 {} µs，CPU 准备 {} µs",
+            stats.drawn,
+            stats.culled,
+            stats.total(),
+            stats.triangles,
+            stats.draw_calls,
+            stats.instances_per_draw(),
+            stats.cull_micros,
+            stats.prepare_micros,
+        );
+    }
 }
 
 impl Plugin for Game {
@@ -98,6 +164,40 @@ impl Plugin for Game {
                 .with_sampler(Sampler::pixelated()),
         );
 
+        // ── 光照：方向光当主光，点光源与聚光灯做点缀 ──
+        // 光源是普通场景节点，朝向取节点的 -Z 轴。
+        ctx.scene.add_node(
+            Node::new("SunLight")
+                .with_light(Light::directional().with_intensity(2.5).with_shadows())
+                .with_transform(Transform::looking_at(
+                    Vec3::new(4.0, 6.0, 4.0),
+                    Vec3::ZERO,
+                    Vec3::Y,
+                )),
+        );
+
+        self.lamp = ctx.scene.add_node(
+            Node::new("Lamp").with_light(
+                Light::point(9.0)
+                    .with_color(Vec3::new(1.0, 0.35, 0.1))
+                    .with_intensity(40.0),
+            ),
+        );
+
+        ctx.scene.add_node(
+            Node::new("Spot")
+                .with_light(
+                    Light::spot(18.0, 12.0, 26.0)
+                        .with_color(Vec3::new(0.4, 0.7, 1.0))
+                        .with_intensity(60.0),
+                )
+                .with_transform(Transform::looking_at(
+                    Vec3::new(-4.0, 5.0, 2.0),
+                    Vec3::new(-2.0, 0.0, 0.0),
+                    Vec3::Y,
+                )),
+        );
+
         // ── 场景 ──
         ctx.scene.add_node(
             Node::new("Camera")
@@ -109,13 +209,21 @@ impl Plugin for Game {
                 )),
         );
 
+        // 程序化法线贴图，用来验证切线空间是否正确。
+        let bumps = ctx.resources.register(
+            "builtin/bumps",
+            Texture::bumpy_normal(128, 4),
+        );
+
         // 贴了棋盘格的立方体，金属度高、粗糙度低 → 高光锐利。
+        // 挂上法线贴图后表面会呈现凹凸感，而几何体本身仍是平的。
         self.cube = ctx.scene.add_node(
             Node::new("Cube")
                 .with_mesh(Mesh::cube())
                 .with_material(
                     Material::standard()
                         .with_base_color_texture(checker.clone())
+                        .with(kengine::kpbr::standard::NORMAL_TEXTURE, bumps)
                         .with_metallic(0.9)
                         .with_roughness(0.25),
                 ),
@@ -126,9 +234,11 @@ impl Plugin for Game {
             Node::new("Orbit")
                 .with_mesh(Mesh::cube())
                 .with_material(
-                    Material::standard()
-                        .with_base_color(Vec4::new(1.0, 0.45, 0.1, 1.0))
-                        .with_roughness(0.6),
+                    // 自发光：不受光照影响，会成为 Bloom 的来源。
+                    PbrMaterial::emissive(
+                        Vec3::new(1.0, 0.45, 0.1),
+                        Vec3::new(3.0, 1.2, 0.2),
+                    ),
                 )
                 .with_position(Vec3::new(1.5, 0.0, 0.0))
                 .with_scale(Vec3::splat(0.3)),
@@ -194,6 +304,8 @@ impl Plugin for Game {
             );
         }
 
+        self.spawn_stress_field(ctx);
+
         klog::info!("WASD 移动，Q/E 升降，空格暂停，R 重置，C 打印剔除统计，Esc 退出");
     }
 
@@ -217,13 +329,7 @@ impl Plugin for Game {
         // 启动 2 秒后自动汇报一次渲染统计，方便无人值守时确认剔除生效。
         if !self.stats_reported && ctx.elapsed > 2.0 {
             self.stats_reported = true;
-            klog::info!(
-                "渲染统计：绘制 {} / 剔除 {} / 共 {}，三角形 {}",
-                ctx.stats.drawn,
-                ctx.stats.culled,
-                ctx.stats.total(),
-                ctx.stats.triangles
-            );
+            Self::report(ctx);
         }
 
         // 配置是异步加载的，没就绪时用默认值，就绪后自动生效。
@@ -244,14 +350,7 @@ impl Plugin for Game {
         }
 
         if ctx.input.action_just_pressed("stats") {
-            let stats = ctx.stats;
-            klog::info!(
-                "渲染统计：绘制 {} / 剔除 {} / 共 {}，三角形 {}",
-                stats.drawn,
-                stats.culled,
-                stats.total(),
-                stats.triangles
-            );
+            Self::report(ctx);
         }
 
         if ctx.input.action_just_pressed("reset") {
@@ -265,6 +364,11 @@ impl Plugin for Game {
         let velocity = Vec3::new(plane.x, lift, -plane.y) * move_speed * ctx.dt;
         ctx.scene[self.cube].transform.translate(velocity);
 
+        // 点光源绕圈移动，能直观看出距离衰减与多光源叠加。
+        let orbit = ctx.elapsed * 0.7;
+        ctx.scene[self.lamp].transform.position =
+            Vec3::new(orbit.cos() * 3.2, 1.1, orbit.sin() * 3.2);
+
         if !self.paused {
             ctx.scene[self.cube].transform.rotate_y(spin_speed * ctx.dt);
             ctx.scene[self.orbit].transform.rotate_x(spin_speed * 2.0 * ctx.dt);
@@ -272,21 +376,56 @@ impl Plugin for Game {
     }
 }
 
+/// 解析 `--stress N`，没给就返回 0。
+fn stress_count() -> usize {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        let value = match arg.split_once('=') {
+            Some(("--stress", value)) => Some(value.to_string()),
+            _ if arg == "--stress" => args.next(),
+            _ => None,
+        };
+        if let Some(value) = value {
+            return value.parse().unwrap_or(0);
+        }
+    }
+    0
+}
+
 fn main() {
     klog::init(None);
 
     // 除了完整插件，也可以往指定阶段直接挂一段逻辑。
     // 这里演示在帧末统计平均帧率——物理、动画这类系统同样按这种方式接入。
+    // 剔除与准备耗时取区间平均：单帧采样受调度抖动影响太大，说明不了问题。
     let mut frames = 0u32;
+    let mut window_frames = 0u32;
+    let mut cull_micros = 0u64;
+    let mut prepare_micros = 0u64;
     let mut next_report = 5.0;
 
     App::new()
         .with_title("kengine demo")
-        .add_plugin(Game::default())
+        .add_plugin(Game {
+            stress: stress_count(),
+            ..Game::default()
+        })
         .add_system(Stage::FrameEnd, move |ctx| {
             frames += 1;
+            window_frames += 1;
+            cull_micros += ctx.stats.cull_micros as u64;
+            prepare_micros += ctx.stats.prepare_micros as u64;
+
             if ctx.elapsed >= next_report {
-                klog::info!("平均帧率：{:.0} FPS", frames as f32 / ctx.elapsed);
+                klog::info!(
+                    "平均帧率：{:.0} FPS；剔除 {:.0} µs/帧，CPU 准备 {:.0} µs/帧",
+                    frames as f32 / ctx.elapsed,
+                    cull_micros as f64 / window_frames as f64,
+                    prepare_micros as f64 / window_frames as f64,
+                );
+                window_frames = 0;
+                cull_micros = 0;
+                prepare_micros = 0;
                 next_report += 5.0;
             }
         })

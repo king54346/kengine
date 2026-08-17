@@ -1,0 +1,13 @@
+[package]
+name = "kpbr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kmath = { path = "../kmath" }
+bytemuck = { version = "1.25.2", features = ["derive"] }
+kmaterial = { path = "../kmaterial" }
+
+[dev-dependencies]
+# 用于校验本 crate 导出的 WGSL 是否合法
+kshader = { path = "../kshader" }

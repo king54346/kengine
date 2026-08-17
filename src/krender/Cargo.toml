@@ -1,0 +1,25 @@
+[package]
+name = "krender"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kcamera = { path = "../kcamera" }
+kcore = { path = "../kcore" }
+klog = { path = "../klog" }
+klight = { path = "../klight" }
+kmaterial = { path = "../kmaterial" }
+kmath = { path = "../kmath" }
+kmesh = { path = "../kmesh" }
+kpbr = { path = "../kpbr" }
+kscene = { path = "../kscene" }
+ktexture = { path = "../ktexture" }
+bytemuck = { version = "1.25.2", features = ["derive"] }
+# 每帧要按网格/贴图查几万次缓存，标准库默认的 SipHash 在这里太重。
+fxhash = "0.2"
+wgpu = "30.0.0"
+# 只用到窗口句柄，用于创建 surface。
+winit = "0.30.13"
+
+[dev-dependencies]
+kshader = { path = "../kshader" }

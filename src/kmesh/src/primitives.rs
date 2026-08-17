@@ -45,13 +45,15 @@ impl Mesh {
                     position: corner,
                     normal,
                     uv,
-                    color: [1.0; 3],
+                    ..Default::default()
                 });
             }
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
 
-        Self::new(vertices, indices)
+        let mut mesh = Self::new(vertices, indices);
+        mesh.recompute_tangents();
+        mesh
     }
 
     /// 每面一种颜色的立方体，便于分辨朝向。
@@ -83,7 +85,9 @@ impl Mesh {
             Vertex::new(Vec3::new(0.5, 0.0, 0.5), Vec3::Y, [uv_scale, uv_scale]),
             Vertex::new(Vec3::new(0.5, 0.0, -0.5), Vec3::Y, [uv_scale, 0.0]),
         ];
-        Self::new(vertices, vec![0, 1, 2, 0, 2, 3])
+        let mut mesh = Self::new(vertices, vec![0, 1, 2, 0, 2, 3]);
+        mesh.recompute_tangents();
+        mesh
     }
 
     /// UV 球，半径 0.5。
@@ -124,7 +128,9 @@ impl Mesh {
             }
         }
 
-        Self::new(vertices, indices)
+        let mut mesh = Self::new(vertices, indices);
+        mesh.recompute_tangents();
+        mesh
     }
 }
 

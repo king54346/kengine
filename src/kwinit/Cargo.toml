@@ -1,0 +1,8 @@
+[package]
+name = "kwinit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+klog = { path = "../klog" }
+winit = "0.30.13"

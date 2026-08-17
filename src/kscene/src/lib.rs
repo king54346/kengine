@@ -8,47 +8,24 @@
 
 #![warn(missing_docs)]
 
+mod cull;
 mod node;
 mod transform;
 
 pub use kcamera::{Camera, Frustum, Projection};
 pub use kmesh::{Mesh, Vertex};
-pub use kmath::Aabb;
+pub use kmath::{Aabb, Intersection};
 pub use node::Node;
 pub use transform::Transform;
 
+use cull::SceneCulling;
 use kcore::pool::{Handle, Pool};
 use kgltf::Model;
 use kmaterial::Material;
-use kmath::{Mat4, Vec3};
+use kmath::Mat4;
+use klight::Light;
 use kpbr::Environment;
 use std::ops::{Index, IndexMut};
-
-/// 场景的方向光设置。
-///
-/// 这是最小实现——只有一盏全局方向光。点光源、聚光灯等留给后续的 `klight`。
-#[derive(Debug, Clone, Copy)]
-pub struct Lighting {
-    /// 光线传播方向（从光源指向被照物）。
-    pub direction: Vec3,
-    /// 光照颜色。
-    pub color: Vec3,
-    /// 光照强度。PBR 下高光很依赖它，太低会显得整体发灰。
-    pub intensity: f32,
-    /// 环境光。避免背光面全黑，暂时代替尚未实现的 IBL。
-    pub environment: Environment,
-}
-
-impl Default for Lighting {
-    fn default() -> Self {
-        Self {
-            direction: Vec3::new(-0.5, -1.0, -0.3).normalize(),
-            color: Vec3::ONE,
-            intensity: 3.0,
-            environment: Environment::default(),
-        }
-    }
-}
 
 /// 渲染器每帧收集到的一个绘制项。
 ///
@@ -72,7 +49,9 @@ pub struct RenderItem<'a> {
 pub struct Scene {
     nodes: Pool<Node>,
     root: Handle<Node>,
-    lighting: Lighting,
+    environment: Environment,
+    /// 剔除加速结构，由 [`Scene::update`] 维护。
+    culling: SceneCulling,
 }
 
 impl Default for Scene {
@@ -89,7 +68,8 @@ impl Scene {
         Self {
             nodes,
             root,
-            lighting: Lighting::default(),
+            environment: Environment::default(),
+            culling: SceneCulling::default(),
         }
     }
 
@@ -98,14 +78,17 @@ impl Scene {
         self.root
     }
 
-    /// 光照设置。
-    pub fn lighting(&self) -> &Lighting {
-        &self.lighting
+    /// 环境光设置。
+    ///
+    /// 方向光、点光源、聚光灯都是场景节点（见 [`Node::with_light`]），
+    /// 这里只有代替 IBL 的常量环境光。
+    pub fn environment(&self) -> &Environment {
+        &self.environment
     }
 
-    /// 光照设置的可变引用。
-    pub fn lighting_mut(&mut self) -> &mut Lighting {
-        &mut self.lighting
+    /// 环境光设置的可变引用。
+    pub fn environment_mut(&mut self) -> &mut Environment {
+        &mut self.environment
     }
 
     /// 底层节点池的只读引用。
@@ -264,30 +247,78 @@ impl Scene {
         self.nodes.try_borrow_mut(handle).ok()
     }
 
-    /// 沿树自上而下重算所有节点的世界变换与可见性。
+    /// 沿树自上而下重算所有节点的世界变换与可见性，并刷新剔除加速结构。
     ///
     /// 引擎每帧在插件的 `update` 之后自动调用，通常不需要手动调。
     pub fn update(&mut self) {
+        self.culling.begin();
+
         let mut stack = vec![(self.root, Mat4::IDENTITY, true)];
         while let Some((handle, parent_matrix, parent_visible)) = stack.pop() {
-            let (global, visible, children) = {
+            let (global, visible, child_count, drawable) = {
                 let node = &mut self.nodes[handle];
                 let global = parent_matrix * node.transform.matrix();
                 let visible = parent_visible && node.visible;
                 node.global_transform = global;
                 node.global_visible = visible;
                 // 世界包围盒与世界变换一同更新，剔除时直接取用。
-                node.global_aabb = match node.mesh() {
+                node.global_aabb = match node.mesh.as_ref() {
                     Some(mesh) => mesh.aabb().transform(global),
                     None => Aabb::EMPTY,
                 };
-                (global, visible, node.children.clone())
+                (
+                    global,
+                    visible,
+                    node.children.len(),
+                    visible && node.mesh.is_some(),
+                )
             };
 
-            for child in children {
+            if drawable {
+                self.culling.push(handle, self.nodes[handle].global_aabb);
+            }
+
+            // 按下标取子节点而不是克隆整个列表：每帧对上万个节点做一次分配，
+            // 光是分配器就能吃掉可观的时间。倒序压栈，弹出时才是原本的顺序。
+            for index in (0..child_count).rev() {
+                let child = self.nodes[handle].children[index];
                 stack.push((child, global, visible));
             }
         }
+
+        self.culling.commit();
+    }
+
+    /// 参与剔除判定的对象数，即所有可见且带网格的节点数。
+    pub fn drawable_count(&self) -> usize {
+        self.culling.len()
+    }
+
+    /// 视锥剔除，返回落在视锥内的绘制项。
+    ///
+    /// 走 BVH 而非逐个判定：视锥外的整棵子树一次跳过，视锥内的整棵子树一次接受。
+    /// 对象数超过阈值时自动切到 ktask 分片并行，结果与串行完全一致。
+    ///
+    /// 结果依赖 [`Scene::update`] 维护的加速结构，务必在其之后调用。
+    pub fn cull(&self, frustum: &Frustum) -> Vec<RenderItem<'_>> {
+        let mut indices = Vec::new();
+        self.culling.cull(frustum, &mut indices);
+
+        indices
+            .into_iter()
+            .filter_map(|index| self.render_item(self.culling.handle(index)))
+            .collect()
+    }
+
+    /// 把一个节点转成绘制项；节点没有网格时返回 [`None`]。
+    fn render_item(&self, handle: Handle<Node>) -> Option<RenderItem<'_>> {
+        let node = self.try_get(handle)?;
+        node.mesh().map(|mesh| RenderItem {
+            mesh,
+            material: node.material(),
+            transform: node.global_transform,
+            aabb: node.global_aabb,
+        })
     }
 
     /// 场景中第一个启用且可见的相机，返回（世界变换, 相机参数）。
@@ -300,7 +331,34 @@ impl Scene {
         })
     }
 
-    /// 遍历所有需要绘制的节点。
+    /// 所有可见网格的世界包围盒之并。
+    ///
+    /// 阴影贴图用它决定光空间投影的覆盖范围；场景为空时返回空包围盒。
+    /// 取自剔除结构的根节点，是 O(1) 的。
+    pub fn visible_bounds(&self) -> Aabb {
+        self.culling.bounds()
+    }
+
+    /// 场景中第一盏投射阴影的光源，返回（光源, 世界变换）。
+    pub fn shadow_caster(&self) -> Option<(&Light, Mat4)> {
+        self.visible_lights()
+            .find(|(light, _)| light.cast_shadows)
+    }
+
+    /// 遍历场景中所有启用且可见的光源，返回（光源, 世界变换）。
+    ///
+    /// 数量超过 [`klight::MAX_LIGHTS`] 时由渲染器截断。
+    pub fn visible_lights(&self) -> impl Iterator<Item = (&Light, Mat4)> {
+        self.nodes.iter().filter_map(|node| {
+            node.light()
+                .filter(|light| light.enabled && node.global_visible)
+                .map(|light| (light, node.global_transform))
+        })
+    }
+
+    /// 遍历所有需要绘制的节点，不做剔除。
+    ///
+    /// 需要视锥剔除时用 [`Scene::cull`]，它走 BVH，对象多时快得多。
     pub fn visible_meshes(&self) -> impl Iterator<Item = RenderItem<'_>> {
         self.nodes.iter().filter_map(|node| {
             node.mesh()
@@ -615,6 +673,99 @@ mod test {
         assert!(scene[node].global_aabb().is_empty());
     }
 
+    /// 相机在 +Z 朝原点看的视锥。
+    fn test_frustum() -> Frustum {
+        let camera = Camera::default();
+        let view = Mat4::look_at_rh(Vec3::new(0.0, 4.0, 20.0), Vec3::ZERO, Vec3::Y);
+        Frustum::from_view_projection(camera.projection_matrix(16.0 / 9.0) * view)
+    }
+
+    #[test]
+    fn cull_matches_linear_filtering() {
+        let mut scene = Scene::new();
+        let mesh = Mesh::cube();
+        // 一片 30×30 的方块，大半落在视野外。
+        for x in 0..30 {
+            for z in 0..30 {
+                scene.add_node(
+                    Node::new(format!("Cube{x}_{z}"))
+                        .with_mesh(mesh.clone())
+                        .with_position(Vec3::new(x as f32 - 15.0, 0.0, z as f32 - 15.0)),
+                );
+            }
+        }
+        scene.update();
+
+        let frustum = test_frustum();
+        let linear = scene
+            .visible_meshes()
+            .filter(|item| frustum.intersects(&item.aabb))
+            .count();
+        let culled = scene.cull(&frustum);
+
+        // BVH 只是加速手段，可见集必须与逐个判定完全一致。
+        assert_eq!(culled.len(), linear);
+        assert!(culled.len() < scene.drawable_count());
+        assert_eq!(scene.drawable_count(), 900);
+    }
+
+    #[test]
+    fn cull_tracks_moved_nodes() {
+        let mut scene = Scene::new();
+        let node = scene.add_node(Node::new("Cube").with_mesh(Mesh::cube()));
+        scene.update();
+        assert_eq!(scene.cull(&test_frustum()).len(), 1);
+
+        // 挪到视野外后，剔除结构必须跟着更新，否则会画出根本看不见的东西。
+        scene[node].transform.position = Vec3::new(0.0, 0.0, 900.0);
+        scene.update();
+
+        assert_eq!(scene.cull(&test_frustum()).len(), 0);
+        assert_eq!(scene.drawable_count(), 1);
+    }
+
+    #[test]
+    fn cull_drops_hidden_and_removed_nodes() {
+        let mut scene = Scene::new();
+        let a = scene.add_node(Node::new("A").with_mesh(Mesh::cube()));
+        let b = scene.add_node(
+            Node::new("B")
+                .with_mesh(Mesh::cube())
+                .with_position(Vec3::new(2.0, 0.0, 0.0)),
+        );
+        scene.update();
+        assert_eq!(scene.cull(&test_frustum()).len(), 2);
+
+        scene[a].visible = false;
+        scene.update();
+        assert_eq!(scene.cull(&test_frustum()).len(), 1);
+
+        scene.remove_node(b);
+        scene.update();
+        assert_eq!(scene.cull(&test_frustum()).len(), 0);
+        assert_eq!(scene.drawable_count(), 0);
+    }
+
+    #[test]
+    fn cull_carries_material_and_transform() {
+        let mut scene = Scene::new();
+        scene.add_node(
+            Node::new("Cube")
+                .with_mesh(Mesh::cube())
+                .with_material(Material::standard())
+                .with_position(Vec3::new(1.0, 2.0, 3.0)),
+        );
+        scene.update();
+
+        let items = scene.cull(&test_frustum());
+        assert_eq!(items.len(), 1);
+        assert!(items[0].material.is_some());
+        assert_eq!(
+            items[0].transform.to_scale_rotation_translation().2,
+            Vec3::new(1.0, 2.0, 3.0)
+        );
+    }
+
     #[test]
     fn frustum_culls_offscreen_nodes() {
         let mut scene = Scene::new();
@@ -639,6 +790,119 @@ mod test {
 
         assert_eq!(scene.visible_meshes().count(), 2);
         assert_eq!(visible, 1);
+    }
+
+    #[test]
+    fn visible_bounds_covers_every_mesh() {
+        let mut scene = Scene::new();
+        scene.add_node(Node::new("A").with_mesh(Mesh::cube()));
+        scene.add_node(
+            Node::new("B")
+                .with_mesh(Mesh::cube())
+                .with_position(Vec3::new(10.0, 0.0, 0.0)),
+        );
+
+        scene.update();
+        let bounds = scene.visible_bounds();
+
+        assert_eq!(bounds.min.x, -0.5);
+        assert_eq!(bounds.max.x, 10.5);
+    }
+
+    #[test]
+    fn visible_bounds_ignores_hidden_meshes() {
+        let mut scene = Scene::new();
+        scene.add_node(Node::new("A").with_mesh(Mesh::cube()));
+        let hidden = scene.add_node(
+            Node::new("B")
+                .with_mesh(Mesh::cube())
+                .with_position(Vec3::new(100.0, 0.0, 0.0)),
+        );
+        scene[hidden].visible = false;
+
+        scene.update();
+
+        // 隐藏的物体不该把阴影范围撑大，否则阴影分辨率会被白白摊薄。
+        assert_eq!(scene.visible_bounds().max.x, 0.5);
+    }
+
+    #[test]
+    fn empty_scene_has_empty_bounds() {
+        let mut scene = Scene::new();
+        scene.update();
+
+        assert!(scene.visible_bounds().is_empty());
+    }
+
+    #[test]
+    fn shadow_caster_picks_the_flagged_light() {
+        let mut scene = Scene::new();
+        scene.add_node(Node::new("Fill").with_light(Light::point(5.0)));
+        scene.add_node(
+            Node::new("Sun").with_light(Light::directional().with_shadows()),
+        );
+
+        scene.update();
+
+        let (light, _) = scene.shadow_caster().expect("应当找到投影光源");
+        assert!(light.cast_shadows);
+    }
+
+    #[test]
+    fn no_shadow_caster_when_none_flagged() {
+        let mut scene = Scene::new();
+        scene.add_node(Node::new("Fill").with_light(Light::point(5.0)));
+        scene.update();
+
+        assert!(scene.shadow_caster().is_none());
+    }
+
+    #[test]
+    fn visible_lights_skips_disabled_ones() {
+        let mut scene = Scene::new();
+        let mut off = Light::point(5.0);
+        off.enabled = false;
+        scene.add_node(Node::new("Off").with_light(off));
+        scene.add_node(Node::new("On").with_light(Light::point(5.0)));
+
+        scene.update();
+
+        assert_eq!(scene.visible_lights().count(), 1);
+    }
+
+    #[test]
+    fn invisible_parent_hides_child_light() {
+        let mut scene = Scene::new();
+        let parent = scene.add_node(Node::new("Parent"));
+        scene.add_node_with_parent(Node::new("Lamp").with_light(Light::point(5.0)), parent);
+
+        scene.update();
+        assert_eq!(scene.visible_lights().count(), 1);
+
+        // 隐藏父节点，子节点上的光源也应停止参与照明。
+        scene[parent].visible = false;
+        scene.update();
+        assert_eq!(scene.visible_lights().count(), 0);
+    }
+
+    #[test]
+    fn light_transform_follows_node_hierarchy() {
+        let mut scene = Scene::new();
+        let parent = scene.add_node(Node::new("Rig").with_position(Vec3::new(10.0, 0.0, 0.0)));
+        scene.add_node_with_parent(
+            Node::new("Lamp")
+                .with_light(Light::point(5.0))
+                .with_position(Vec3::new(0.0, 4.0, 0.0)),
+            parent,
+        );
+
+        scene.update();
+
+        let (light, transform) = scene.visible_lights().next().expect("应当有一盏光源");
+        let gpu = light.to_gpu(transform);
+
+        // 世界坐标 = 父节点位移 + 自身位移。
+        assert_eq!([gpu.position[0], gpu.position[1], gpu.position[2]], [10.0, 4.0, 0.0]);
     }
 
     #[test]

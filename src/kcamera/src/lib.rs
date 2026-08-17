@@ -22,11 +22,12 @@
 
 #![warn(missing_docs)]
 
-use kmath::{Aabb, Mat4, Plane, Vec3, Vec4};
+use kmath::{Aabb, Intersection, Mat4, Plane, Vec3, Vec4};
 
 /// 常用类型的集中导出。
 pub mod prelude {
     pub use crate::{Camera, Frustum, Projection};
+    pub use kmath::Intersection;
 }
 
 /// 投影方式。
@@ -184,25 +185,41 @@ impl Frustum {
     /// 反过来不成立——斜角处的盒子可能被误判为可见，
     /// 但这对剔除是安全的：宁可多画，不可漏画。
     pub fn intersects(&self, aabb: &Aabb) -> bool {
+        self.classify(aabb) != Intersection::Outside
+    }
+
+    /// 包围盒相对视锥的三态位置关系。
+    ///
+    /// 比 [`intersects`](Frustum::intersects) 多告诉一件事：盒子是否**完整**落在视锥内。
+    /// 层次剔除靠它剪枝——BVH 的某个节点整个在视锥内时，
+    /// 其下所有物体都可见，不必再逐个判定。
+    pub fn classify(&self, aabb: &Aabb) -> Intersection {
         if aabb.is_empty() {
-            return false;
+            return Intersection::Outside;
         }
 
         let center = aabb.center();
         let half = aabb.half_extents();
+        let mut result = Intersection::Inside;
 
         for plane in &self.planes {
             // 盒子在该平面法线方向上的投影半径。
             let radius = half.x * plane.normal.x.abs()
                 + half.y * plane.normal.y.abs()
                 + half.z * plane.normal.z.abs();
+            let distance = plane.distance_to(center);
 
-            if plane.distance_to(center) + radius < 0.0 {
-                return false;
+            if distance + radius < 0.0 {
+                // 整个盒子在这个面的外侧，后面的面不用看了。
+                return Intersection::Outside;
+            }
+            if distance - radius < 0.0 {
+                // 跨在这个面上：还不能判外，但也不再是「完全在内」。
+                result = Intersection::Intersects;
             }
         }
 
-        true
+        result
     }
 
     /// 点是否在视锥内。
@@ -273,6 +290,50 @@ mod test {
     #[test]
     fn empty_aabb_is_never_visible() {
         assert!(!default_frustum().intersects(&Aabb::EMPTY));
+        assert_eq!(default_frustum().classify(&Aabb::EMPTY), Intersection::Outside);
+    }
+
+    #[test]
+    fn classify_separates_inside_from_straddling() {
+        let frustum = default_frustum();
+
+        // 原点处的小盒完整落在视锥里。
+        assert_eq!(
+            frustum.classify(&Aabb::new(-Vec3::splat(0.1), Vec3::splat(0.1))),
+            Intersection::Inside
+        );
+        // 包住整个视锥的大盒必然跨在每个面上。
+        assert_eq!(
+            frustum.classify(&Aabb::new(Vec3::splat(-500.0), Vec3::splat(500.0))),
+            Intersection::Intersects
+        );
+        // 远处的盒子完全在外。
+        assert_eq!(
+            frustum.classify(&Aabb::new(
+                Vec3::new(1000.0, 0.0, 0.0),
+                Vec3::new(1001.0, 1.0, 1.0)
+            )),
+            Intersection::Outside
+        );
+    }
+
+    #[test]
+    fn classify_agrees_with_intersects() {
+        let frustum = default_frustum();
+
+        // 两个判定必须同源，否则层次剔除与逐个剔除会给出不同的可见集。
+        for x in -6..=6 {
+            for z in -6..=6 {
+                let aabb = Aabb::from_center_half_extents(
+                    Vec3::new(x as f32, 0.0, z as f32),
+                    Vec3::splat(0.5),
+                );
+                assert_eq!(
+                    frustum.intersects(&aabb),
+                    frustum.classify(&aabb) != Intersection::Outside
+                );
+            }
+        }
     }
 
     #[test]

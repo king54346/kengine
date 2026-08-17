@@ -1,0 +1,16 @@
+[package]
+name = "kscene"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kcamera = { path = "../kcamera" }
+kcore = { path = "../kcore" }
+kgltf = { path = "../kgltf" }
+klight = { path = "../klight" }
+kmaterial = { path = "../kmaterial" }
+kmath = { path = "../kmath" }
+kmesh = { path = "../kmesh" }
+kpbr = { path = "../kpbr" }
+# 剔除分片并行要用线程池，因此必须开多线程实现。
+ktask = { path = "../ktask", features = ["multi_threaded"] }

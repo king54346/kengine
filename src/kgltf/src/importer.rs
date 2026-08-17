@@ -189,6 +189,7 @@ fn import_meshes(
             let colors: Option<Vec<[f32; 4]>> = reader
                 .read_colors(0)
                 .map(|c| c.into_rgba_f32().collect());
+            let tangents: Option<Vec<[f32; 4]>> = reader.read_tangents().map(Iterator::collect);
 
             let vertices: Vec<Vertex> = positions
                 .iter()
@@ -208,6 +209,10 @@ fn import_meshes(
                         .and_then(|c| c.get(index).copied())
                         .map(|c| [c[0], c[1], c[2]])
                         .unwrap_or([1.0; 3]),
+                    tangent: tangents
+                        .as_ref()
+                        .and_then(|t| t.get(index).copied())
+                        .unwrap_or([1.0, 0.0, 0.0, 1.0]),
                 })
                 .collect();
 
@@ -225,6 +230,10 @@ fn import_meshes(
             // glTF 允许省略法线，此时需要自行生成，否则光照全黑。
             if normals.is_none() {
                 mesh.recompute_normals();
+            }
+            // 同样，缺少 TANGENT 时法线贴图无法工作，按 UV 反推一份。
+            if tangents.is_none() {
+                mesh.recompute_tangents();
             }
 
             parts.push(MeshPart {

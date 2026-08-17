@@ -1106,6 +1106,7 @@ dependencies = [
  "kcore",
  "kgltf",
  "kinput",
+ "klight",
  "klog",
  "kmaterial",
  "kmath",
@@ -1163,6 +1164,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "klight"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "kmath",
+ "kshader",
+]
+
+[[package]]
 name = "klog"
 version = "0.1.0"
 dependencies = [
@@ -1203,6 +1213,7 @@ dependencies = [
 name = "kpbr"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "kmaterial",
  "kmath",
  "kshader",
@@ -1213,8 +1224,10 @@ name = "krender"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "fxhash",
  "kcamera",
  "kcore",
+ "klight",
  "klog",
  "kmaterial",
  "kmath",
@@ -1234,10 +1247,12 @@ dependencies = [
  "kcamera",
  "kcore",
  "kgltf",
+ "klight",
  "kmaterial",
  "kmath",
  "kmesh",
  "kpbr",
+ "ktask",
 ]
 
 [[package]]
@@ -1270,6 +1285,7 @@ dependencies = [
  "kasset",
  "kcore",
  "klog",
+ "kmath",
 ]
 
 [[package]]

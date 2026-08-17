@@ -31,3 +31,5 @@ $RECYCLE.BIN/
 *.log
 /tmp/
 /local/
+/bevy-main/
+/Fyrox-master/

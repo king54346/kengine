@@ -8,8 +8,10 @@
 //! - `.gltf`（含 `data:` 内嵌缓冲）与 `.glb`
 //! - 外部 `.bin` 与外部贴图，通过 [`ResourceIo`](kasset::ResourceIo) 读取
 //! - 三角形图元、PBR 基础色/金属度/粗糙度、基础色贴图、节点层级
+//! - 顶点切线（缺失 TANGENT 时按 UV 反推生成）
 //!
-//! 尚未支持：动画、蒙皮、法线贴图与其他 PBR 贴图通道、非三角形图元、稀疏访问器。
+//! 尚未支持：动画、蒙皮、非三角形图元、稀疏访问器。
+//! 法线/遮蔽/自发光贴图渲染器已能消费，但导入器目前只接基础色贴图。
 //!
 //! ```no_run
 //! use kgltf::prelude::*;
@@ -128,6 +130,21 @@ mod test {
         for vertex in mesh.vertices() {
             assert!((vertex.normal().length() - 1.0).abs() < 1e-5);
             assert!(vertex.normal().z.abs() > 0.99);
+        }
+    }
+
+    #[test]
+    fn generates_tangents_when_absent() {
+        // 测试用的 glTF 没有 TANGENT 属性，导入器必须自行生成，
+        // 否则挂上法线贴图后光照方向会完全错乱。
+        let model = load(&triangle_gltf(false), "tri.gltf").unwrap();
+        let model = model.data_ref().unwrap();
+        let mesh = model.mesh(0).unwrap();
+
+        for vertex in mesh.vertices() {
+            assert!(vertex.tangent().is_finite());
+            // 切线必须垂直于法线。
+            assert!(vertex.normal().dot(vertex.tangent()).abs() < 1e-3);
         }
     }
 
