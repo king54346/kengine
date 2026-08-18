@@ -19,6 +19,7 @@ kphysics = { path = "../kphysics" }
 kpbr = { path = "../kpbr" }
 # 剔除分片并行要用线程池，因此必须开多线程实现。
 ktask = { path = "../ktask", features = ["multi_threaded"] }
+fxhash = "0.2.1"
 
 [dev-dependencies]
 # 用 assets/Soldier.glb 做骨骼动画的集成测试，加载器要走资源管理器。

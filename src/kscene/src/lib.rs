@@ -14,6 +14,7 @@ mod physics;
 mod ragdoll;
 mod serialize;
 mod skin;
+mod streaming;
 mod transform;
 
 pub use kcamera::{Camera, Frustum, Projection};
@@ -30,9 +31,11 @@ pub use physics::{Collider, Joint, RigidBody};
 pub use ragdoll::{LimbDesc, Ragdoll, RagdollBuilder, RagdollLimb, hinge_limits};
 pub use serialize::SCENE_FORMAT_VERSION;
 pub use skin::{AnimationPlayer, Skin};
+pub use streaming::{Cell, CellState, Streaming, StreamingReport};
 pub use transform::Transform;
 
 use cull::SceneCulling;
+use fxhash::FxHashMap;
 use kcore::pool::{Handle, Pool};
 use kanim::Animator;
 use kgltf::Model;
@@ -490,6 +493,100 @@ impl Scene {
     /// 节点的可变引用，句柄无效时返回 [`None`]。
     pub fn try_get_mut(&mut self, handle: Handle<Node>) -> Option<&mut Node> {
         self.nodes.try_borrow_mut(handle).ok()
+    }
+
+
+    /// 把另一个场景的全部节点并进本场景，挂在 `parent` 下，返回并入子树的根。
+    ///
+    /// 这是流式加载与预制体（prefab）共同的底层原语：一个「区块」或「预制体」
+    /// 就是一个存盘的场景，用的时候整个并进来。
+    ///
+    /// # 句柄要整体重映射
+    ///
+    /// 两个场景各有各的节点池，来的那份里的句柄在本场景里指向的是别的东西
+    /// （或者根本无效）。所以**每一处存着节点句柄的地方**都必须跟着改：
+    /// 父子关系、骨架的关节表、关节组件两端的刚体。漏掉任何一处，
+    /// 症状都是「并进来之后有几个节点莫名其妙地跟着另一个物体动」，
+    /// 而且不会报错。
+    ///
+    /// 来源场景的环境设置（天空、环境光）**不并入**——那是全局的，
+    /// 一个区块无权改写整张地图的天光。
+    pub fn merge(&mut self, source: Scene, parent: Handle<Node>) -> Handle<Node> {
+        let parent = if self.nodes.is_valid_handle(parent) {
+            parent
+        } else {
+            self.root
+        };
+
+        let Scene {
+            nodes: source_nodes,
+            root: source_root,
+            ..
+        } = source;
+
+        // ── 第一趟：把节点搬过来，记下「旧句柄 → 新句柄」 ──
+        let mut remap: FxHashMap<Handle<Node>, Handle<Node>> = FxHashMap::default();
+        let mut moved = Vec::new();
+        for index in 0..source_nodes.get_capacity() {
+            let old = source_nodes.handle_from_index(index);
+            if !source_nodes.is_valid_handle(old) {
+                continue;
+            }
+            moved.push(old);
+        }
+
+        let mut source_nodes = source_nodes;
+        for old in &moved {
+            let Ok(node) = source_nodes.try_borrow_mut(*old) else {
+                continue;
+            };
+            // 用 `std::mem::take` 把节点搬出来：`Node` 不是 `Clone`（它带着
+            // 网格、材质、物理组件），但可以整个换成一个空节点。
+            let taken = std::mem::take(node);
+            let new = self.nodes.spawn(taken);
+            remap.insert(*old, new);
+        }
+
+        let translate = |handle: Handle<Node>| -> Handle<Node> {
+            remap.get(&handle).copied().unwrap_or(Handle::NONE)
+        };
+
+        // ── 第二趟：把所有存着句柄的字段改过来 ──
+        for new in remap.values().copied() {
+            let Ok(node) = self.nodes.try_borrow_mut(new) else {
+                continue;
+            };
+
+            node.parent = translate(node.parent);
+            for child in &mut node.children {
+                *child = translate(*child);
+            }
+            // 来源里已经失效的引用会变成 `Handle::NONE`，顺手清掉，
+            // 免得留下一堆指向空的子节点。
+            node.children.retain(|child| child.is_some());
+
+            if let Some(skin) = node.skin.as_deref_mut() {
+                skin.remap_joints(&translate);
+            }
+            if let Some(joint) = node.joint.as_deref_mut() {
+                let (body1, body2) = (translate(joint.body1()), translate(joint.body2()));
+                joint.set_bodies(body1, body2);
+            }
+        }
+
+        // ── 接上：来源的根挂到指定父节点下 ──
+        let new_root = translate(source_root);
+        if new_root.is_none() {
+            return Handle::NONE;
+        }
+        self.nodes[new_root].parent = parent;
+        self.nodes[parent].children.push(new_root);
+
+        for new in remap.values().copied() {
+            self.index_physics_components(new);
+        }
+
+        new_root
     }
 
     /// 沿树自上而下重算所有节点的世界变换与可见性，并刷新剔除加速结构。

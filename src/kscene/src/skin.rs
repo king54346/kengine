@@ -49,6 +49,13 @@ impl Skin {
         &self.joints
     }
 
+    /// 把关节句柄整体换一遍。场景合并时用，见 [`Scene::merge`](crate::Scene::merge)。
+    pub(crate) fn remap_joints(&mut self, translate: &impl Fn(Handle<Node>) -> Handle<Node>) {
+        for joint in &mut self.joints {
+            *joint = translate(*joint);
+        }
+    }
+
     /// 逆绑定矩阵。
     pub fn inverse_bind(&self) -> &[Mat4] {
         &self.inverse_bind
