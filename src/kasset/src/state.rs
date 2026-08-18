@@ -110,6 +110,17 @@ impl UntypedResource {
         }
     }
 
+    /// 把资源打回「加载中」，为重新加载做准备。
+    ///
+    /// 已经在等待的任务保持等待——它们等的是「有结果」，重载之后照样会被唤醒。
+    pub(crate) fn reset_to_pending(&self) {
+        let mut state = self.0.state.lock();
+        if let ResourceState::Pending { .. } = &*state {
+            return;
+        }
+        *state = ResourceState::Pending { wakers: Vec::new() };
+    }
+
     /// 提交加载结果，并唤醒所有正在等待的任务。
     pub(crate) fn commit(&self, result: Result<Box<dyn ResourceData>, LoadError>) {
         let new_state = match result {

@@ -110,6 +110,12 @@ struct Game {
     ragdoll: Handle<Node>,
     /// 重力是否开着，G 键切换。
     gravity_on: bool,
+    /// `--roundtrip`：自动做一次存盘 → 读档，并对比前后的渲染统计。
+    roundtrip: bool,
+    /// 自检的第几步。
+    roundtrip_step: u8,
+    /// 存盘那一刻的渲染统计，用来和读回来之后对比。
+    stats_before: Option<RenderStats>,
     paused: bool,
 }
 
@@ -568,6 +574,13 @@ impl Game {
             self.shoot(ctx);
         }
 
+        if ctx.input.action_just_pressed("save") {
+            Self::save_scene(ctx);
+        }
+        if ctx.input.action_just_pressed("load") {
+            self.load_scene(ctx);
+        }
+
         if ctx.input.action_just_pressed("restack") {
             self.reset_crates(ctx);
             klog::info!("箱子已重新码好");
@@ -622,6 +635,112 @@ impl Game {
         }
     }
 
+
+    // ───────────────────────── 场景存读 ─────────────────────────
+
+    /// 存盘路径。放在临时目录，免得往仓库里拉屎。
+    fn scene_path() -> std::path::PathBuf {
+        std::env::temp_dir().join("kengine_demo_scene.bin")
+    }
+
+    /// 把当前场景写进文件。
+    fn save_scene(ctx: &mut Context) {
+        let path = Self::scene_path();
+        let before = ctx.stats;
+
+        match ctx.scene.save(&path) {
+            Ok(()) => {
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                klog::info!(
+                    "场景已存盘：{}（{:.1} KB）；存盘时画面为 {} 绘制 / {} 三角形",
+                    path.display(),
+                    size as f64 / 1024.0,
+                    before.drawn,
+                    before.triangles,
+                );
+            }
+            Err(error) => klog::error!("存盘失败：{error:?}"),
+        }
+    }
+
+    /// `--roundtrip` 的自检流程：跑几秒 → 存盘 → 读档 → 对比统计。
+    ///
+    /// 存在的理由是「画面与状态完全一致」这条验收标准没法靠肉眼确认，
+    /// 而按键又没法在无头环境里按。
+    fn drive_roundtrip(&mut self, ctx: &mut Context) {
+        if !self.roundtrip {
+            return;
+        }
+        match (self.roundtrip_step, ctx.elapsed) {
+            // 先等资源加载完、场景稳定下来。
+            (0, t) if t > 3.0 => {
+                self.stats_before = Some(ctx.stats);
+                Self::save_scene(ctx);
+                self.roundtrip_step = 1;
+            }
+            (1, _) => {
+                self.load_scene(ctx);
+                self.roundtrip_step = 2;
+            }
+            // 读回来之后隔一帧再看统计：剔除与批处理要重新跑一轮。
+            (2, t) if t > 3.5 => {
+                let before = self.stats_before.unwrap_or_default();
+                let after = ctx.stats;
+                klog::info!(
+                    "自检对比 —— 存盘前：{} 绘制 / {} 三角形 / {} 绘制调用 / {} 粒子",
+                    before.drawn,
+                    before.triangles,
+                    before.draw_calls,
+                    before.particles,
+                );
+                klog::info!(
+                    "自检对比 —— 读档后：{} 绘制 / {} 三角形 / {} 绘制调用 / {} 粒子",
+                    after.drawn,
+                    after.triangles,
+                    after.draw_calls,
+                    after.particles,
+                );
+                if before.drawn == after.drawn && before.triangles == after.triangles {
+                    klog::info!("自检通过：几何完全一致（粒子不在存档范围内，归零是预期的）");
+                } else {
+                    klog::error!("自检未通过：读回来的画面和存盘前不一样");
+                }
+                self.roundtrip_step = 3;
+                ctx.request_exit();
+            }
+            _ => {}
+        }
+    }
+
+    /// 从文件读回场景，整个替换掉当前场景。
+    ///
+    /// 节点句柄在存读之间是**稳定**的（句柄的世代号一并存了下来），
+    /// 所以 `self.cube` 这些记着的句柄读回来依然指向同一个节点。
+    fn load_scene(&mut self, ctx: &mut Context) {
+        let path = Self::scene_path();
+        if !path.exists() {
+            klog::warn!("还没有存过盘，先按 F5");
+            return;
+        }
+
+        match Scene::load(&path, Some(ctx.resources)) {
+            Ok(scene) => {
+                *ctx.scene = scene;
+                // 粒子、动画播放器、布娃娃不参与序列化，读回来这些组件就没了。
+                // 只清掉指向它们的本地状态，**不要**把 `*_spawned` 复位——
+                // 模型的几何已经在存档里了，再实例化一遍就成了两份。
+                self.lion_morphs.clear();
+                self.locomotion = None;
+                self.ragdoll = Handle::NONE;
+                klog::info!(
+                    "场景已读回：{} 个节点；粒子/动画/布娃娃不在存档范围内，已丢弃",
+                    ctx.scene.nodes().alive_count()
+                );
+            }
+            Err(error) => klog::error!("读档失败：{error:?}"),
+        }
+    }
+
     fn report(ctx: &Context) {
         let stats = ctx.stats;
         let physics = ctx.scene.physics().stats();
@@ -665,6 +784,8 @@ impl Plugin for Game {
         bindings.bind_action("restack", KeyCode::KeyX);
         bindings.bind_action("gravity", KeyCode::KeyG);
         bindings.bind_action("ragdoll", KeyCode::KeyK);
+        bindings.bind_action("save", KeyCode::F5);
+        bindings.bind_action("load", KeyCode::F9);
         bindings.bind_axis("horizontal", KeyCode::KeyD, KeyCode::KeyA);
         bindings.bind_axis("forward", KeyCode::KeyW, KeyCode::KeyS);
         bindings.bind_axis("vertical", KeyCode::KeyE, KeyCode::KeyQ);
@@ -884,6 +1005,7 @@ impl Plugin for Game {
              1/2/3 切换士兵动作，M 开关狮子形变，Esc 退出"
         );
         klog::info!("物理：P 开火（射线拾取 + 冲量），X 重码箱子，G 开关重力，K 切换士兵布娃娃");
+        klog::info!("资源：F5 存盘，F9 读档");
     }
 
     fn update(&mut self, ctx: &mut Context) {
@@ -900,6 +1022,7 @@ impl Plugin for Game {
         self.drive_lion(ctx);
 
         self.drive_physics(ctx);
+        self.drive_roundtrip(ctx);
 
         if ctx.input.action_just_pressed("morph") {
             self.lion_talking = !self.lion_talking;
@@ -991,6 +1114,35 @@ impl Plugin for Game {
     }
 }
 
+/// `--pack`：把 `assets/` 打成一个资源包，并让引擎从包里读。
+///
+/// 这演示的是发布形态：玩家看到的是一个 `.kpak`，而不是一地散文件。
+/// 分层放在包前面是为了开发方便——散文件还在的话优先用散文件，改完立刻生效。
+fn packed_io() -> Option<std::sync::Arc<dyn kengine::kasset::ResourceIo>> {
+    use kengine::kasset::{FsResourceIo, LayeredResourceIo, PackResourceIo, PackWriter};
+    use std::sync::Arc;
+
+    if !std::env::args().any(|arg| arg == "--pack") {
+        return None;
+    }
+
+    let mut writer = PackWriter::new();
+    let count = writer.add_directory("assets").unwrap_or(0);
+    let bytes = writer.finish();
+    klog::info!(
+        "已把 assets/ 打包：{} 个文件，{:.1} KB",
+        count,
+        bytes.len() as f64 / 1024.0
+    );
+
+    let pack = PackResourceIo::from_vec(bytes).expect("刚打出来的包应当能读");
+    Some(Arc::new(
+        LayeredResourceIo::new()
+            .with(Arc::new(FsResourceIo))
+            .with(Arc::new(pack)),
+    ))
+}
+
 /// 解析 `--stress N`，没给就返回 0。
 fn stress_count() -> usize {
     let mut args = std::env::args().skip(1);
@@ -1019,10 +1171,15 @@ fn main() {
     let mut prepare_micros = 0u64;
     let mut next_report = 5.0;
 
-    App::new()
-        .with_title("kengine demo")
+    let mut app = App::new().with_title("kengine demo");
+    if let Some(io) = packed_io() {
+        app = app.with_resource_io(io);
+    }
+
+    app
         .add_plugin(Game {
             stress: stress_count(),
+            roundtrip: std::env::args().any(|arg| arg == "--roundtrip"),
             // 重力默认开着，`Default` 给的 false 与实际状态相反。
             gravity_on: true,
             ..Game::default()

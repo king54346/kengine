@@ -38,7 +38,7 @@ pub use context::Context;
 pub use physics_clock::PhysicsClock;
 pub use stage::Stage;
 
-use kasset::ResourceManager;
+use kasset::{HotReload, ResourceIo, ResourceManager};
 use kinput::Input;
 use krender::{RenderOutcome, Renderer};
 use kscene::Scene;
@@ -95,6 +95,8 @@ struct Runtime {
     start_time: Instant,
     last_frame: Instant,
     physics_clock: PhysicsClock,
+    /// 资源热重载看门人。关掉时为 `None`。
+    hot_reload: Option<HotReload>,
 }
 
 /// 应用。装载插件、注册系统，然后接管主循环。
@@ -105,6 +107,9 @@ pub struct App {
     runtime: Option<Runtime>,
     initialized: bool,
     physics_hz: f32,
+    hot_reload: bool,
+    /// 资源的字节从哪来。默认是本地文件系统。
+    resource_io: Option<Arc<dyn ResourceIo>>,
 }
 
 impl Default for App {
@@ -123,7 +128,26 @@ impl App {
             runtime: None,
             initialized: false,
             physics_hz: 60.0,
+            hot_reload: true,
+            resource_io: None,
         }
+    }
+
+    /// 开关资源热重载。默认开启。
+    ///
+    /// 发布版通常要关掉：资源都在包里，轮询磁盘既查不到东西也没有意义。
+    pub fn with_hot_reload(mut self, enabled: bool) -> Self {
+        self.hot_reload = enabled;
+        self
+    }
+
+    /// 指定资源的字节来源，例如一个资源包。
+    ///
+    /// 不指定时读本地文件系统。想要「散文件优先、包兜底」的话，
+    /// 传一个 [`kasset::LayeredResourceIo`]。
+    pub fn with_resource_io(mut self, io: Arc<dyn ResourceIo>) -> Self {
+        self.resource_io = Some(io);
+        self
     }
 
     /// 设置物理的步频，单位是每秒步数。默认 60。
@@ -250,11 +274,23 @@ impl AppHandler for App {
             renderer,
             scene: Scene::new(),
             input: Input::new(),
-            resources: ResourceManager::new(),
+            resources: match self.resource_io.clone() {
+                Some(io) => ResourceManager::with_io(io),
+                None => ResourceManager::new(),
+            },
             start_time: now,
             last_frame: now,
             physics_clock: PhysicsClock::new(self.physics_hz),
+            hot_reload: None,
         });
+
+        // 看门人要在资源管理器建好之后再建，它一上来就要把现有资源的
+        // 修改时间记成基线。
+        if self.hot_reload
+            && let Some(runtime) = self.runtime.as_mut()
+        {
+            runtime.hot_reload = Some(HotReload::new(&runtime.resources));
+        }
 
         // 渲染器就绪后才初始化插件，这样 `init` 里可以安全地假定引擎可用。
         if !self.initialized {
@@ -344,6 +380,14 @@ impl AppHandler for App {
         exit |= self.run_systems(Stage::FrameEnd);
         if let Some(runtime) = self.runtime.as_mut() {
             runtime.input.end_frame();
+
+            // 热重载排在帧末：这一帧的逻辑与渲染已经用完了旧数据，
+            // 换在这里最不容易撞上「用到一半资源被换掉」。
+            if let Some(watcher) = runtime.hot_reload.as_mut() {
+                for path in watcher.poll() {
+                    klog::info!("热重载：{}", path.display());
+                }
+            }
         }
 
         if exit {

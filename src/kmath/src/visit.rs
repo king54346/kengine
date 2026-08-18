@@ -28,6 +28,7 @@ impl Visit for Plane {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::Vec3;
 
     /// 存进 Visitor 再读回来。
     fn roundtrip<T: Visit + Default + Copy>(value: &T) -> T {

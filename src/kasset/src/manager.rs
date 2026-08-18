@@ -127,6 +127,57 @@ impl ResourceManager {
         ktask::block_on(self.request::<T>(path))
     }
 
+    /// 重新加载一个已经请求过的资源。
+    ///
+    /// 数据**就地替换**：所有已存在的 [`Resource<T>`] 句柄立刻看到新内容，
+    /// 不需要通知任何人、也不需要重建引用它的场景。这是热重载能成立的前提。
+    ///
+    /// 返回 `false` 表示这个路径根本没被请求过——重载一个没人要的资源没有意义。
+    ///
+    /// 重载期间该资源会短暂回到「加载中」状态，此时读取会拿到 `None`；
+    /// 调用方的代码本来就要能应付资源尚未就绪（首次加载也是异步的），
+    /// 所以这里不额外做双缓冲。
+    pub fn reload(&self, path: impl AsRef<Path>) -> bool {
+        let path = path.as_ref().to_path_buf();
+        let state = self.state.lock();
+
+        let Some(resource) = state.resources.get(&path).cloned() else {
+            return false;
+        };
+
+        let extension = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let Some(loader) = state.loaders.find(&extension) else {
+            return false;
+        };
+
+        let io = state.io.clone();
+        drop(state);
+
+        resource.reset_to_pending();
+
+        let task_resource = resource;
+        IoTaskPool::get()
+            .spawn(async move {
+                let result = loader.load(path.clone(), io).await;
+                match &result {
+                    Ok(_) => klog::info!("资源已重新加载：{}", path.display()),
+                    Err(error) => klog::error!("资源重新加载失败 {}：{error}", path.display()),
+                }
+                task_resource.commit(result);
+            })
+            .detach();
+
+        true
+    }
+
+    /// 已登记的所有资源路径。
+    pub fn paths(&self) -> Vec<std::path::PathBuf> {
+        self.state.lock().resources.keys().cloned().collect()
+    }
+
     /// 把一份现成数据登记为资源，跳过加载流程。
     pub fn register<T: ResourceData>(&self, path: impl AsRef<Path>, data: T) -> Resource<T> {
         let path = path.as_ref().to_path_buf();

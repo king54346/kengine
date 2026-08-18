@@ -102,7 +102,7 @@ mod test {
     use std::sync::Arc;
 
     #[derive(Debug, Default)]
-    struct Note(String);
+    struct Note(#[allow(dead_code)] String);
 
     const NOTE_UUID: Uuid = uuid!("2f5b8c11-4e93-4a27-9d60-71c8f3a4e5b2");
 

@@ -476,7 +476,13 @@ impl Scene {
                 continue;
             };
             if let Ok(node) = nodes.try_borrow_mut(handle) {
-                node.set_mesh(mesh.clone());
+                // 直接赋值而不是走 `set_mesh`：那个会把形变权重重置成网格自带的
+                // 默认值，而文件里存的是这个实例**当前**的表情，不能被盖掉。
+                node.mesh = Some(mesh.clone());
+                // 万一网格换过（形变目标数量变了），按目标数补齐或截断，
+                // 已存下来的权重尽量留住。
+                node.morph_weights
+                    .resize(mesh.morph_target_count(), 0.0);
             }
         }
         for (handle, slot) in node_materials {
@@ -628,22 +634,24 @@ mod test {
 
     #[test]
     fn a_shared_mesh_is_only_written_once() {
-        // 逐节点内联的话，一百个方块的文件会是一个方块的一百倍。
-        fn size(count: usize) -> usize {
+        // 直接量「再加一个节点要多花多少字节」：共享几何的话只多一行表项，
+        // 各带各的几何则要多一整份顶点。比总大小的比值稳，也更说明问题。
+        fn size(shared: bool, count: usize) -> usize {
             let mut scene = Scene::new();
             let mesh = Mesh::cube();
             for index in 0..count {
-                scene.add_node(Node::new(format!("n{index}")).with_mesh(mesh.clone()));
+                let mesh = if shared { mesh.clone() } else { Mesh::cube() };
+                scene.add_node(Node::new(format!("n{index}")).with_mesh(mesh));
             }
             scene.save_to_vec().unwrap().len()
         }
 
-        let one = size(1);
-        let hundred = size(100);
-        // 多出来的只该是一百行「节点 → 表下标」，而不是一百份几何。
+        let shared_marginal = size(true, 51) - size(true, 50);
+        let own_marginal = size(false, 51) - size(false, 50);
+
         assert!(
-            hundred < one * 2,
-            "一份几何存了不止一次：1 个节点 {one} 字节，100 个节点 {hundred} 字节"
+            shared_marginal * 2 < own_marginal,
+            "共享几何没有被去重：多一个共享节点 {shared_marginal} 字节，             多一个自带几何的节点 {own_marginal} 字节"
         );
     }
 
