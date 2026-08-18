@@ -3,6 +3,7 @@ members = [
     "src/kanim",
     "src/kapp",
     "src/kasset",
+    "src/kaudio",
     "src/kcamera",
     "src/kcore",
     "src/kcore-derive",
@@ -34,6 +35,7 @@ edition = "2024"
 kanim = { path = "src/kanim" }
 kapp = { path = "src/kapp" }
 kasset = { path = "src/kasset" }
+kaudio = { path = "src/kaudio" }
 kcamera = { path = "src/kcamera" }
 kcore = { path = "src/kcore" }
 kgltf = { path = "src/kgltf" }
