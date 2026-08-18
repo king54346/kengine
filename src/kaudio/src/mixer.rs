@@ -167,6 +167,14 @@ pub struct Mixer {
     pub master_gain: f32,
     /// 输出采样率。
     sample_rate: u32,
+    /// 上一块输出的峰值幅度。
+    ///
+    /// 存在的意义是**可观测**：音频跑在另一条线程上、结果又只能用耳朵验，
+    /// 出问题时（听不到声音、或者爆音）第一件事就是想知道混音器到底
+    /// 有没有在出样本、有没有削波。
+    last_peak: f32,
+    /// 累计渲染过的帧数。
+    rendered_frames: u64,
 }
 
 impl Mixer {
@@ -177,7 +185,19 @@ impl Mixer {
             listener: Listener::default(),
             master_gain: 1.0,
             sample_rate: sample_rate.max(1),
+            last_peak: 0.0,
+            rendered_frames: 0,
         }
+    }
+
+    /// 上一块输出的峰值幅度。超过 1 说明削波了。
+    pub fn last_peak(&self) -> f32 {
+        self.last_peak
+    }
+
+    /// 累计渲染过的帧数。一直是 0 说明声卡根本没在取样本。
+    pub fn rendered_frames(&self) -> u64 {
+        self.rendered_frames
     }
 
     /// 输出采样率。
@@ -313,6 +333,9 @@ impl Mixer {
         for handle in finished {
             self.sounds.free(handle);
         }
+
+        self.last_peak = out.iter().fold(0.0f32, |peak, s| peak.max(s.abs()));
+        self.rendered_frames += frames as u64;
     }
 }
 
@@ -657,6 +680,40 @@ mod test {
         mixer.clear();
 
         assert!(mixer.is_empty());
+    }
+
+    #[test]
+    fn the_mixer_reports_what_it_produced() {
+        // 音频只能用耳朵验，出问题时第一件事是想知道它到底有没有在出样本。
+        let mut mixer = Mixer::new(48_000);
+        assert_eq!(mixer.rendered_frames(), 0);
+        assert_eq!(mixer.last_peak(), 0.0);
+
+        mixer.add(Sound::new(constant(1000, 48_000)).with_gain(0.75));
+        render(&mut mixer, 64, 2);
+
+        assert_eq!(mixer.rendered_frames(), 64);
+        assert!((mixer.last_peak() - 0.75).abs() < 1e-5);
+
+        // 静音之后**下一块**才归零：紧接着的那一块是从 0.75 渐降到 0 的
+        // 过渡块，峰值仍然是起点值——这正是块间过渡该有的样子。
+        mixer.master_gain = 0.0;
+        render(&mut mixer, 64, 2);
+        assert!((mixer.last_peak() - 0.75).abs() < 1e-5, "过渡块不该立刻静音");
+
+        render(&mut mixer, 64, 2);
+        assert_eq!(mixer.last_peak(), 0.0);
+        assert_eq!(mixer.rendered_frames(), 192);
+    }
+
+    #[test]
+    fn clipping_shows_up_in_the_peak() {
+        let mut mixer = Mixer::new(48_000);
+        mixer.add(Sound::new(constant(1000, 48_000)).with_gain(3.0));
+
+        render(&mut mixer, 32, 2);
+
+        assert!(mixer.last_peak() > 1.0, "削波了却没在峰值里体现");
     }
 
     #[test]

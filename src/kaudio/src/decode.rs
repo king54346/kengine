@@ -11,7 +11,6 @@ use kasset::{BoxedLoaderFuture, LoadError, ResourceData, ResourceIo, ResourceLoa
 use kcore::uuid::Uuid;
 use std::{path::PathBuf, sync::Arc};
 use symphonia::core::{
-    audio::Audio,
     codecs::audio::AudioDecoderOptions,
     formats::{FormatOptions, TrackType, probe::Hint},
     io::MediaSourceStream,

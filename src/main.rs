@@ -124,8 +124,8 @@ struct Game {
     sprite_ping_node: Handle<Node>,
     /// 绕圈的 3D 声源。
     audio_orbit: Handle<Node>,
-    /// B 键放的一次性提示音。
-    beep_sound: Resource<AudioBuffer>,
+    /// B 键放的一次性提示音。资源在 `init` 里登记，之前为 `None`。
+    beep_sound: Option<Resource<AudioBuffer>>,
     /// 正在播的一次性音效节点，播完就清掉。
     beep_nodes: Vec<Handle<Node>>,
     paused: bool,
@@ -927,7 +927,7 @@ impl Game {
 
         // 程序化生成的音频直接登记为资源，不需要外部文件。
         let hum = ctx.resources.register("builtin/hum", Self::hum(110.0));
-        self.beep_sound = ctx.resources.register("builtin/beep", Self::beep(660.0, 0.35));
+        self.beep_sound = Some(ctx.resources.register("builtin/beep", Self::beep(660.0, 0.35)));
 
         // 绕圈的 3D 声源：挂个小球好看出它在哪。
         self.audio_orbit = ctx.scene.add_node(
@@ -970,11 +970,13 @@ impl Game {
         }
 
         // 一次性音效：每按一次新建一个节点，播完由引擎自己回收。
-        if ctx.input.action_just_pressed("beep") {
+        if ctx.input.action_just_pressed("beep")
+            && let Some(beep) = self.beep_sound.clone()
+        {
             let node = ctx.scene.add_node(
                 Node::new("Beep")
                     .with_position(Vec3::new(0.0, 1.0, 0.0))
-                    .with_sound(SoundSource::new(self.beep_sound.clone()).with_gain(0.7)),
+                    .with_sound(SoundSource::new(beep).with_gain(0.7)),
             );
             self.beep_nodes.push(node);
             klog::info!("嘀");
@@ -1004,6 +1006,17 @@ impl Game {
 
     fn report(ctx: &Context) {
         let stats = ctx.stats;
+        {
+            let mixer = ctx.audio.mixer().lock();
+            klog::info!(
+                "音频：{} 个声源（{} 在播）；累计 {} 帧，上一块峰值 {:.3}{}",
+                mixer.len(),
+                mixer.playing_count(),
+                mixer.rendered_frames(),
+                mixer.last_peak(),
+                if ctx.audio.is_silent() { "（静默模式）" } else { "" },
+            );
+        }
         let physics = ctx.scene.physics().stats();
         klog::info!(
             "物理：刚体 {} / 碰撞体 {} / 关节 {}；单步 {} µs",
