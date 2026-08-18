@@ -345,7 +345,7 @@ impl Default for Streaming {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{Collider, RigidBody, Skin, Transform};
+    use crate::{Collider, RigidBody, Skin};
     use kmath::Mat4;
     use kmesh::Mesh;
 
