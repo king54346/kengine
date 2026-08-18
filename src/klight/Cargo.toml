@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+kcore = { path = "../kcore" }
 kmath = { path = "../kmath" }
 # 光源要打包成 GPU uniform 数组。
 bytemuck = { version = "1.25.2", features = ["derive"] }

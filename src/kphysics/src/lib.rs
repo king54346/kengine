@@ -51,6 +51,7 @@ mod convert;
 mod events;
 mod joint;
 mod query;
+mod visit;
 mod world;
 
 pub use body::{BodyMut, BodyRef, RigidBodyDesc, RigidBodyType};

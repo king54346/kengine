@@ -15,6 +15,7 @@
 #![warn(missing_docs)]
 
 pub mod blackboard;
+pub mod glam_impls;
 pub mod error;
 pub mod field;
 mod impls;

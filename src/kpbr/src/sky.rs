@@ -36,6 +36,23 @@ impl Default for Sky {
     }
 }
 
+impl kcore::visitor::Visit for Sky {
+    fn visit(
+        &mut self,
+        name: &str,
+        visitor: &mut kcore::visitor::Visitor,
+    ) -> kcore::visitor::VisitResult {
+        let mut region = visitor.enter_region(name)?;
+        self.zenith.visit("Zenith", &mut region)?;
+        self.horizon.visit("Horizon", &mut region)?;
+        self.ground.visit("Ground", &mut region)?;
+        self.sun_direction.visit("SunDirection", &mut region)?;
+        self.sun_color.visit("SunColor", &mut region)?;
+        self.sun_size.visit("SunSize", &mut region)?;
+        Ok(())
+    }
+}
+
 impl Sky {
     /// 采样某个方向上的天空辐射亮度。
     ///

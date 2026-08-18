@@ -12,6 +12,7 @@ mod cull;
 mod node;
 mod physics;
 mod ragdoll;
+mod serialize;
 mod skin;
 mod transform;
 
@@ -27,6 +28,7 @@ pub use kphysics::{
 pub use node::Node;
 pub use physics::{Collider, Joint, RigidBody};
 pub use ragdoll::{LimbDesc, Ragdoll, RagdollBuilder, RagdollLimb, hinge_limits};
+pub use serialize::SCENE_FORMAT_VERSION;
 pub use skin::{AnimationPlayer, Skin};
 pub use transform::Transform;
 
@@ -169,6 +171,25 @@ impl Scene {
             nodes,
             root,
             environment: Environment::default(),
+            culling: SceneCulling::default(),
+            index: NodeIndex::default(),
+            physics: PhysicsWorld::new(),
+        }
+    }
+
+    /// 用现成的节点池与根句柄组装一个场景。
+    ///
+    /// 给反序列化用：世界变换、包围盒、剔除结构、组件索引全是派生数据，
+    /// 调用方拿到后应当立刻 [`update`](Self::update) 一次把它们算出来。
+    pub(crate) fn from_parts(
+        nodes: Pool<Node>,
+        root: Handle<Node>,
+        environment: Environment,
+    ) -> Self {
+        Self {
+            nodes,
+            root,
+            environment,
             culling: SceneCulling::default(),
             index: NodeIndex::default(),
             physics: PhysicsWorld::new(),

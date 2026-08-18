@@ -80,6 +80,66 @@ impl Default for Camera {
     }
 }
 
+impl Projection {
+    /// 序列化用的类型标签，显式写死以免加变体时错位。
+    fn tag(&self) -> u8 {
+        match self {
+            Self::Perspective { .. } => 0,
+            Self::Orthographic { .. } => 1,
+        }
+    }
+}
+
+impl kcore::visitor::Visit for Projection {
+    fn visit(
+        &mut self,
+        name: &str,
+        visitor: &mut kcore::visitor::Visitor,
+    ) -> kcore::visitor::VisitResult {
+        let mut region = visitor.enter_region(name)?;
+
+        let mut tag = self.tag();
+        tag.visit("Tag", &mut region)?;
+
+        if region.is_reading() {
+            *self = match tag {
+                0 => Self::Perspective {
+                    fov_y_degrees: 45.0,
+                },
+                1 => Self::Orthographic { height: 1.0 },
+                other => {
+                    return Err(kcore::visitor::error::VisitError::User(format!(
+                        "未知的投影类型标签 {other}"
+                    )));
+                }
+            };
+        }
+
+        match self {
+            Self::Perspective { fov_y_degrees } => fov_y_degrees.visit("FovY", &mut region)?,
+            Self::Orthographic { height } => height.visit("Height", &mut region)?,
+        }
+
+        Ok(())
+    }
+}
+
+impl kcore::visitor::Visit for Camera {
+    fn visit(
+        &mut self,
+        name: &str,
+        visitor: &mut kcore::visitor::Visitor,
+    ) -> kcore::visitor::VisitResult {
+        let mut region = visitor.enter_region(name)?;
+        self.projection.visit("Projection", &mut region)?;
+        self.z_near.visit("ZNear", &mut region)?;
+        self.z_far.visit("ZFar", &mut region)?;
+        self.enabled.visit("Enabled", &mut region)?;
+        self.frustum_culling.visit("FrustumCulling", &mut region)?;
+        Ok(())
+    }
+}
+
 impl Camera {
     /// 创建一台透视相机。
     pub fn perspective(fov_y_degrees: f32) -> Self {

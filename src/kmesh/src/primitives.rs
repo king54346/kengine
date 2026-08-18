@@ -68,7 +68,7 @@ impl Mesh {
         ];
 
         let mut mesh = Self::cube();
-        for (index, vertex) in mesh.vertices.iter_mut().enumerate() {
+        for (index, vertex) in mesh.vertices_mut().iter_mut().enumerate() {
             // 立方体每面连续 4 个顶点。
             vertex.color = FACE_COLORS[index / 4];
         }

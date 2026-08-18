@@ -58,6 +58,7 @@ pub mod io;
 pub mod loader;
 pub mod manager;
 pub mod resource;
+pub mod serialize;
 pub mod state;
 
 pub use error::LoadError;
@@ -65,6 +66,7 @@ pub use io::{FsResourceIo, MemoryResourceIo, ResourceIo};
 pub use loader::{BoxedLoaderFuture, LoaderContainer, LoaderResult, ResourceLoader};
 pub use manager::ResourceManager;
 pub use resource::{Resource, ResourceData, ResourceDataRef};
+pub use serialize::{manager_from, visit_resource, visit_resource_option};
 pub use state::{ResourceState, UntypedResource};
 
 /// 常用类型的集中导出。

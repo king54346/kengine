@@ -5,9 +5,11 @@ edition = "2024"
 
 [dependencies]
 kanim = { path = "../kanim" }
+kasset = { path = "../kasset" }
 kcamera = { path = "../kcamera" }
 kcore = { path = "../kcore" }
 kgltf = { path = "../kgltf" }
+klog = { path = "../klog" }
 klight = { path = "../klight" }
 kmaterial = { path = "../kmaterial" }
 kmath = { path = "../kmath" }

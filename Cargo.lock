@@ -1126,6 +1126,7 @@ dependencies = [
 name = "kcamera"
 version = "0.1.0"
 dependencies = [
+ "kcore",
  "kmath",
 ]
 
@@ -1140,6 +1141,7 @@ dependencies = [
  "byteorder",
  "futures",
  "fxhash",
+ "glam 0.29.3",
  "kcore-derive",
  "nalgebra",
  "parking_lot",
@@ -1237,6 +1239,7 @@ name = "klight"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "kcore",
  "kmath",
  "kshader",
 ]
@@ -1266,6 +1269,7 @@ name = "kmath"
 version = "0.1.0"
 dependencies = [
  "glam 0.29.3",
+ "kcore",
 ]
 
 [[package]]
@@ -1275,6 +1279,7 @@ dependencies = [
  "bytemuck",
  "kasset",
  "kcore",
+ "kcore-derive",
  "kmath",
 ]
 
@@ -1295,6 +1300,7 @@ name = "kpbr"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "kcore",
  "kmaterial",
  "kmath",
  "kshader",
@@ -1304,6 +1310,7 @@ dependencies = [
 name = "kphysics"
 version = "0.1.0"
 dependencies = [
+ "kcore",
  "kmath",
  "kmesh",
  "rapier3d",
@@ -1341,6 +1348,7 @@ dependencies = [
  "kcore",
  "kgltf",
  "klight",
+ "klog",
  "kmaterial",
  "kmath",
  "kmesh",

@@ -27,7 +27,7 @@ pub(crate) async fn import(
     let buffers = load_buffers(&gltf, &base, &io).await?;
     let textures = load_textures(&gltf, &base, &io, &buffers, &path).await;
     let materials = import_materials(&gltf, &textures);
-    let (meshes, primitive_ranges) = import_meshes(&gltf, &buffers)?;
+    let (meshes, primitive_ranges) = import_meshes(&gltf, &buffers, &path)?;
     let (nodes, roots) = import_nodes(&gltf, &primitive_ranges);
     let skins = import_skins(&gltf, &buffers);
     let animations = import_animations(&gltf, &buffers);
@@ -364,6 +364,7 @@ fn import_materials(
 fn import_meshes(
     gltf: &gltf::Gltf,
     buffers: &[Vec<u8>],
+    path: &std::path::Path,
 ) -> Result<(Vec<Mesh>, Vec<Vec<MeshPart>>), LoadError> {
     let mut meshes = Vec::new();
     let mut ranges = Vec::with_capacity(gltf.meshes().len());
@@ -469,6 +470,9 @@ fn import_meshes(
                 // 权重的归一化交给 `with_skin`，它对所有来源一视同仁。
                 mesh = mesh.with_skin(skin);
             }
+
+            // 打上出处：场景序列化时凭它写一行引用，而不是把几何整个抄一遍。
+            let mesh = mesh.with_source(kmesh::MeshSource::new(path, meshes.len()));
 
             parts.push(MeshPart {
                 mesh: meshes.len(),

@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 glam = "0.29"
+kcore = { path = "../kcore" }

@@ -12,6 +12,7 @@
 
 mod bvh;
 mod geometry;
+mod visit;
 
 pub use bvh::Bvh;
 pub use geometry::{Aabb, Intersection, Plane};

@@ -190,6 +190,19 @@ impl Node {
         self.material.as_ref()
     }
 
+    /// 挂上（或替换）网格。带形变目标时权重重置为网格自带的默认值。
+    ///
+    /// 与 [`with_mesh`](Self::with_mesh) 的区别只是它作用在已有的节点上。
+    pub fn set_mesh(&mut self, mesh: Mesh) {
+        self.morph_weights = mesh.morph_weights().to_vec();
+        self.mesh = Some(mesh);
+    }
+
+    /// 挂上（或替换）材质。
+    pub fn set_material(&mut self, material: Material) {
+        self.material = Some(material);
+    }
+
     /// 材质的可变引用，可在运行时改颜色、换贴图。
     pub fn material_mut(&mut self) -> Option<&mut Material> {
         self.material.as_mut()

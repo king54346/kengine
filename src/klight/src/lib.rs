@@ -107,6 +107,84 @@ impl Default for Light {
     }
 }
 
+impl LightKind {
+    /// 序列化用的类型标签。与 GPU 侧的 [`tag`](Self::tag) 无关——
+    /// 那个是着色器的分支依据，可以随渲染实现改；这个是文件格式的一部分，
+    /// 改了就读不了老场景。
+    ///
+    /// 显式写死而不是靠声明顺序：将来在中间插一个变体，靠顺序的话
+    /// 老场景里的点光源会被读成聚光灯，而且不报错。
+    fn visit_tag(&self) -> u8 {
+        match self {
+            Self::Directional => 0,
+            Self::Point { .. } => 1,
+            Self::Spot { .. } => 2,
+        }
+    }
+}
+
+impl kcore::visitor::Visit for LightKind {
+    fn visit(
+        &mut self,
+        name: &str,
+        visitor: &mut kcore::visitor::Visitor,
+    ) -> kcore::visitor::VisitResult {
+        let mut region = visitor.enter_region(name)?;
+
+        let mut tag = self.visit_tag();
+        tag.visit("Tag", &mut region)?;
+
+        if region.is_reading() {
+            *self = match tag {
+                0 => Self::Directional,
+                1 => Self::Point { range: 0.0 },
+                2 => Self::Spot {
+                    range: 0.0,
+                    inner_angle: 0.0,
+                    outer_angle: 0.0,
+                },
+                other => {
+                    return Err(kcore::visitor::error::VisitError::User(format!(
+                        "未知的光源类型标签 {other}"
+                    )));
+                }
+            };
+        }
+
+        match self {
+            Self::Directional => {}
+            Self::Point { range } => range.visit("Range", &mut region)?,
+            Self::Spot {
+                range,
+                inner_angle,
+                outer_angle,
+            } => {
+                range.visit("Range", &mut region)?;
+                inner_angle.visit("InnerAngle", &mut region)?;
+                outer_angle.visit("OuterAngle", &mut region)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl kcore::visitor::Visit for Light {
+    fn visit(
+        &mut self,
+        name: &str,
+        visitor: &mut kcore::visitor::Visitor,
+    ) -> kcore::visitor::VisitResult {
+        let mut region = visitor.enter_region(name)?;
+        self.kind.visit("Kind", &mut region)?;
+        self.color.visit("Color", &mut region)?;
+        self.intensity.visit("Intensity", &mut region)?;
+        self.enabled.visit("Enabled", &mut region)?;
+        self.cast_shadows.visit("CastShadows", &mut region)?;
+        Ok(())
+    }
+}
+
 impl Light {
     /// 方向光。照射方向为所在节点的 -Z 轴。
     pub fn directional() -> Self {

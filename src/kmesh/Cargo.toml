@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 kasset = { path = "../kasset" }
 kcore = { path = "../kcore" }
+kcore-derive = { path = "../kcore-derive" }
 kmath = { path = "../kmath" }
 # 顶点需要能按位重解释成字节以直接上传显存。
 bytemuck = { version = "1.25.2", features = ["derive"] }

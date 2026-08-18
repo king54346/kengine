@@ -624,3 +624,363 @@ mod test {
         assert_eq!(order, vec![0, 1, 2]);
     }
 }
+
+#[cfg(test)]
+mod soldier_test {
+    use super::*;
+    use crate::{Collider, Scene};
+    use kgltf::Model;
+    use kphysics::{ColliderDesc, JointKind, RigidBodyDesc, SphericalLimits};
+
+    /// 加载仓库里的 Soldier.glb（Mixamo 骨架，49 关节）。
+    fn soldier() -> kasset::Resource<Model> {
+        use kasset::{MemoryResourceIo, ResourceManager};
+        use std::sync::Arc;
+
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/Soldier.glb");
+        let bytes = std::fs::read(path).expect("仓库里应当有 assets/Soldier.glb");
+
+        let mut io = MemoryResourceIo::new();
+        io.add("Soldier.glb", bytes);
+        let manager = ResourceManager::with_io(Arc::new(io));
+        manager.add_loader(kgltf::GltfLoader);
+        manager
+            .request_blocking::<Model>("Soldier.glb")
+            .expect("Soldier.glb 应当能加载")
+    }
+
+    /// 按 Mixamo 的命名搭一套人形布娃娃——demo 里走的就是这条路径。
+    fn build_humanoid(scene: &mut Scene) -> Handle<Node> {
+        let bone = |scene: &Scene, name: &str| {
+            scene
+                .find_by_name(&format!("mixamorig:{name}"))
+                .unwrap_or_else(|| panic!("找不到骨骼 mixamorig:{name}"))
+        };
+        let limb = |handle: Handle<Node>, half: f32, radius: f32| {
+            LimbDesc::new(handle, ColliderShape::capsule_y(half, radius))
+                .with_offset(Vec3::new(0.0, half, 0.0), Quat::IDENTITY)
+        };
+        let ball = |half_angle: f32| JointDesc {
+            kind: JointKind::Spherical {
+                limits: SphericalLimits::symmetric(half_angle),
+            },
+            ..Default::default()
+        };
+        let hinge = |min: f32, max: f32| JointDesc {
+            kind: JointKind::Revolute {
+                axis: Vec3::X,
+                limits: hinge_limits(min, max),
+            },
+            ..Default::default()
+        };
+
+        let arm = |scene: &Scene, side: &str| {
+            limb(bone(scene, &format!("{side}Arm")), 0.13, 0.06)
+                .with_joint(ball(1.0))
+                .with_child(
+                    limb(bone(scene, &format!("{side}ForeArm")), 0.12, 0.05)
+                        .with_joint(hinge(-2.2, 0.0)),
+                )
+        };
+        let leg = |scene: &Scene, side: &str| {
+            limb(bone(scene, &format!("{side}UpLeg")), 0.2, 0.08)
+                .with_joint(ball(0.8))
+                .with_child(
+                    limb(bone(scene, &format!("{side}Leg")), 0.2, 0.07)
+                        .with_joint(hinge(0.0, 2.2)),
+                )
+        };
+
+        let skeleton = limb(bone(scene, "Hips"), 0.1, 0.12)
+            .with_child(
+                limb(bone(scene, "Spine1"), 0.12, 0.11)
+                    .with_joint(ball(0.4))
+                    .with_child(
+                        limb(bone(scene, "Spine2"), 0.12, 0.11)
+                            .with_joint(ball(0.4))
+                            .with_child(limb(bone(scene, "Head"), 0.1, 0.09).with_joint(ball(0.6)))
+                            .with_child(arm(scene, "Left"))
+                            .with_child(arm(scene, "Right")),
+                    ),
+            )
+            .with_child(leg(scene, "Left"))
+            .with_child(leg(scene, "Right"));
+
+        let root = scene.root();
+        RagdollBuilder::new(skeleton).build(scene, root)
+    }
+
+    /// 站在地面上、装好布娃娃的士兵。
+    fn staged_soldier() -> (Scene, Handle<Node>, Handle<Node>) {
+        let mut scene = Scene::new();
+        scene.add_node(
+            Node::new("ground")
+                .with_position(Vec3::new(0.0, -0.5, 0.0))
+                .with_rigid_body(RigidBody::fixed())
+                .with_collider(Collider::new(ColliderDesc::cuboid(Vec3::new(
+                    20.0, 0.5, 20.0,
+                )))),
+        );
+
+        let model = soldier();
+        let model = model.data_ref().unwrap();
+        let root = scene.root();
+        let instance = scene.instantiate_model(&model, root);
+        scene.update();
+
+        let ragdoll = build_humanoid(&mut scene);
+        (scene, instance, ragdoll)
+    }
+
+    #[test]
+    fn a_mixamo_skeleton_maps_onto_a_full_humanoid_ragdoll() {
+        let (mut scene, _, ragdoll) = staged_soldier();
+
+        let component = scene.try_get(ragdoll).unwrap().ragdoll().unwrap();
+        // 髋 + 两节脊椎 + 头 + 两条 2 节的胳膊 + 两条 2 节的腿 = 12
+        assert_eq!(component.limb_count(), 12);
+
+        scene.step_physics(1.0 / 60.0);
+        // 12 个肢体刚体 + 地面。
+        assert_eq!(scene.physics().body_count(), 13);
+        // 根肢体没有父，其余 11 节各有一个关节。
+        assert_eq!(scene.physics().joint_count(), 11);
+    }
+
+    #[test]
+    fn limb_bodies_line_up_with_the_real_bones() {
+        let (scene, _, ragdoll) = staged_soldier();
+        let root = scene.try_get(ragdoll).unwrap().ragdoll().unwrap().root().clone();
+
+        let mut pairs = Vec::new();
+        root.for_each(&mut |limb| pairs.push((limb.bone, limb.body)));
+
+        for (bone, body) in pairs {
+            let bone_world = scene.world_matrix(bone).w_axis.truncate();
+            let body_world = scene.world_matrix(body).w_axis.truncate();
+            assert!(
+                (bone_world - body_world).length() < 1e-3,
+                "肢体没对齐骨骼：{bone_world:?} vs {body_world:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_inactive_ragdoll_leaves_the_animated_pose_alone() {
+        let (mut scene, _, _) = staged_soldier();
+        let hips = scene.find_by_name("mixamorig:Hips").unwrap();
+        let before = scene.world_matrix(hips).w_axis.truncate();
+
+        for _ in 0..120 {
+            scene.step_physics(1.0 / 60.0);
+            scene.update();
+        }
+
+        let after = scene.world_matrix(hips).w_axis.truncate();
+        assert!(
+            (after - before).length() < 1e-3,
+            "未激活的布娃娃动了骨骼：{before:?} → {after:?}"
+        );
+    }
+
+    #[test]
+    fn an_active_ragdoll_makes_the_soldier_collapse_onto_the_ground() {
+        let (mut scene, _, ragdoll) = staged_soldier();
+        let head = scene.find_by_name("mixamorig:Head").unwrap();
+        let head_before = scene.world_matrix(head).w_axis.truncate().y;
+
+        scene
+            .try_get_mut(ragdoll)
+            .unwrap()
+            .ragdoll_mut()
+            .unwrap()
+            .set_active(true);
+
+        for _ in 0..240 {
+            scene.step_physics(1.0 / 60.0);
+            scene.update();
+        }
+
+        let head_after = scene.world_matrix(head).w_axis.truncate().y;
+        assert!(
+            head_after < head_before - 0.5,
+            "士兵没倒下：头从 {head_before} 只到 {head_after}"
+        );
+        // 倒在地上，不是穿过地面掉下去。
+        assert!(head_after > -1.0, "士兵穿过了地面：{head_after}");
+    }
+
+    #[test]
+    fn every_bone_stays_finite_while_the_ragdoll_falls() {
+        // 关节的锚点或坐标系算错时，最典型的症状就是求解器发散成 NaN，
+        // 画面上表现为角色瞬间消失——这类错误必须在测试里拦住。
+        let (mut scene, _, ragdoll) = staged_soldier();
+        scene
+            .try_get_mut(ragdoll)
+            .unwrap()
+            .ragdoll_mut()
+            .unwrap()
+            .set_active(true);
+
+        let root = scene.try_get(ragdoll).unwrap().ragdoll().unwrap().root().clone();
+        let mut bones = Vec::new();
+        root.for_each(&mut |limb| bones.push(limb.bone));
+
+        for _ in 0..240 {
+            scene.step_physics(1.0 / 60.0);
+            scene.update();
+            for &bone in &bones {
+                let p = scene.world_matrix(bone).w_axis.truncate();
+                assert!(p.is_finite(), "骨骼位置发散成了 {p:?}");
+                assert!(p.length() < 100.0, "骨骼被甩到了 {p:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn limbs_stay_connected_to_their_parents_while_falling() {
+        let (mut scene, _, ragdoll) = staged_soldier();
+        scene
+            .try_get_mut(ragdoll)
+            .unwrap()
+            .ragdoll_mut()
+            .unwrap()
+            .set_active(true);
+
+        // 记下初始的父子间距，倒下后不该差太多——关节就是干这个的。
+        let root = scene.try_get(ragdoll).unwrap().ragdoll().unwrap().root().clone();
+        let mut links = Vec::new();
+        fn collect(limb: &RagdollLimb, out: &mut Vec<(Handle<Node>, Handle<Node>)>) {
+            for child in &limb.children {
+                out.push((limb.body, child.body));
+                collect(child, out);
+            }
+        }
+        collect(&root, &mut links);
+
+        let initial: Vec<f32> = links
+            .iter()
+            .map(|(a, b)| {
+                (scene.world_matrix(*a).w_axis.truncate()
+                    - scene.world_matrix(*b).w_axis.truncate())
+                .length()
+            })
+            .collect();
+
+        for _ in 0..240 {
+            scene.step_physics(1.0 / 60.0);
+            scene.update();
+        }
+
+        for ((a, b), expected) in links.iter().zip(initial) {
+            let now = (scene.world_matrix(*a).w_axis.truncate()
+                - scene.world_matrix(*b).w_axis.truncate())
+            .length();
+            assert!(
+                (now - expected).abs() < 0.1,
+                "关节被拉开了：{expected} → {now}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_ray_can_pick_a_ragdoll_limb() {
+        // demo 里的「开火」就是这么工作的：射线打到肢体，回到节点句柄。
+        let (mut scene, _, ragdoll) = staged_soldier();
+        scene.step_physics(1.0 / 60.0);
+
+        let hips_body = scene.try_get(ragdoll).unwrap().ragdoll().unwrap().root().body;
+        let origin = scene.world_matrix(hips_body).w_axis.truncate() + Vec3::Z * 5.0;
+
+        let hit = scene
+            .cast_ray(&kphysics::RayCastOptions::new(origin, Vec3::NEG_Z, 20.0))
+            .expect("射线该打到士兵身上");
+
+        assert!(hit.body_node.is_some());
+        let name = scene.try_get(hit.body_node.unwrap()).unwrap().name.clone();
+        assert!(name.starts_with("Limb:"), "打到的是「{name}」");
+    }
+
+    #[test]
+    fn a_ragdoll_replays_identically_from_the_same_starting_pose() {
+        fn run_once() -> Vec3 {
+            let (mut scene, _, ragdoll) = staged_soldier();
+            scene
+                .try_get_mut(ragdoll)
+                .unwrap()
+                .ragdoll_mut()
+                .unwrap()
+                .set_active(true);
+            for _ in 0..180 {
+                scene.step_physics(1.0 / 60.0);
+                scene.update();
+            }
+            let head = scene.find_by_name("mixamorig:Head").unwrap();
+            scene.world_matrix(head).w_axis.truncate()
+        }
+
+        assert_eq!(run_once(), run_once());
+    }
+
+    #[test]
+    fn an_impulse_knocks_the_ragdoll_sideways() {
+        let (mut scene, _, ragdoll) = staged_soldier();
+        scene
+            .try_get_mut(ragdoll)
+            .unwrap()
+            .ragdoll_mut()
+            .unwrap()
+            .set_active(true);
+        scene.step_physics(1.0 / 60.0);
+
+        let hips_body = scene.try_get(ragdoll).unwrap().ragdoll().unwrap().root().body;
+        scene
+            .try_get_mut(hips_body)
+            .unwrap()
+            .rigid_body_mut()
+            .unwrap()
+            .apply_impulse(Vec3::X * 30.0);
+
+        for _ in 0..120 {
+            scene.step_physics(1.0 / 60.0);
+            scene.update();
+        }
+
+        let hips = scene.find_by_name("mixamorig:Hips").unwrap();
+        let x = scene.world_matrix(hips).w_axis.truncate().x;
+        assert!(x > 0.5, "冲量没把布娃娃推开：x = {x}");
+    }
+
+    /// 只在需要一份质量参考时才用：布娃娃总质量应当在人体量级。
+    #[test]
+    fn limb_masses_add_up_to_something_humanlike() {
+        let (mut scene, _, ragdoll) = staged_soldier();
+        scene.step_physics(1.0 / 60.0);
+
+        let root = scene.try_get(ragdoll).unwrap().ragdoll().unwrap().root().clone();
+        let mut bodies = Vec::new();
+        root.for_each(&mut |limb| bodies.push(limb.body));
+
+        // 运动学刚体的质量是 0，先切成动态再量。
+        for &body in &bodies {
+            scene
+                .try_get_mut(body)
+                .unwrap()
+                .rigid_body_mut()
+                .unwrap()
+                .set_body_type(RigidBodyType::Dynamic);
+        }
+        scene.step_physics(1.0 / 60.0);
+
+        let total: f32 = bodies
+            .iter()
+            .filter_map(|&b| scene.try_get(b)?.rigid_body()?.native())
+            .filter_map(|n| scene.physics().body(n).map(|b| b.mass()))
+            .sum();
+
+        // 默认密度 1、胶囊按实际尺寸算出来的量级；不是真人体重，
+        // 但至少不该是 0 或者上千。
+        assert!(total > 0.05 && total < 500.0, "布娃娃总质量 {total}");
+        let _ = RigidBodyDesc::default();
+    }
+}

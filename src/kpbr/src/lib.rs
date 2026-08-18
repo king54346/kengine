@@ -83,6 +83,27 @@ impl Default for Environment {
     }
 }
 
+impl kcore::visitor::Visit for Environment {
+    fn visit(
+        &mut self,
+        name: &str,
+        visitor: &mut kcore::visitor::Visitor,
+    ) -> kcore::visitor::VisitResult {
+        let mut region = visitor.enter_region(name)?;
+        self.sky.visit("Sky", &mut region)?;
+        self.intensity.visit("Intensity", &mut region)?;
+
+        // 球谐系数完全由天空投影而来，读回后重算而不是存下来——
+        // 存一份派生数据就多一处可能和本体对不上的「真相」，
+        // 而且投影一次只有几十微秒。
+        if region.is_reading() {
+            self.rebuild();
+        }
+
+        Ok(())
+    }
+}
+
 impl Environment {
     /// 用给定天空构造，并立即投影出球谐系数。
     pub fn from_sky(sky: Sky) -> Self {
