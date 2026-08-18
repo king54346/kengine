@@ -9,4 +9,5 @@ kcore = { path = "../kcore" }
 klog = { path = "../klog" }
 kmath = { path = "../kmath" }
 cpal = "0.18"
+parking_lot = "0.12.5"
 symphonia = { version = "0.6", default-features = false, features = ["wav", "vorbis", "ogg", "pcm"] }
