@@ -13,6 +13,7 @@ members = [
     "src/kmaterial",
     "src/kmesh",
     "src/kparticle",
+    "src/kphysics",
     "src/kpbr",
     "src/krender",
     "src/kscene",
@@ -42,6 +43,7 @@ kmaterial = { path = "src/kmaterial" }
 kmath = { path = "src/kmath" }
 kmesh = { path = "src/kmesh" }
 kparticle = { path = "src/kparticle" }
+kphysics = { path = "src/kphysics" }
 kpbr = { path = "src/kpbr" }
 krender = { path = "src/krender" }
 kscene = { path = "src/kscene" }

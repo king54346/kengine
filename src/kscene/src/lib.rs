@@ -10,6 +10,8 @@
 
 mod cull;
 mod node;
+mod physics;
+mod ragdoll;
 mod skin;
 mod transform;
 
@@ -17,7 +19,14 @@ pub use kcamera::{Camera, Frustum, Projection};
 pub use kmesh::{Mesh, Vertex};
 pub use kmath::{Aabb, Intersection};
 pub use kparticle::ParticleSystem;
+pub use kphysics::{
+    BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, CollisionEvent, InteractionGroups,
+    JointDesc, JointHandle, JointKind, PhysicsWorld, RayCastOptions, RayHit, RigidBodyDesc,
+    RigidBodyType, ShapeCastOptions, SphericalLimits,
+};
 pub use node::Node;
+pub use physics::{Collider, Joint, RigidBody};
+pub use ragdoll::{LimbDesc, Ragdoll, RagdollBuilder, RagdollLimb, hinge_limits};
 pub use skin::{AnimationPlayer, Skin};
 pub use transform::Transform;
 
@@ -69,6 +78,21 @@ pub struct ParticleItem<'a> {
     pub aabb: Aabb,
 }
 
+/// [`Scene::cast_ray`] 的结果，句柄已经解回场景节点。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneRayHit {
+    /// 被命中的碰撞体所在的节点。
+    pub collider_node: Option<Handle<Node>>,
+    /// 该碰撞体所属刚体所在的节点；独立碰撞体为 `None`。
+    pub body_node: Option<Handle<Node>>,
+    /// 世界空间命中点。
+    pub point: Vec3,
+    /// 命中处的表面法线。
+    pub normal: Vec3,
+    /// 起点到命中点的距离。
+    pub distance: f32,
+}
+
 /// 绘制项该用的模型矩阵：蒙皮网格用单位阵，其余用节点的世界变换。
 fn skinned_transform(node: &Node) -> Mat4 {
     if node.skin().is_some() {
@@ -89,6 +113,8 @@ pub struct Scene {
     culling: SceneCulling,
     /// 挂了特殊组件的节点句柄，由 [`Scene::update`] 顺带收集。
     index: NodeIndex,
+    /// 物理世界。场景节点上的刚体 / 碰撞体 / 关节都在这里有一个对应物。
+    physics: PhysicsWorld,
 }
 
 /// 按组件分类的节点句柄索引。
@@ -107,6 +133,10 @@ struct NodeIndex {
     particles: Vec<Handle<Node>>,
     skinned: Vec<Handle<Node>>,
     animators: Vec<Handle<Node>>,
+    rigid_bodies: Vec<Handle<Node>>,
+    colliders: Vec<Handle<Node>>,
+    joints: Vec<Handle<Node>>,
+    ragdolls: Vec<Handle<Node>>,
 }
 
 impl NodeIndex {
@@ -117,6 +147,10 @@ impl NodeIndex {
         self.particles.clear();
         self.skinned.clear();
         self.animators.clear();
+        self.rigid_bodies.clear();
+        self.colliders.clear();
+        self.joints.clear();
+        self.ragdolls.clear();
     }
 }
 
@@ -137,6 +171,7 @@ impl Scene {
             environment: Environment::default(),
             culling: SceneCulling::default(),
             index: NodeIndex::default(),
+            physics: PhysicsWorld::new(),
         }
     }
 
@@ -181,7 +216,38 @@ impl Scene {
         let handle = self.nodes.spawn(node);
         self.nodes[handle].parent = parent;
         self.nodes[parent].children.push(handle);
+
+        // 物理索引在这里就地补上，而不是等下一次 `update`。
+        // `step_physics` 排在 `update` 之前，只靠 `update` 收集的话，
+        // 这一帧新加的刚体要到下一帧才进得了物理世界。
+        self.index_physics_components(handle);
+
         handle
+    }
+
+    /// 把一个节点的物理组件登记进索引。已在索引里的不会重复登记。
+    fn index_physics_components(&mut self, handle: Handle<Node>) {
+        let Some(node) = self.nodes.try_borrow(handle).ok() else {
+            return;
+        };
+        let (body, collider, joint, ragdoll) = (
+            node.rigid_body.is_some(),
+            node.collider.is_some(),
+            node.joint.is_some(),
+            node.ragdoll.is_some(),
+        );
+        if body && !self.index.rigid_bodies.contains(&handle) {
+            self.index.rigid_bodies.push(handle);
+        }
+        if collider && !self.index.colliders.contains(&handle) {
+            self.index.colliders.push(handle);
+        }
+        if joint && !self.index.joints.contains(&handle) {
+            self.index.joints.push(handle);
+        }
+        if ragdoll && !self.index.ragdolls.contains(&handle) {
+            self.index.ragdolls.push(handle);
+        }
     }
 
     /// 把 `child` 改挂到 `parent` 下。
@@ -215,7 +281,33 @@ impl Scene {
             stack.extend_from_slice(&self.nodes[current].children);
         }
         for h in to_free {
+            self.despawn_physics_of(h);
             self.nodes.free(h);
+        }
+    }
+
+    /// 把一个节点在物理世界里的对应物删掉。
+    ///
+    /// 必须在释放节点**之前**做：句柄一旦回收就再也读不到组件里存的原生句柄，
+    /// 物理世界里会留下一个谁都碰不到、却仍在参与模拟的幽灵。
+    fn despawn_physics_of(&mut self, handle: Handle<Node>) {
+        let Ok(node) = self.nodes.try_borrow_mut(handle) else {
+            return;
+        };
+        let joint = node.joint.as_mut().and_then(|j| j.native());
+        let collider = node.collider.as_mut().and_then(|c| c.native());
+        let body = node.rigid_body.as_mut().and_then(|b| b.native());
+
+        // 顺序要紧：关节 → 碰撞体 → 刚体。删刚体会连带删掉挂在它上面的
+        // 碰撞体与关节，反过来先删刚体的话，后面两步就是在用失效句柄操作。
+        if let Some(joint) = joint {
+            self.physics.remove_joint(joint);
+        }
+        if let Some(collider) = collider {
+            self.physics.remove_collider(collider);
+        }
+        if let Some(body) = body {
+            self.physics.remove_body(body);
         }
     }
 
@@ -406,11 +498,25 @@ impl Scene {
                         node.particles.is_some(),
                         node.skin.is_some(),
                         node.animator.is_some(),
+                        node.rigid_body.is_some(),
+                        node.collider.is_some(),
+                        node.joint.is_some(),
+                        node.ragdoll.is_some(),
                     ),
                 )
             };
 
-            let (has_light, has_camera, has_particles, has_skin, has_animator) = components;
+            let (
+                has_light,
+                has_camera,
+                has_particles,
+                has_skin,
+                has_animator,
+                has_body,
+                has_collider,
+                has_joint,
+                has_ragdoll,
+            ) = components;
             if drawable {
                 self.index.drawables.push(handle);
             }
@@ -428,6 +534,18 @@ impl Scene {
             }
             if has_animator {
                 self.index.animators.push(handle);
+            }
+            if has_body {
+                self.index.rigid_bodies.push(handle);
+            }
+            if has_collider {
+                self.index.colliders.push(handle);
+            }
+            if has_joint {
+                self.index.joints.push(handle);
+            }
+            if has_ragdoll {
+                self.index.ragdolls.push(handle);
             }
 
             // 按下标取子节点而不是克隆整个列表：每帧对上万个节点做一次分配，
@@ -818,6 +936,388 @@ impl Scene {
         if let Ok(parent_node) = self.nodes.try_borrow_mut(parent) {
             parent_node.children.retain(|&c| c != handle);
         }
+    }
+
+    // ───────────────────────── 物理 ─────────────────────────
+
+    /// 物理世界的只读引用。射线检测等查询走这里。
+    pub fn physics(&self) -> &PhysicsWorld {
+        &self.physics
+    }
+
+    /// 物理世界的可变引用，用来改重力、求解器参数。
+    pub fn physics_mut(&mut self) -> &mut PhysicsWorld {
+        &mut self.physics
+    }
+
+    /// 沿父链算出一个节点当前的世界变换。
+    ///
+    /// 与 `node.global_transform()` 的区别是**新鲜度**：后者是上一次
+    /// [`update`](Self::update) 的结果，而物理同步排在 `update` 之前，
+    /// 这一帧里刚加进来的节点、刚被逻辑改过的变换在那里都还没体现。
+    /// 代价是 O(树深)，而带物理组件的节点通常只有几十个，可以忽略。
+    pub fn world_matrix(&self, handle: Handle<Node>) -> Mat4 {
+        let Some(node) = self.try_get(handle) else {
+            return Mat4::IDENTITY;
+        };
+        if node.parent.is_none() {
+            node.transform.matrix()
+        } else {
+            self.world_matrix(node.parent) * node.transform.matrix()
+        }
+    }
+
+    /// 从 `handle` 起沿父链往上找第一个带原生刚体的节点。
+    fn nearest_body_node(&self, handle: Handle<Node>) -> Option<(Handle<Node>, BodyHandle)> {
+        let mut current = handle;
+        while let Some(node) = self.try_get(current) {
+            if let Some(native) = node.rigid_body.as_ref().and_then(|b| b.native()) {
+                return Some((current, native));
+            }
+            if node.parent.is_none() {
+                break;
+            }
+            current = node.parent;
+        }
+        None
+    }
+
+    /// 推进物理模拟并与场景图双向同步。
+    ///
+    /// 必须排在 [`update`](Self::update) **之前**：它写的是节点的局部变换，
+    /// 世界变换、骨骼矩阵、包围盒都要在之后才重算。顺序反了，物体会画在
+    /// 上一帧的位置上。
+    ///
+    /// `dt` 应当是定值，理由见 [`PhysicsWorld::step`]。
+    pub fn step_physics(&mut self, dt: f32) {
+        // 未激活的布娃娃要先把刚体摆到骨骼上，这一步产生的变换随后由
+        // `sync_to_physics` 推给运动学刚体。
+        self.ragdolls_follow_bones();
+        self.sync_to_physics();
+        self.physics.step(dt);
+        self.sync_from_physics();
+        // 激活的布娃娃反过来，用刚才的模拟结果改写骨骼。
+        self.ragdolls_drive_bones();
+    }
+
+    /// 布娃娃节点的句柄列表（供 `ragdoll` 模块使用）。
+    pub(crate) fn ragdoll_handles(&self) -> &[Handle<Node>] {
+        &self.index.ragdolls
+    }
+
+    /// 把布娃娃组件摘出来。
+    ///
+    /// 驱动布娃娃要同时读写树上别的节点，摘出来就不用一直借着这个节点。
+    /// 与骨架、动画播放器的做法一致。
+    pub(crate) fn take_ragdoll(&mut self, handle: Handle<Node>) -> Option<Box<ragdoll::Ragdoll>> {
+        self.nodes
+            .try_borrow_mut(handle)
+            .ok()
+            .and_then(|node| node.ragdoll.take())
+    }
+
+    /// 把摘出去的布娃娃放回节点。
+    pub(crate) fn put_ragdoll(&mut self, handle: Handle<Node>, ragdoll: Box<ragdoll::Ragdoll>) {
+        if let Ok(node) = self.nodes.try_borrow_mut(handle) {
+            node.ragdoll = Some(ragdoll);
+        }
+    }
+
+    /// 重新登记一个节点的物理组件。
+    ///
+    /// 节点建好之后才挂上组件时要调一次——索引是在 `add_node` 那一刻建的，
+    /// 之后加的组件它不知道。
+    pub fn reindex_physics(&mut self, handle: Handle<Node>) {
+        self.index_physics_components(handle);
+    }
+
+    /// 场景图 → 物理：建缺失的原生对象，推送用户改过的属性与变换。
+    fn sync_to_physics(&mut self) {
+        self.sync_bodies_to_physics();
+        self.sync_colliders_to_physics();
+        self.sync_joints_to_physics();
+    }
+
+    fn sync_bodies_to_physics(&mut self) {
+        for position in 0..self.index.rigid_bodies.len() {
+            let handle = self.index.rigid_bodies[position];
+            if self.try_get(handle).is_none() {
+                continue;
+            }
+            let (world_position, world_rotation) =
+                kphysics::pose_from_matrix(self.world_matrix(handle));
+
+            // 先把组件摘出来：接下来既要读整棵树（算世界变换），
+            // 又要改物理世界，同时借着节点池会过不了借用检查。
+            let Some(mut body) = self
+                .nodes
+                .try_borrow_mut(handle)
+                .ok()
+                .and_then(|node| node.rigid_body.take())
+            else {
+                continue;
+            };
+
+            match body.native() {
+                None => {
+                    // 初次登场：位姿取自节点，其余取自描述。
+                    let mut desc = body.desc().clone();
+                    desc.position = world_position;
+                    desc.rotation = world_rotation;
+                    let native = self.physics.add_body(&desc, handle.encode_to_u128());
+                    body.set_native(Some(native));
+                }
+                Some(native) => match body.body_type() {
+                    // 静态与运动学刚体由场景图驱动。
+                    RigidBodyType::Fixed => {
+                        if let Some(mut native_body) = self.physics.body_mut(native) {
+                            let (p, r) = native_body.pose();
+                            // 没动就别碰：`body_mut` 会让 rapier 重算接触，
+                            // 每帧无谓地设一次位置在大场景里很贵。
+                            if p != world_position || r != world_rotation {
+                                native_body.set_position(world_position, world_rotation, false);
+                            }
+                        }
+                    }
+                    RigidBodyType::KinematicPositionBased => {
+                        if let Some(mut native_body) = self.physics.body_mut(native) {
+                            // 走 next_kinematic，让引擎反推出速度，
+                            // 挡路的动态物体才会被正确推开而不是被穿过去。
+                            native_body.set_next_kinematic_position(world_position, world_rotation);
+                        }
+                    }
+                    _ => {}
+                },
+            }
+
+            body.flush(&mut self.physics);
+
+            if let Ok(node) = self.nodes.try_borrow_mut(handle) {
+                node.rigid_body = Some(body);
+            }
+        }
+    }
+
+    fn sync_colliders_to_physics(&mut self) {
+        for position in 0..self.index.colliders.len() {
+            let handle = self.index.colliders[position];
+            if self.try_get(handle).is_none() {
+                continue;
+            }
+
+            let owner = self.nearest_body_node(handle);
+            let parent_body = owner.map(|(_, native)| native);
+            let node_world = self.world_matrix(handle);
+            // 挂在刚体上的碰撞体，位姿是**相对刚体**的；独立碰撞体则是世界位姿。
+            let relative = match owner {
+                Some((body_node, _)) => self.world_matrix(body_node).inverse() * node_world,
+                None => node_world,
+            };
+
+            let Some(mut collider) = self
+                .nodes
+                .try_borrow_mut(handle)
+                .ok()
+                .and_then(|node| node.collider.take())
+            else {
+                continue;
+            };
+
+            let shape_changed = collider.take_shape_dirty();
+            let desc_changed = collider.take_desc_dirty();
+            // 换了形状或换了所属刚体，都只能重建——rapier 没有「原地改父刚体」。
+            let needs_rebuild =
+                collider.native().is_none() || collider.bound_to() != parent_body || shape_changed;
+
+            if needs_rebuild {
+                if let Some(old) = collider.native_mut().take() {
+                    self.physics.remove_collider(old);
+                }
+                let mut desc = collider.desc_ref().clone();
+                // 用户在描述里写的偏移，叠在节点层级算出的相对位姿之上。
+                let (p, r) = kphysics::pose_from_matrix(
+                    relative * Mat4::from_rotation_translation(desc.rotation, desc.position),
+                );
+                desc.position = p;
+                desc.rotation = r;
+
+                *collider.native_mut() =
+                    self.physics
+                        .add_collider(&desc, parent_body, handle.encode_to_u128());
+                collider.set_bound_to(parent_body);
+            } else if let Some(native) = collider.native() {
+                let desc = collider.desc_ref();
+                let (p, r) = kphysics::pose_from_matrix(
+                    relative * Mat4::from_rotation_translation(desc.rotation, desc.position),
+                );
+                let (friction, restitution, sensor, groups) = (
+                    desc.friction,
+                    desc.restitution,
+                    desc.is_sensor,
+                    desc.collision_groups,
+                );
+                if let Some(mut native_collider) = self.physics.collider_mut(native) {
+                    if desc_changed {
+                        native_collider.set_friction(friction);
+                        native_collider.set_restitution(restitution);
+                        native_collider.set_sensor(sensor);
+                        native_collider.set_collision_groups(groups);
+                    }
+                    if parent_body.is_some() {
+                        native_collider.set_offset(p, r);
+                    } else {
+                        // 没有刚体的碰撞体完全由场景图驱动，每帧跟随节点。
+                        native_collider.set_position(p, r);
+                    }
+                }
+            }
+
+            if let Ok(node) = self.nodes.try_borrow_mut(handle) {
+                node.collider = Some(collider);
+            }
+        }
+    }
+
+    fn sync_joints_to_physics(&mut self) {
+        for position in 0..self.index.joints.len() {
+            let handle = self.index.joints[position];
+            let Some(node) = self.try_get(handle) else {
+                continue;
+            };
+            let Some(joint) = node.joint.as_deref() else {
+                continue;
+            };
+            let (node1, node2) = (joint.body1(), joint.body2());
+            let native1 = self
+                .try_get(node1)
+                .and_then(|n| n.rigid_body.as_ref())
+                .and_then(|b| b.native());
+            let native2 = self
+                .try_get(node2)
+                .and_then(|n| n.rigid_body.as_ref())
+                .and_then(|b| b.native());
+
+            let (dirty, already_built, desc, old) = {
+                let Ok(node) = self.nodes.try_borrow_mut(handle) else {
+                    continue;
+                };
+                let Some(joint) = node.joint.as_deref_mut() else {
+                    continue;
+                };
+                let dirty = joint.take_dirty();
+                (
+                    dirty,
+                    joint.native().is_some(),
+                    joint.desc_ref().clone(),
+                    if dirty { joint.native_mut().take() } else { None },
+                )
+            };
+
+            if already_built && !dirty {
+                continue;
+            }
+            let (Some(native1), Some(native2)) = (native1, native2) else {
+                // 两端的刚体还没建出来。下一帧再试——关节比刚体晚一帧到位
+                // 是正常的，节点的创建顺序不受约束。
+                continue;
+            };
+
+            if let Some(old) = old {
+                self.physics.remove_joint(old);
+            }
+            let new_native = self.physics.add_joint(native1, native2, &desc);
+            if let Ok(node) = self.nodes.try_borrow_mut(handle) {
+                if let Some(joint) = node.joint.as_deref_mut() {
+                    *joint.native_mut() = Some(new_native);
+                }
+            }
+        }
+    }
+
+    /// 物理 → 场景图：把模拟结果写回节点的局部变换。
+    fn sync_from_physics(&mut self) {
+        for position in 0..self.index.rigid_bodies.len() {
+            let handle = self.index.rigid_bodies[position];
+            let Some(node) = self.try_get(handle) else {
+                continue;
+            };
+            let Some(body) = node.rigid_body.as_deref() else {
+                continue;
+            };
+            // 静态刚体是场景图驱动的，回写只会把它自己的输入再抄一遍。
+            if body.body_type() == RigidBodyType::Fixed {
+                continue;
+            }
+            let Some(native) = body.native() else {
+                continue;
+            };
+            let Some(native_body) = self.physics.body(native) else {
+                continue;
+            };
+            let (world_position, world_rotation) = native_body.pose();
+            let (linvel, angvel, sleeping) = (
+                native_body.linvel(),
+                native_body.angvel(),
+                native_body.is_sleeping(),
+            );
+
+            let parent = node.parent;
+            // 刚体的位姿是世界空间的，节点的变换是相对父节点的，得换算回去。
+            let local = if parent.is_none() {
+                Mat4::from_rotation_translation(world_rotation, world_position)
+            } else {
+                self.world_matrix(parent).inverse()
+                    * Mat4::from_rotation_translation(world_rotation, world_position)
+            };
+            let (_, rotation, translation) = local.to_scale_rotation_translation();
+
+            if let Ok(node) = self.nodes.try_borrow_mut(handle) {
+                // 缩放保持不动：物理不认识缩放，写回时不能把它抹掉。
+                node.transform.position = translation;
+                node.transform.rotation = rotation;
+                if let Some(body) = node.rigid_body.as_deref_mut() {
+                    body.read_back(linvel, angvel, sleeping);
+                }
+            }
+        }
+    }
+
+    /// 打一条射线，返回最近命中的**节点**。
+    ///
+    /// 比 [`PhysicsWorld::cast_ray`] 多做的一件事，就是把碰撞体身上的用户数据
+    /// 解回节点句柄——这正是它被塞进去的用途。
+    pub fn cast_ray(&self, options: &kphysics::RayCastOptions) -> Option<SceneRayHit> {
+        let hit = self.physics.cast_ray(options)?;
+        let collider = Handle::<Node>::decode_from_u128(hit.collider_user_data);
+        let body = Handle::<Node>::decode_from_u128(hit.body_user_data);
+
+        Some(SceneRayHit {
+            collider_node: self.nodes.is_valid_handle(collider).then_some(collider),
+            body_node: self.nodes.is_valid_handle(body).then_some(body),
+            point: hit.point,
+            normal: hit.normal,
+            distance: hit.distance,
+        })
+    }
+
+    /// 上一次 [`step_physics`](Self::step_physics) 产生的碰撞事件。
+    pub fn collision_events(&self) -> &[CollisionEvent] {
+        self.physics.collision_events()
+    }
+
+    /// 把一次碰撞事件里的两个碰撞体解回节点句柄。
+    ///
+    /// 已被删掉的碰撞体会得到 `None`——「因为对方被销毁而结束接触」的事件里
+    /// 这是常态，不是错误。
+    pub fn collision_nodes(
+        &self,
+        event: &CollisionEvent,
+    ) -> (Option<Handle<Node>>, Option<Handle<Node>>) {
+        let resolve = |data: u128| {
+            let handle = Handle::<Node>::decode_from_u128(data);
+            self.nodes.is_valid_handle(handle).then_some(handle)
+        };
+        (resolve(event.user_data1), resolve(event.user_data2))
     }
 }
 

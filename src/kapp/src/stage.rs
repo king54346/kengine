@@ -12,6 +12,10 @@ pub enum Stage {
     Update,
     /// 逻辑收尾。适合放依赖 `Update` 结果的处理，如相机跟随。
     PostUpdate,
+    /// 推进物理并与场景图同步。引擎内置。
+    ///
+    /// 挂在这里的系统跑在物理步进**之后**，正好读碰撞事件与新的位姿。
+    Physics,
     /// 重算世界变换与包围盒。引擎内置，用户一般不往这里挂。
     Transform,
     /// 可见性剔除。
@@ -24,10 +28,11 @@ pub enum Stage {
 
 impl Stage {
     /// 按执行顺序排列的全部阶段。
-    pub const ORDER: [Stage; 7] = [
+    pub const ORDER: [Stage; 8] = [
         Stage::Input,
         Stage::Update,
         Stage::PostUpdate,
+        Stage::Physics,
         Stage::Transform,
         Stage::Culling,
         Stage::Render,
@@ -36,7 +41,7 @@ impl Stage {
 
     /// 用户逻辑通常可以安全挂载的阶段。
     ///
-    /// `Transform` / `Culling` / `Render` 由引擎内置流程占用，
+    /// `Physics` / `Transform` / `Culling` / `Render` 由引擎内置流程占用，
     /// 往里挂东西需要清楚自己在做什么。
     pub fn is_user_stage(&self) -> bool {
         matches!(
@@ -66,6 +71,14 @@ mod test {
         sorted.sort();
 
         assert_eq!(sorted, Stage::ORDER);
+    }
+
+    #[test]
+    fn physics_runs_between_logic_and_transform() {
+        // 物理写的是局部变换，必须排在世界变换重算之前；
+        // 又要读逻辑这一帧施加的力，所以得排在 PostUpdate 之后。
+        assert!(Stage::PostUpdate < Stage::Physics);
+        assert!(Stage::Physics < Stage::Transform);
     }
 
     #[test]

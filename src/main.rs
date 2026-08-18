@@ -100,8 +100,21 @@ struct Game {
     lion_morphs: Vec<(Handle<Node>, String)>,
     /// 形变是否自动张合。
     lion_talking: bool,
+    /// 物理演示：箱子堆的容器节点，X 键整摞重来。
+    crates_root: Handle<Node>,
+    /// 运动学电梯平台。
+    elevator: Handle<Node>,
+    /// 传感器触发区。
+    trigger: Handle<Node>,
+    /// 士兵的布娃娃节点，K 键切换。
+    ragdoll: Handle<Node>,
+    /// 重力是否开着，G 键切换。
+    gravity_on: bool,
     paused: bool,
 }
+
+/// 物理场地的原点。整体挪到 +X 一侧，免得和 PBR 参数球、粒子挤在一起。
+const PLAYGROUND: Vec3 = Vec3::new(7.0, 0.0, 0.0);
 
 impl Game {
     /// 铺一片共享同一份网格与材质的方块，用来压测剔除与批处理。
@@ -293,8 +306,332 @@ impl Game {
     }
 
     /// 打印一帧的渲染统计。
+
+    // ───────────────────────── 物理演示 ─────────────────────────
+
+    /// 搭一片物理场地：地面、一摞箱子、一个单摆、一部电梯、一个触发区。
+    ///
+    /// 场地整体挪到 +X 一侧，免得和 PBR 参数球、粒子挤在一起。
+    fn spawn_physics_playground(&mut self, ctx: &mut Context) {
+        // 地面：可见的是一张平面网格，物理这边配一块厚板，上表面对齐 y = -1。
+        ctx.scene.add_node(
+            Node::new("PhysicsGround")
+                .with_position(Vec3::new(0.0, -1.5, 0.0))
+                .with_rigid_body(RigidBody::fixed())
+                .with_collider(Collider::new(
+                    ColliderDesc::cuboid(Vec3::new(40.0, 0.5, 40.0)).with_material(0.8, 0.0),
+                )),
+        );
+
+        // 箱子堆：一个空节点当容器，重置时整棵删掉重建。
+        self.crates_root = ctx.scene.add_node(Node::new("Crates"));
+        self.reset_crates(ctx);
+
+        // 单摆：固定锚点 + 铰链关节 + 一颗重球。绕 Z 轴转，只在 XZ 之外的竖直平面里荡。
+        let anchor = ctx.scene.add_node(
+            Node::new("PendulumAnchor")
+                .with_position(PLAYGROUND + Vec3::new(0.0, 4.0, -3.0))
+                .with_rigid_body(RigidBody::fixed()),
+        );
+        let bob = ctx.scene.add_node(
+            Node::new("PendulumBob")
+                .with_mesh(Mesh::sphere(20, 28))
+                .with_material(PbrMaterial::metal(Vec3::new(0.9, 0.85, 0.5), 0.2))
+                .with_position(PLAYGROUND + Vec3::new(2.5, 4.0, -3.0))
+                .with_scale(Vec3::splat(0.5))
+                .with_rigid_body(RigidBody::new(
+                    // 重一点才推得动箱子。
+                    RigidBodyDesc::dynamic().with_additional_mass(20.0),
+                ))
+                .with_collider(Collider::ball(0.5)),
+        );
+        ctx.scene.add_node(Node::new("PendulumJoint").with_joint(Joint::new(
+            anchor,
+            bob,
+            JointDesc::revolute(Vec3::ZERO, Vec3::new(-2.5, 0.0, 0.0), Vec3::Z, None),
+        )));
+
+        // 电梯：运动学刚体，位置每帧由 `drive_physics` 写死，不受碰撞影响。
+        self.elevator = ctx.scene.add_node(
+            Node::new("Elevator")
+                .with_mesh(Mesh::cube())
+                .with_material(PbrMaterial::dielectric(Vec3::new(0.2, 0.6, 0.9), 0.5))
+                .with_position(PLAYGROUND + Vec3::new(-3.0, -0.75, 2.0))
+                .with_scale(Vec3::new(2.0, 0.3, 2.0))
+                .with_rigid_body(RigidBody::kinematic())
+                // 碰撞体的尺寸是它自己的参数，与节点的缩放无关，得手写半长。
+                .with_collider(Collider::cuboid(Vec3::new(1.0, 0.15, 1.0))),
+        );
+
+        // 触发区：只报告重叠，不产生碰撞响应。箱子被撞飞落进来时会打日志。
+        self.trigger = ctx.scene.add_node(
+            Node::new("Trigger")
+                .with_position(PLAYGROUND + Vec3::new(4.5, -0.2, 2.5))
+                .with_collider(Collider::new(
+                    ColliderDesc::cuboid(Vec3::new(1.2, 0.8, 1.2))
+                        .as_sensor()
+                        .with_collision_events(),
+                )),
+        );
+    }
+
+    /// 重新码一摞箱子。旧的整棵删掉——`remove_node` 会连带清掉物理世界里的对应物。
+    fn reset_crates(&mut self, ctx: &mut Context) {
+        let root = self.crates_root;
+        let children: Vec<_> = ctx.scene[root].children().to_vec();
+        for child in children {
+            ctx.scene.remove_node(child);
+        }
+
+        let mesh = Mesh::cube();
+        let material = PbrMaterial::dielectric(Vec3::new(0.72, 0.45, 0.24), 0.75);
+        const LEVELS: usize = 5;
+        for level in 0..LEVELS {
+            // 每层比下一层少一个，码成金字塔，塌下来比较好看。
+            let count = LEVELS - level;
+            for index in 0..count {
+                let x = (index as f32 - (count - 1) as f32 / 2.0) * 0.62;
+                ctx.scene.add_node_with_parent(
+                    Node::new("Crate")
+                        .with_mesh(mesh.clone())
+                        .with_material(material.clone())
+                        .with_position(PLAYGROUND + Vec3::new(x, -0.7 + level as f32 * 0.62, -3.0))
+                        .with_scale(Vec3::splat(0.3))
+                        .with_rigid_body(RigidBody::dynamic())
+                        // 碰撞体尺寸独立于节点缩放：立方体网格边长 1，缩放 0.3 后
+                        // 半长是 0.15。
+                        .with_collider(Collider::new(
+                            ColliderDesc::cuboid(Vec3::splat(0.3))
+                                .with_material(0.7, 0.0)
+                                .with_collision_events(),
+                        )),
+                    root,
+                );
+            }
+        }
+    }
+
+    /// 从相机往正前方打一条射线，命中什么就推什么，同时发射一颗炮弹。
+    fn shoot(&mut self, ctx: &mut Context) {
+        let Some((camera_world, _)) = ctx.scene.active_camera() else {
+            return;
+        };
+        let origin = camera_world.w_axis.truncate();
+        // 相机看向自己的 -Z，这是本引擎（与 glTF）的约定。
+        let forward = -camera_world.z_axis.truncate().normalize_or_zero();
+
+        // 先看看瞄到了什么。射线不修改任何状态，纯查询。
+        if let Some(hit) = ctx
+            .scene
+            .cast_ray(&RayCastOptions::new(origin, forward, 100.0))
+        {
+            let name = hit
+                .body_node
+                .or(hit.collider_node)
+                .and_then(|h| ctx.scene.try_get(h))
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|| "?".to_string());
+            klog::info!("射线命中「{}」，距离 {:.2}", name, hit.distance);
+
+            // 命中动态刚体就在命中点推一把——偏离质心，物体会转起来。
+            if let Some(node) = hit.body_node.and_then(|h| ctx.scene.try_get_mut(h))
+                && let Some(body) = node.rigid_body_mut()
+                && body.body_type() == RigidBodyType::Dynamic
+            {
+                body.apply_impulse_at_point(forward * 6.0, hit.point);
+            }
+        }
+
+        // 再发一颗炮弹，直观看得见冲量。
+        ctx.scene.add_node(
+            Node::new("Projectile")
+                .with_mesh(Mesh::sphere(12, 16))
+                .with_material(PbrMaterial::emissive(
+                    Vec3::new(0.9, 0.3, 0.2),
+                    Vec3::new(2.5, 0.6, 0.2),
+                ))
+                .with_position(origin + forward * 1.2)
+                .with_scale(Vec3::splat(0.2))
+                .with_rigid_body(RigidBody::new(
+                    RigidBodyDesc::dynamic()
+                        .with_linvel(forward * 24.0)
+                        // 小而快的东西最容易穿墙，这正是 CCD 的用武之地。
+                        .with_ccd(true),
+                ))
+                .with_collider(Collider::new(
+                    ColliderDesc::ball(0.2).with_material(0.4, 0.4).with_density(6.0),
+                )),
+        );
+    }
+
+    /// 给士兵搭一套人形布娃娃。找不到骨骼就安静跳过。
+    fn build_soldier_ragdoll(&mut self, ctx: &mut Context) {
+        // Mixamo 的骨骼命名，士兵模型用的就是这一套。
+        let bone = |ctx: &Context, name: &str| {
+            ctx.scene
+                .find_by_name(&format!("mixamorig:{name}"))
+                .unwrap_or(Handle::NONE)
+        };
+
+        let hips = bone(ctx, "Hips");
+        if hips.is_none() {
+            return;
+        }
+
+        // 一节肢体：一段胶囊，沿骨头方向（士兵骨架里是 +Y）挪半个长度，
+        // 这样胶囊裹住的是骨头本身而不是骨头上方。
+        let limb = |handle: Handle<Node>, half: f32, radius: f32| {
+            LimbDesc::new(handle, ColliderShape::capsule_y(half, radius))
+                .with_offset(Vec3::new(0.0, half, 0.0), Quat::IDENTITY)
+        };
+        // 肩、髋这类球窝关节限位收得比较紧，松了胳膊会向后翻过去。
+        let ball = |half_angle: f32| JointDesc {
+            kind: JointKind::Spherical {
+                limits: SphericalLimits::symmetric(half_angle),
+            },
+            ..Default::default()
+        };
+        // 肘、膝只朝一个方向弯。
+        let hinge = |min: f32, max: f32| JointDesc {
+            kind: JointKind::Revolute {
+                axis: Vec3::X,
+                limits: hinge_limits(min, max),
+            },
+            ..Default::default()
+        };
+
+        let arm = |side: &str| {
+            limb(bone(ctx, &format!("{side}Arm")), 0.13, 0.06)
+                .with_joint(ball(1.0))
+                .with_child(
+                    limb(bone(ctx, &format!("{side}ForeArm")), 0.12, 0.05)
+                        .with_joint(hinge(-2.2, 0.0))
+                        .with_child(
+                            limb(bone(ctx, &format!("{side}Hand")), 0.05, 0.04)
+                                .with_joint(ball(0.5)),
+                        ),
+                )
+        };
+        let leg = |side: &str| {
+            limb(bone(ctx, &format!("{side}UpLeg")), 0.2, 0.08)
+                .with_joint(ball(0.8))
+                .with_child(
+                    limb(bone(ctx, &format!("{side}Leg")), 0.2, 0.07)
+                        .with_joint(hinge(0.0, 2.2))
+                        .with_child(
+                            limb(bone(ctx, &format!("{side}Foot")), 0.06, 0.05)
+                                .with_joint(hinge(-0.6, 0.6)),
+                        ),
+                )
+        };
+
+        let skeleton = limb(hips, 0.1, 0.12)
+            .with_child(
+                limb(bone(ctx, "Spine1"), 0.12, 0.11)
+                    .with_joint(ball(0.4))
+                    .with_child(
+                        limb(bone(ctx, "Spine2"), 0.12, 0.11)
+                            .with_joint(ball(0.4))
+                            .with_child(limb(bone(ctx, "Head"), 0.1, 0.09).with_joint(ball(0.6)))
+                            .with_child(arm("Left"))
+                            .with_child(arm("Right")),
+                    ),
+            )
+            .with_child(leg("Left"))
+            .with_child(leg("Right"));
+
+        let root = ctx.scene.root();
+        self.ragdoll = RagdollBuilder::new(skeleton)
+            .with_name("SoldierRagdoll")
+            .build(ctx.scene, root);
+
+        klog::info!("士兵布娃娃已就绪（{} 节肢体），按 K 切换", {
+            ctx.scene
+                .try_get(self.ragdoll)
+                .and_then(Node::ragdoll)
+                .map(Ragdoll::limb_count)
+                .unwrap_or(0)
+        });
+    }
+
+    /// 每帧的物理相关逻辑：电梯、按键、触发区日志。
+    fn drive_physics(&mut self, ctx: &mut Context) {
+        // 电梯：直接写节点位置。运动学刚体就是这么驱动的，
+        // 它会推开挡路的箱子，自己却纹丝不动。
+        if self.elevator.is_some() {
+            let height = -0.75 + (ctx.elapsed * 0.8).sin() * 1.2 + 1.2;
+            ctx.scene[self.elevator].transform.position =
+                PLAYGROUND + Vec3::new(-3.0, height, 2.0);
+        }
+
+        if ctx.input.action_just_pressed("shoot") {
+            self.shoot(ctx);
+        }
+
+        if ctx.input.action_just_pressed("restack") {
+            self.reset_crates(ctx);
+            klog::info!("箱子已重新码好");
+        }
+
+        if ctx.input.action_just_pressed("gravity") {
+            self.gravity_on = !self.gravity_on;
+            let gravity = if self.gravity_on {
+                Vec3::new(0.0, -9.81, 0.0)
+            } else {
+                Vec3::ZERO
+            };
+            ctx.scene.physics_mut().set_gravity(gravity);
+            // 失重时所有刚体都得叫醒，睡着的不会自己浮起来。
+            klog::info!("重力{}", if self.gravity_on { "已恢复" } else { "已关闭" });
+        }
+
+        if ctx.input.action_just_pressed("ragdoll") {
+            if self.ragdoll.is_none() {
+                self.build_soldier_ragdoll(ctx);
+            }
+            if let Some(ragdoll) = ctx
+                .scene
+                .try_get_mut(self.ragdoll)
+                .and_then(Node::ragdoll_mut)
+            {
+                let on = !ragdoll.is_active();
+                ragdoll.set_active(on);
+                klog::info!("布娃娃{}", if on { "已激活（物理接管）" } else { "已关闭（动画接管）" });
+            }
+        }
+
+        // 触发区：把碰撞事件解回节点，报告谁进来了。
+        let trigger = self.trigger;
+        let mut entered = Vec::new();
+        for event in ctx.scene.collision_events() {
+            if !event.started || !event.sensor {
+                continue;
+            }
+            let (a, b) = ctx.scene.collision_nodes(event);
+            let other = if a == Some(trigger) { b } else { a };
+            if a == Some(trigger) || b == Some(trigger) {
+                entered.push(other);
+            }
+        }
+        for node in entered {
+            let name = node
+                .and_then(|h| ctx.scene.try_get(h))
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|| "(已销毁)".to_string());
+            klog::info!("触发区：「{name}」进来了");
+        }
+    }
+
     fn report(ctx: &Context) {
         let stats = ctx.stats;
+        let physics = ctx.scene.physics().stats();
+        klog::info!(
+            "物理：刚体 {} / 碰撞体 {} / 关节 {}；单步 {} µs",
+            physics.body_count,
+            physics.collider_count,
+            ctx.scene.physics().joint_count(),
+            physics.step_time.as_micros(),
+        );
         klog::info!(
             "绘制 {} / 剔除 {} / 共 {}；三角形 {}；粒子 {}；\
              绘制调用 {}（平均 {:.1} 个/次）；剔除 {} µs，CPU 准备 {} µs",
@@ -324,6 +661,10 @@ impl Plugin for Game {
         bindings.bind_action("walk", KeyCode::Digit2);
         bindings.bind_action("run", KeyCode::Digit3);
         bindings.bind_action("morph", KeyCode::KeyM);
+        bindings.bind_action("shoot", KeyCode::KeyP);
+        bindings.bind_action("restack", KeyCode::KeyX);
+        bindings.bind_action("gravity", KeyCode::KeyG);
+        bindings.bind_action("ragdoll", KeyCode::KeyK);
         bindings.bind_axis("horizontal", KeyCode::KeyD, KeyCode::KeyA);
         bindings.bind_axis("forward", KeyCode::KeyW, KeyCode::KeyS);
         bindings.bind_axis("vertical", KeyCode::KeyE, KeyCode::KeyQ);
@@ -535,12 +876,14 @@ impl Plugin for Game {
                 .with_position(Vec3::new(-3.4, -0.9, 1.2)),
         );
 
+        self.spawn_physics_playground(ctx);
         self.spawn_stress_field(ctx);
 
         klog::info!(
             "WASD 移动，Q/E 升降，空格暂停，R 重置，C 打印统计，F 喷火花，\
              1/2/3 切换士兵动作，M 开关狮子形变，Esc 退出"
         );
+        klog::info!("物理：P 开火（射线拾取 + 冲量），X 重码箱子，G 开关重力，K 切换士兵布娃娃");
     }
 
     fn update(&mut self, ctx: &mut Context) {
@@ -555,6 +898,8 @@ impl Plugin for Game {
             self.spawn_lion(ctx);
         }
         self.drive_lion(ctx);
+
+        self.drive_physics(ctx);
 
         if ctx.input.action_just_pressed("morph") {
             self.lion_talking = !self.lion_talking;
@@ -678,6 +1023,8 @@ fn main() {
         .with_title("kengine demo")
         .add_plugin(Game {
             stress: stress_count(),
+            // 重力默认开着，`Default` 给的 false 与实际状态相反。
+            gravity_on: true,
             ..Game::default()
         })
         .add_system(Stage::FrameEnd, move |ctx| {

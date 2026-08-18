@@ -24,16 +24,18 @@
 //! # 阶段
 //!
 //! 一帧的执行顺序是固定的（见 [`Stage`]）：
-//! `Input → Update → PostUpdate → Transform → Culling → Render → FrameEnd`。
+//! `Input → Update → PostUpdate → Physics → Transform → Culling → Render → FrameEnd`。
 //! 插件的 `update` 挂在 `Update`，`post_update` 挂在 `PostUpdate`；
 //! 需要更细的控制可用 [`App::add_system`] 直接往指定阶段挂闭包。
 
 #![warn(missing_docs)]
 
 mod context;
+mod physics_clock;
 mod stage;
 
 pub use context::Context;
+pub use physics_clock::PhysicsClock;
 pub use stage::Stage;
 
 use kasset::ResourceManager;
@@ -49,7 +51,7 @@ use winit::{
 
 /// 常用类型的集中导出。
 pub mod prelude {
-    pub use crate::{App, Context, Plugin, Stage};
+    pub use crate::{App, Context, PhysicsClock, Plugin, Stage};
 }
 
 /// 挂在某个阶段上的一段逻辑。
@@ -92,6 +94,7 @@ struct Runtime {
     resources: ResourceManager,
     start_time: Instant,
     last_frame: Instant,
+    physics_clock: PhysicsClock,
 }
 
 /// 应用。装载插件、注册系统，然后接管主循环。
@@ -101,6 +104,7 @@ pub struct App {
     systems: Vec<(Stage, System)>,
     runtime: Option<Runtime>,
     initialized: bool,
+    physics_hz: f32,
 }
 
 impl Default for App {
@@ -118,7 +122,16 @@ impl App {
             systems: Vec::new(),
             runtime: None,
             initialized: false,
+            physics_hz: 60.0,
         }
+    }
+
+    /// 设置物理的步频，单位是每秒步数。默认 60。
+    ///
+    /// 调高更稳（快速运动更不容易穿模），代价是 CPU 线性增长。
+    pub fn with_physics_hz(mut self, hz: f32) -> Self {
+        self.physics_hz = hz;
+        self
     }
 
     /// 设置窗口标题。
@@ -240,6 +253,7 @@ impl AppHandler for App {
             resources: ResourceManager::new(),
             start_time: now,
             last_frame: now,
+            physics_clock: PhysicsClock::new(self.physics_hz),
         });
 
         // 渲染器就绪后才初始化插件，这样 `init` 里可以安全地假定引擎可用。
@@ -290,6 +304,19 @@ impl AppHandler for App {
 
         // ── Animation：动画改的是局部变换，必须排在世界变换重算之前 ──
         runtime.scene.tick_animations(dt);
+
+        // ── Physics：定长步进 ──
+        // 排在动画之后：未激活的布娃娃要跟着这一帧的动画姿态走。
+        // 排在世界变换之前：物理写的也是局部变换。
+        let steps = runtime.physics_clock.accumulate(dt);
+        let step = runtime.physics_clock.step();
+        for _ in 0..steps {
+            runtime.scene.step_physics(step);
+        }
+        exit |= self.run_systems(Stage::Physics);
+        let Some(runtime) = self.runtime.as_mut() else {
+            return FrameOutcome::Continue;
+        };
 
         // ── Transform：插件可能改了层级或变换，重算世界矩阵与包围盒 ──
         runtime.scene.update();

@@ -44,6 +44,7 @@
 //! | `kasset` | 异步资源加载 | ❌ |
 //! | `kmesh` / `ktexture` / `kmaterial` / `kshader` / `kgltf` / `kpbr` | 资源与渲染数据 | ❌ |
 //! | `kparticle` | 粒子模拟（列式存储 + 并行） | ❌ |
+//! | `kphysics` | 刚体物理（rapier 封装） | ❌，独占 rapier |
 //! | `kanim` | 骨骼动画（曲线 / 姿态 / 状态机 / IK） | ❌ |
 //! | `kinput` | 输入采集与映射 | ❌ |
 //! | `klight` | 光源与衰减 | ❌ |
@@ -64,6 +65,7 @@ pub use kmaterial;
 pub use kmath;
 pub use kmesh;
 pub use kparticle;
+pub use kphysics;
 pub use kpbr;
 pub use krender;
 pub use kscene;
@@ -76,7 +78,7 @@ mod task;
 
 /// 常用类型的集中导出。
 pub mod prelude {
-    pub use kapp::{App, Context, Plugin, Stage};
+    pub use kapp::{App, Context, PhysicsClock, Plugin, Stage};
     pub use kasset::{
         BoxedLoaderFuture, LoadError, Resource, ResourceData, ResourceIo, ResourceLoader,
         ResourceManager,
@@ -98,7 +100,15 @@ pub mod prelude {
     pub use kpbr::{Environment, PbrMaterial};
     pub use krender::RenderStats;
     pub use klight::{Light, LightKind};
-    pub use kscene::{AnimationPlayer, Node, Scene, Skin, Transform};
+    pub use kphysics::{
+        BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, CollisionEvent, InteractionGroups,
+        JointDesc, JointHandle, JointKind, PhysicsWorld, RayCastOptions, RayHit, RigidBodyDesc,
+        RigidBodyType, ShapeCastOptions, SphericalLimits,
+    };
+    pub use kscene::{
+        AnimationPlayer, Collider, Joint, LimbDesc, Node, Ragdoll, RagdollBuilder, RagdollLimb,
+        RigidBody, Scene, SceneRayHit, Skin, Transform, hinge_limits,
+    };
     pub use kshader::{Shader, ShaderLoader};
     pub use ktexture::{Sampler, Texture, TextureLoader};
     pub use winit::event::WindowEvent;

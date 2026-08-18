@@ -5,6 +5,8 @@ use klight::Light;
 use kcore::pool::Handle;
 use kmaterial::Material;
 use kmath::{Aabb, Mat4, Vec3};
+use crate::physics::{Collider, Joint, RigidBody};
+use crate::ragdoll::Ragdoll;
 use crate::skin::{AnimationPlayer, Skin};
 use kparticle::ParticleSystem;
 
@@ -35,6 +37,12 @@ pub struct Node {
     /// 存在节点而不是网格上：网格是共享资源，同一张脸的两个实例
     /// 要能各做各的表情。
     pub(crate) morph_weights: Vec<f32>,
+    /// 刚体。装箱的理由与粒子一样：绝大多数节点没有物理组件，
+    /// 内联进来等于让每个 `Node` 白背上百字节。
+    pub(crate) rigid_body: Option<Box<RigidBody>>,
+    pub(crate) collider: Option<Box<Collider>>,
+    pub(crate) joint: Option<Box<Joint>>,
+    pub(crate) ragdoll: Option<Box<Ragdoll>>,
     pub(crate) parent: Handle<Node>,
     pub(crate) children: Vec<Handle<Node>>,
     pub(crate) global_transform: Mat4,
@@ -67,6 +75,10 @@ impl Node {
             skin: None,
             animator: None,
             morph_weights: Vec::new(),
+            rigid_body: None,
+            collider: None,
+            joint: None,
+            ragdoll: None,
             parent: Handle::NONE,
             children: Vec::new(),
             global_transform: Mat4::IDENTITY,
@@ -117,6 +129,36 @@ impl Node {
     /// 挂上动画播放器。
     pub fn with_animator(mut self, animator: AnimationPlayer) -> Self {
         self.animator = Some(Box::new(animator));
+        self
+    }
+
+    /// 挂上刚体。
+    ///
+    /// 刚体的初始位姿取自本节点的世界变换。之后谁驱动谁取决于刚体类型：
+    /// 动态刚体由物理驱动节点，静态与运动学刚体反过来。
+    pub fn with_rigid_body(mut self, body: RigidBody) -> Self {
+        self.rigid_body = Some(Box::new(body));
+        self
+    }
+
+    /// 挂上碰撞体。
+    ///
+    /// 绑定到本节点或最近的带刚体的祖先节点；一个都没有就是静态几何。
+    pub fn with_collider(mut self, collider: Collider) -> Self {
+        self.collider = Some(Box::new(collider));
+        self
+    }
+
+    /// 挂上关节。
+    pub fn with_joint(mut self, joint: Joint) -> Self {
+        self.joint = Some(Box::new(joint));
+        self
+    }
+
+    /// 挂上布娃娃。通常由
+    /// [`RagdollBuilder`](crate::RagdollBuilder) 代劳，不必手写。
+    pub fn with_ragdoll(mut self, ragdoll: Ragdoll) -> Self {
+        self.ragdoll = Some(Box::new(ragdoll));
         self
     }
 
@@ -235,6 +277,51 @@ impl Node {
     /// 按名字找形变目标的序号。
     pub fn find_morph_target(&self, name: &str) -> Option<usize> {
         self.mesh.as_ref()?.find_morph_target(name)
+    }
+
+    /// 刚体的只读引用。
+    pub fn rigid_body(&self) -> Option<&RigidBody> {
+        self.rigid_body.as_deref()
+    }
+
+    /// 刚体的可变引用，用来施加冲量、切换类型、瞬移。
+    pub fn rigid_body_mut(&mut self) -> Option<&mut RigidBody> {
+        self.rigid_body.as_deref_mut()
+    }
+
+    /// 碰撞体的只读引用。
+    pub fn collider(&self) -> Option<&Collider> {
+        self.collider.as_deref()
+    }
+
+    /// 碰撞体的可变引用。
+    pub fn collider_mut(&mut self) -> Option<&mut Collider> {
+        self.collider.as_deref_mut()
+    }
+
+    /// 关节的只读引用。
+    pub fn joint(&self) -> Option<&Joint> {
+        self.joint.as_deref()
+    }
+
+    /// 关节的可变引用。
+    pub fn joint_mut(&mut self) -> Option<&mut Joint> {
+        self.joint.as_deref_mut()
+    }
+
+    /// 布娃娃的只读引用。
+    pub fn ragdoll(&self) -> Option<&Ragdoll> {
+        self.ragdoll.as_deref()
+    }
+
+    /// 布娃娃的可变引用，用来开关它。
+    pub fn ragdoll_mut(&mut self) -> Option<&mut Ragdoll> {
+        self.ragdoll.as_deref_mut()
+    }
+
+    /// 挂上布娃娃。
+    pub fn set_ragdoll(&mut self, ragdoll: Ragdoll) {
+        self.ragdoll = Some(Box::new(ragdoll));
     }
 
     /// 父节点句柄；根节点返回 [`Handle::NONE`]。
