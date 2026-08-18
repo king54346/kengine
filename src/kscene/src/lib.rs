@@ -820,10 +820,52 @@ impl Scene {
                 continue;
             }
             let world = node.global_transform;
-            if let Some(system) = node.particles.as_deref_mut() {
-                system.tick(dt, world);
+            let Some(mut system) = node.particles.take() else {
+                continue;
+            };
+
+            system.tick(dt, world);
+            // 开了场景碰撞的系统再走一遍射线检测。
+            // kparticle 不认识物理引擎，这个洞由这里填上。
+            self.resolve_particle_scene_collisions(&mut system, dt);
+
+            if let Ok(node) = self.nodes.try_borrow_mut(handle) {
+                node.particles = Some(system);
             }
         }
+    }
+
+    /// 用物理世界的射线检测解决粒子与场景几何的碰撞。
+    ///
+    /// 粒子是**只受影响、不施加影响**的一方：它们不该把箱子撞开，
+    /// 所以这里只做查询，一个字节的刚体状态都不改。
+    fn resolve_particle_scene_collisions(&self, system: &mut ParticleSystem, dt: f32) {
+        let Some(collision) = system.collision.as_ref() else {
+            return;
+        };
+        if !collision.scene {
+            return;
+        }
+
+        let physics = &self.physics;
+        system.resolve_scene_collisions(dt, |from, to| {
+            let delta = to - from;
+            let distance = delta.length();
+            // 这一帧没动的粒子不必查：射线长度为 0 时方向也无从谈起。
+            if distance < 1e-6 {
+                return None;
+            }
+
+            let hit = physics.cast_ray(&kphysics::RayCastOptions::new(
+                from,
+                delta / distance,
+                distance,
+            ))?;
+            Some(kparticle::SurfaceHit {
+                point: hit.point,
+                normal: hit.normal,
+            })
+        });
     }
 
     /// 解一条双骨 IK 链（肩肘腕、胯膝踝都是这个结构），把结果写回局部旋转。

@@ -1105,6 +1105,18 @@ impl Plugin for Game {
                         Vec4::ONE,
                     ))
                     .with_size_curve(Curve::linear(1.0, 0.35))
+                    // 火花与场景真实几何碰撞：会从地面和箱子上弹起来。
+                    // 每次弹跳都折掉三成寿命，弹几下就熄灭，比一直弹到寿终自然。
+                    .with_collision(
+                        Collision::scene().with_response(
+                            CollisionResponse::bouncy()
+                                .with_material(0.45, 0.3)
+                                .with_lifetime_loss(0.3),
+                        ),
+                    )
+                    // 世界空间：粒子出生后就与发射器节点脱钩，
+                    // 否则碰撞算出来的世界坐标会被节点变换再乘一遍。
+                    .with_space(Space::World)
                     .with_seed(0xF12E),
                 )
                 .with_position(Vec3::new(3.2, -0.6, 1.0)),
@@ -1127,6 +1139,12 @@ impl Plugin for Game {
                     .with_damping(0.6)
                     .with_color(ColorGradient::fade_in_out(Vec3::splat(0.35), 0.25))
                     .with_size_curve(Curve::linear(0.6, 2.2))
+                    // 烟雾只需要不穿地板，一块平面就够——
+                    // 为它做逐粒子射线检测是纯浪费。
+                    .with_collision(
+                        Collision::ground(-1.0).with_response(CollisionResponse::sticky()),
+                    )
+                    .with_space(Space::World)
                     .with_seed(20260817),
                 )
                 .with_position(Vec3::new(-3.4, -0.9, 1.2)),

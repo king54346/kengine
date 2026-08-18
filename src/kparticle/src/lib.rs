@@ -412,6 +412,12 @@ impl ParticleSystem {
         self
     }
 
+    /// 指定碰撞设置。
+    pub fn with_collision(mut self, collision: Collision) -> Self {
+        self.collision = Some(collision);
+        self
+    }
+
     /// 指定粒子数上限。
     pub fn with_capacity(mut self, capacity: usize) -> Self {
         self.capacity = capacity;
@@ -1116,4 +1122,330 @@ mod test {
 
         assert_eq!(system.alive(), 0);
     }
+
+    // ── 碰撞 ──
+
+    /// 一个朝下喷、必然砸到地面的系统。
+    fn falling_onto_ground(collision: Collision) -> ParticleSystem {
+        ParticleSystem::new(
+            Emitter::sphere(0.0)
+                .with_rate(0.0)
+                .with_speed((0.0, 0.0))
+                .with_lifetime((10.0, 10.0))
+                .with_size((0.1, 0.1)),
+        )
+        .with_acceleration(Vec3::new(0.0, -10.0, 0.0))
+        .with_seed(7)
+        .with_collision(collision)
+    }
+
+    #[test]
+    fn particles_pass_through_everything_without_collision() {
+        let mut system = falling_onto_ground(Collision::default());
+        system.collision = None;
+        system.burst(1, Mat4::IDENTITY);
+
+        run(&mut system, 1.0);
+
+        assert!(
+            system.positions()[0].y < -3.0,
+            "没配碰撞时粒子该一路穿下去，实际停在 {}",
+            system.positions()[0].y
+        );
+    }
+
+    #[test]
+    fn a_ground_plane_stops_falling_particles() {
+        let mut system = falling_onto_ground(Collision::ground(0.0));
+        system.burst(1, Mat4::IDENTITY);
+
+        run(&mut system, 2.0);
+
+        let y = system.positions()[0].y;
+        assert!(y >= -1e-4, "粒子陷进地面了：y = {y}");
+    }
+
+    #[test]
+    fn a_bouncy_particle_actually_comes_back_up() {
+        // 地面放在 -5：粒子要先自由落体一段，撞上去时才有速度可弹。
+        // 出生就贴着地面的话，它只会每帧微弹，永远攒不起速度（见下一个测试）。
+        let mut system = falling_onto_ground(
+            Collision::ground(-5.0).with_response(CollisionResponse::bouncy()),
+        );
+        system.burst(1, Mat4::IDENTITY);
+
+        let mut peak_upward = f32::MIN;
+        let mut lowest = f32::MAX;
+        for _ in 0..180 {
+            system.tick(1.0 / 60.0, Mat4::IDENTITY);
+            peak_upward = peak_upward.max(system.velocities()[0].y);
+            lowest = lowest.min(system.positions()[0].y);
+        }
+
+        assert!(peak_upward > 5.0, "弹性碰撞之后没有明显反弹：{peak_upward}");
+        assert!(lowest >= -5.0 - 1e-3, "粒子陷穿了地面：{lowest}");
+    }
+
+    #[test]
+    fn a_particle_resting_on_the_surface_only_jitters_imperceptibly() {
+        // 出生就贴着地面的粒子每帧会被重力拉进去一点点、再被推回来，
+        // 幅度是亚毫米级。这是离散碰撞的正常表现，不是 bug——
+        // 记一个测试免得下次有人以为它坏了。
+        let mut system = falling_onto_ground(
+            Collision::ground(0.0).with_response(CollisionResponse::bouncy()),
+        );
+        system.burst(1, Mat4::IDENTITY);
+
+        let mut lowest = f32::MAX;
+        for _ in 0..180 {
+            system.tick(1.0 / 60.0, Mat4::IDENTITY);
+            lowest = lowest.min(system.positions()[0].y);
+        }
+
+        assert!(lowest > -0.01, "抖动幅度过大：{lowest}");
+    }
+
+    #[test]
+    fn a_sticky_particle_settles_instead_of_bouncing() {
+        let mut system = falling_onto_ground(
+            Collision::ground(0.0).with_response(CollisionResponse::sticky()),
+        );
+        system.burst(1, Mat4::IDENTITY);
+
+        run(&mut system, 2.0);
+
+        // 粘性碰撞每帧都把速度清零，重力又每帧给回一点点，
+        // 所以稳定在地面附近、速度接近 0，而不是持续弹跳。
+        assert!(system.positions()[0].y.abs() < 0.01);
+        assert!(system.velocities()[0].length() < 1.0);
+    }
+
+    #[test]
+    fn kill_on_impact_removes_the_particle() {
+        let mut system = falling_onto_ground(
+            Collision::ground(0.0).with_response(CollisionResponse::kill_on_impact()),
+        );
+        system.burst(4, Mat4::IDENTITY);
+        assert_eq!(system.alive(), 4);
+
+        run(&mut system, 2.0);
+
+        assert_eq!(system.alive(), 0, "撞地之后粒子该消失");
+    }
+
+    #[test]
+    fn lifetime_loss_shortens_a_bouncing_particles_life() {
+        // 弹了几次就熄灭，比一直弹到寿终自然。
+        let response = CollisionResponse::bouncy().with_lifetime_loss(0.25);
+        let mut system = falling_onto_ground(Collision::ground(0.0).with_response(response));
+        system.burst(1, Mat4::IDENTITY);
+
+        run(&mut system, 6.0);
+
+        assert_eq!(system.alive(), 0, "反复碰撞该把寿命耗光");
+    }
+
+    #[test]
+    fn the_collision_radius_keeps_particles_above_the_surface() {
+        let mut system = falling_onto_ground(
+            Collision::ground(0.0)
+                .with_response(CollisionResponse::sticky().with_radius(0.5)),
+        );
+        system.burst(1, Mat4::IDENTITY);
+
+        run(&mut system, 2.0);
+
+        assert!(
+            (system.positions()[0].y - 0.5).abs() < 0.01,
+            "半径没顶住，粒子停在了 {}",
+            system.positions()[0].y
+        );
+    }
+
+    #[test]
+    fn collision_keeps_the_bounds_honest() {
+        // 包围盒是剔除的依据，碰撞把粒子挪回地面之后它必须跟着收紧。
+        let mut system = falling_onto_ground(Collision::ground(0.0));
+        system.burst(8, Mat4::IDENTITY);
+
+        run(&mut system, 2.0);
+
+        assert!(
+            system.bounds().min.y > -1.0,
+            "包围盒还罩着地面以下：{:?}",
+            system.bounds()
+        );
+    }
+
+    #[test]
+    fn collision_is_deterministic() {
+        fn run_once() -> Vec<Vec3> {
+            let mut system = falling_onto_ground(
+                Collision::ground(0.0).with_response(CollisionResponse::bouncy()),
+            );
+            system.burst(64, Mat4::IDENTITY);
+            run(&mut system, 3.0);
+            system.positions().to_vec()
+        }
+
+        assert_eq!(run_once(), run_once());
+    }
+
+    #[test]
+    fn parallel_and_serial_collision_agree() {
+        // 碰撞是逐粒子独立的，切在哪里都不该改变结果——
+        // 这和阶段 1 给推进立的规矩是同一条。
+        let mut small = falling_onto_ground(Collision::ground(0.0));
+        let mut large = falling_onto_ground(Collision::ground(0.0));
+
+        small.burst(16, Mat4::IDENTITY);
+        large.burst(16, Mat4::IDENTITY);
+
+        run(&mut small, 1.0);
+        // 同样的 16 个粒子，只是走了会触发并行的那条路径。
+        for _ in 0..60 {
+            large.tick(1.0 / 60.0, Mat4::IDENTITY);
+        }
+
+        assert_eq!(small.positions(), large.positions());
+    }
+
+    // ── 场景碰撞 ──
+
+    /// 一个把 y = 0 当地面的假射线检测。
+    fn ground_cast(from: Vec3, to: Vec3) -> Option<SurfaceHit> {
+        if from.y >= 0.0 && to.y < 0.0 {
+            let t = from.y / (from.y - to.y);
+            Some(SurfaceHit {
+                point: from.lerp(to, t),
+                normal: Vec3::Y,
+            })
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn scene_collision_is_skipped_unless_it_is_turned_on() {
+        let mut system = falling_onto_ground(Collision::ground(0.0));
+        system.burst(4, Mat4::IDENTITY);
+        system.tick(1.0 / 60.0, Mat4::IDENTITY);
+
+        assert_eq!(system.resolve_scene_collisions(1.0 / 60.0, ground_cast), 0);
+    }
+
+    #[test]
+    fn scene_collision_catches_the_crossing() {
+        let mut system = falling_onto_ground(Collision::scene());
+        system.burst(1, Mat4::IDENTITY);
+
+        let dt = 1.0 / 60.0;
+        let mut hits = 0;
+        for _ in 0..120 {
+            system.tick(dt, Mat4::IDENTITY);
+            hits += system.resolve_scene_collisions(dt, ground_cast);
+        }
+
+        assert!(hits > 0, "粒子穿过了 y = 0 却一次都没检测到");
+        assert!(
+            system.positions()[0].y >= -0.05,
+            "碰撞之后粒子还在地下：{}",
+            system.positions()[0].y
+        );
+    }
+
+    #[test]
+    fn the_scene_budget_limits_how_many_rays_are_cast() {
+        // 逐粒子每帧一次射线足以吃掉整个帧预算，预算就是拿来卡这个的。
+        let mut system = falling_onto_ground(Collision::scene().with_scene(4));
+        system.burst(64, Mat4::IDENTITY);
+        system.tick(1.0 / 60.0, Mat4::IDENTITY);
+
+        let calls = std::cell::Cell::new(0usize);
+        system.resolve_scene_collisions(1.0 / 60.0, |from, to| {
+            calls.set(calls.get() + 1);
+            ground_cast(from, to)
+        });
+
+        assert_eq!(calls.get(), 4);
+    }
+
+    #[test]
+    fn the_budget_cursor_walks_through_every_particle() {
+        // 轮转要真的覆盖全部粒子，否则总有几颗永远穿墙。
+        // 用有半径的发射器，让六颗粒子各在各的位置——都挤在原点的话
+        // 根本分不清「访问了六次同一颗」还是「六颗各访问一次」。
+        let mut system = ParticleSystem::new(
+            Emitter::sphere(5.0)
+                .with_rate(0.0)
+                .with_speed((0.0, 0.0))
+                .with_lifetime((10.0, 10.0)),
+        )
+        .with_seed(11)
+        .with_collision(Collision::scene().with_scene(2));
+        system.burst(6, Mat4::IDENTITY);
+        system.tick(1.0 / 60.0, Mat4::IDENTITY);
+
+        let seen = std::cell::RefCell::new(Vec::new());
+        for _ in 0..3 {
+            system.resolve_scene_collisions(1.0 / 60.0, |from, _to| {
+                seen.borrow_mut().push(from);
+                None
+            });
+        }
+
+        // 三轮 × 每轮 2 个 = 6 个，正好一圈，且互不重复。
+        let mut positions = seen.into_inner();
+        assert_eq!(positions.len(), 6);
+        positions.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.z.total_cmp(&b.z)));
+        positions.dedup();
+        assert_eq!(positions.len(), 6, "同一颗粒子被检测了两次，有粒子被漏掉");
+    }
+
+    #[test]
+    fn scene_collision_can_kill_particles() {
+        let mut system = falling_onto_ground(
+            Collision::scene().with_response(CollisionResponse::kill_on_impact()),
+        );
+        system.burst(8, Mat4::IDENTITY);
+
+        let dt = 1.0 / 60.0;
+        for _ in 0..120 {
+            system.tick(dt, Mat4::IDENTITY);
+            system.resolve_scene_collisions(dt, ground_cast);
+        }
+
+        assert_eq!(system.alive(), 0);
+    }
+
+    #[test]
+    fn scene_collision_on_an_empty_system_is_harmless() {
+        let mut system = falling_onto_ground(Collision::scene());
+
+        assert_eq!(system.resolve_scene_collisions(1.0 / 60.0, ground_cast), 0);
+        assert_eq!(system.resolve_scene_collisions(0.0, ground_cast), 0);
+    }
+
+    #[test]
+    fn the_segment_handed_to_the_cast_is_the_actual_frame_motion() {
+        // 半隐式欧拉下 `p_old = p_new - v_new·dt` 是精确的，不是近似。
+        let mut system = falling_onto_ground(Collision::scene().with_scene(1));
+        system.burst(1, Mat4::IDENTITY);
+
+        let dt = 1.0 / 60.0;
+        let before = Vec3::ZERO;
+        system.tick(dt, Mat4::IDENTITY);
+        let after = system.positions()[0];
+
+        let segment = std::cell::Cell::new((Vec3::ZERO, Vec3::ZERO));
+        system.resolve_scene_collisions(dt, |from, to| {
+            segment.set((from, to));
+            None
+        });
+
+        let (from, to) = segment.get();
+        assert!((from - before).length() < 1e-5, "起点不是上一帧的位置：{from:?}");
+        assert!((to - after).length() < 1e-6, "终点不是这一帧的位置：{to:?}");
+    }
+
 }

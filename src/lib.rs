@@ -98,7 +98,10 @@ pub mod prelude {
         Transition,
     };
     pub use kmesh::{Mesh, SkinVertex, Vertex};
-    pub use kparticle::{BlendMode, ColorGradient, Curve, Emitter, EmitterShape, ParticleSystem, Space};
+    pub use kparticle::{
+        BlendMode, Collision, CollisionResponse, ColorGradient, Curve, Emitter, EmitterShape,
+        ParticleSystem, Space, SurfaceHit,
+    };
     pub use kpbr::{Environment, PbrMaterial};
     pub use krender::RenderStats;
     pub use klight::{Light, LightKind};

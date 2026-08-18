@@ -508,7 +508,8 @@ mod test {
 #[cfg(test)]
 mod scene_test {
     use super::*;
-    use crate::{Scene, Transform};
+    use crate::{ParticleSystem, Scene, Transform};
+    use kmath::Mat4;
     use kphysics::{InteractionGroups, JointKind, RayCastOptions};
 
     /// 一块 100×1×100 的地面，上表面在 y = 0。
@@ -1013,6 +1014,155 @@ mod scene_test {
         let y = scene.try_get(ball).unwrap().transform.position.y;
         assert!((y - 2.0).abs() < 0.15, "换形状后球停在了 {y}");
         assert_eq!(scene.physics().collider_count(), 2, "重建时漏删了旧碰撞体");
+    }
+
+
+    #[test]
+    fn particles_bounce_off_real_scene_geometry() {
+        // 这是「粒子碰撞」真正的验收：撞的是物理世界里那块地，
+        // 不是手写的一块平面。
+        let mut scene = Scene::new();
+        scene.add_node(
+            Node::new("ground")
+                .with_position(Vec3::new(0.0, -0.5, 0.0))
+                .with_rigid_body(RigidBody::fixed())
+                .with_collider(Collider::cuboid(Vec3::new(20.0, 0.5, 20.0))),
+        );
+
+        let node = scene.add_node(
+            Node::new("sparks")
+                .with_position(Vec3::Y * 5.0)
+                .with_particles(
+                    ParticleSystem::new(
+                        kparticle::Emitter::sphere(0.0)
+                            .with_rate(0.0)
+                            .with_speed((0.0, 0.0))
+                            .with_lifetime((10.0, 10.0)),
+                    )
+                    .with_acceleration(Vec3::new(0.0, -10.0, 0.0))
+                    .with_space(kparticle::Space::World)
+                    .with_seed(3)
+                    .with_collision(
+                        kparticle::Collision::scene()
+                            .with_response(kparticle::CollisionResponse::bouncy()),
+                    ),
+                ),
+        );
+
+        scene.update();
+        scene.step_physics(1.0 / 60.0);
+        if let Some(system) = scene[node].particles_mut() {
+            system.burst(1, Mat4::from_translation(Vec3::Y * 5.0));
+        }
+
+        let mut lowest = f32::MAX;
+        let mut peak_upward = f32::MIN;
+        for _ in 0..180 {
+            scene.step_physics(1.0 / 60.0);
+            scene.update();
+            scene.tick_particles(1.0 / 60.0);
+
+            let system = scene[node].particles().unwrap();
+            if let Some(position) = system.positions().first() {
+                lowest = lowest.min(position.y);
+                peak_upward = peak_upward.max(system.velocities()[0].y);
+            }
+        }
+
+        assert!(peak_upward > 3.0, "粒子没从地面弹起来：{peak_upward}");
+        assert!(lowest > -1.0, "粒子穿过了地面：{lowest}");
+    }
+
+    #[test]
+    fn particles_without_scene_collision_fall_straight_through() {
+        let mut scene = Scene::new();
+        scene.add_node(
+            Node::new("ground")
+                .with_position(Vec3::new(0.0, -0.5, 0.0))
+                .with_rigid_body(RigidBody::fixed())
+                .with_collider(Collider::cuboid(Vec3::new(20.0, 0.5, 20.0))),
+        );
+        let node = scene.add_node(
+            Node::new("sparks")
+                .with_position(Vec3::Y * 5.0)
+                .with_particles(
+                    ParticleSystem::new(
+                        kparticle::Emitter::sphere(0.0)
+                            .with_rate(0.0)
+                            .with_speed((0.0, 0.0))
+                            .with_lifetime((10.0, 10.0)),
+                    )
+                    .with_acceleration(Vec3::new(0.0, -10.0, 0.0))
+                    .with_space(kparticle::Space::World)
+                    .with_seed(3),
+                ),
+        );
+
+        scene.update();
+        if let Some(system) = scene[node].particles_mut() {
+            system.burst(1, Mat4::from_translation(Vec3::Y * 5.0));
+        }
+
+        for _ in 0..120 {
+            scene.step_physics(1.0 / 60.0);
+            scene.update();
+            scene.tick_particles(1.0 / 60.0);
+        }
+
+        let y = scene[node].particles().unwrap().positions()[0].y;
+        assert!(y < -5.0, "没开碰撞的粒子该一路穿下去，实际停在 {y}");
+    }
+
+    #[test]
+    fn particles_do_not_push_the_scene_around() {
+        // 粒子是只受影响、不施加影响的一方：一场火花不该把箱子掀翻。
+        let mut scene = Scene::new();
+        scene.add_node(
+            Node::new("ground")
+                .with_position(Vec3::new(0.0, -0.5, 0.0))
+                .with_rigid_body(RigidBody::fixed())
+                .with_collider(Collider::cuboid(Vec3::new(20.0, 0.5, 20.0))),
+        );
+        let crate_node = scene.add_node(
+            Node::new("crate")
+                .with_position(Vec3::Y * 0.5)
+                .with_rigid_body(RigidBody::dynamic())
+                .with_collider(Collider::cuboid(Vec3::splat(0.5))),
+        );
+        let node = scene.add_node(
+            Node::new("sparks")
+                .with_position(Vec3::Y * 5.0)
+                .with_particles(
+                    ParticleSystem::new(
+                        kparticle::Emitter::sphere(0.1)
+                            .with_rate(0.0)
+                            .with_speed((0.0, 0.0))
+                            .with_lifetime((10.0, 10.0)),
+                    )
+                    .with_acceleration(Vec3::new(0.0, -30.0, 0.0))
+                    .with_space(kparticle::Space::World)
+                    .with_seed(5)
+                    .with_collision(kparticle::Collision::scene()),
+                ),
+        );
+
+        scene.update();
+        scene.step_physics(1.0 / 60.0);
+        if let Some(system) = scene[node].particles_mut() {
+            system.burst(256, Mat4::from_translation(Vec3::Y * 5.0));
+        }
+
+        for _ in 0..180 {
+            scene.step_physics(1.0 / 60.0);
+            scene.update();
+            scene.tick_particles(1.0 / 60.0);
+        }
+
+        let position = scene[crate_node].transform.position;
+        assert!(
+            (position.x.abs() < 0.05) && (position.z.abs() < 0.05),
+            "箱子被粒子推跑了：{position:?}"
+        );
     }
 
     #[test]
