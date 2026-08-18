@@ -39,6 +39,7 @@ pub use physics_clock::PhysicsClock;
 pub use stage::Stage;
 
 use kasset::{HotReload, ResourceIo, ResourceManager};
+use kaudio::AudioDevice;
 use kinput::Input;
 use krender::{RenderOutcome, Renderer};
 use kscene::Scene;
@@ -97,6 +98,7 @@ struct Runtime {
     physics_clock: PhysicsClock,
     /// 资源热重载看门人。关掉时为 `None`。
     hot_reload: Option<HotReload>,
+    audio: AudioDevice,
 }
 
 /// 应用。装载插件、注册系统，然后接管主循环。
@@ -110,6 +112,7 @@ pub struct App {
     hot_reload: bool,
     /// 资源的字节从哪来。默认是本地文件系统。
     resource_io: Option<Arc<dyn ResourceIo>>,
+    audio: bool,
 }
 
 impl Default for App {
@@ -130,7 +133,17 @@ impl App {
             physics_hz: 60.0,
             hot_reload: true,
             resource_io: None,
+            audio: true,
         }
+    }
+
+    /// 开关音频输出。默认开启。
+    ///
+    /// 关掉之后引擎仍然会同步声源与听者，只是没有人来取样本——
+    /// 与「机器上没有声卡」是同一条路径，游戏逻辑不必区分。
+    pub fn with_audio(mut self, enabled: bool) -> Self {
+        self.audio = enabled;
+        self
     }
 
     /// 开关资源热重载。默认开启。
@@ -219,6 +232,7 @@ impl App {
                 elapsed,
                 window: &runtime.window,
                 stats,
+                audio: &runtime.audio,
                 exit_requested: &mut exit_requested,
             };
             system(&mut context);
@@ -251,6 +265,7 @@ impl App {
                 elapsed,
                 window: &runtime.window,
                 stats,
+                audio: &runtime.audio,
                 exit_requested: &mut exit_requested,
             };
             callback(plugin, &mut context);
@@ -282,6 +297,11 @@ impl AppHandler for App {
             last_frame: now,
             physics_clock: PhysicsClock::new(self.physics_hz),
             hot_reload: None,
+            audio: if self.audio {
+                AudioDevice::open()
+            } else {
+                AudioDevice::silent()
+            },
         });
 
         // 看门人要在资源管理器建好之后再建，它一上来就要把现有资源的
@@ -359,6 +379,11 @@ impl AppHandler for App {
         // 粒子紧跟其后：世界空间的粒子出生时要用节点的世界变换，
         // 放在 update 之前的话，第一批粒子会出现在原点。
         runtime.scene.tick_particles(dt);
+
+        // 音频排在世界变换之后：声源的位置取自节点的世界变换，
+        // 排在前面的话声音会比画面慢一帧。
+        runtime.scene.tick_audio(&runtime.audio);
+
         exit |= self.run_systems(Stage::Transform);
 
         // ── Culling + Render：剔除在渲染器内部完成 ──

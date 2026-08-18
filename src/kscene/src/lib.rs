@@ -8,6 +8,7 @@
 
 #![warn(missing_docs)]
 
+mod audio;
 mod cull;
 mod node;
 mod physics;
@@ -30,6 +31,8 @@ pub use node::Node;
 pub use physics::{Collider, Joint, RigidBody};
 pub use ragdoll::{LimbDesc, Ragdoll, RagdollBuilder, RagdollLimb, hinge_limits};
 pub use serialize::SCENE_FORMAT_VERSION;
+pub use audio::SoundSource;
+pub use kaudio::{AudioBuffer, AudioDevice, Attenuation, Listener, Spatial};
 pub use skin::{AnimationPlayer, Skin};
 pub use streaming::{Cell, CellState, Streaming, StreamingReport};
 pub use transform::Transform;
@@ -142,6 +145,7 @@ struct NodeIndex {
     colliders: Vec<Handle<Node>>,
     joints: Vec<Handle<Node>>,
     ragdolls: Vec<Handle<Node>>,
+    sounds: Vec<Handle<Node>>,
 }
 
 impl NodeIndex {
@@ -156,6 +160,7 @@ impl NodeIndex {
         self.colliders.clear();
         self.joints.clear();
         self.ragdolls.clear();
+        self.sounds.clear();
     }
 }
 
@@ -620,6 +625,7 @@ impl Scene {
                         node.collider.is_some(),
                         node.joint.is_some(),
                         node.ragdoll.is_some(),
+                        node.sound.is_some(),
                     ),
                 )
             };
@@ -634,6 +640,7 @@ impl Scene {
                 has_collider,
                 has_joint,
                 has_ragdoll,
+                has_sound,
             ) = components;
             if drawable {
                 self.index.drawables.push(handle);
@@ -664,6 +671,9 @@ impl Scene {
             }
             if has_ragdoll {
                 self.index.ragdolls.push(handle);
+            }
+            if has_sound {
+                self.index.sounds.push(handle);
             }
 
             // 按下标取子节点而不是克隆整个列表：每帧对上万个节点做一次分配，

@@ -1,6 +1,7 @@
 //! 传给插件与系统的引擎上下文。
 
 use kasset::ResourceManager;
+use kaudio::AudioDevice;
 use kinput::Input;
 use krender::RenderStats;
 use kscene::Scene;
@@ -22,6 +23,11 @@ pub struct Context<'a> {
     pub window: &'a Window,
     /// 上一帧的渲染统计（绘制数、剔除数、三角形数）。
     pub stats: RenderStats,
+    /// 音频输出。改总音量、直接播一次性音效都走它。
+    ///
+    /// 场景里挂了 [`SoundSource`](kscene::SoundSource) 的节点会由引擎自动
+    /// 同步，一般不必碰这个。
+    pub audio: &'a AudioDevice,
     pub(crate) exit_requested: &'a mut bool,
 }
 

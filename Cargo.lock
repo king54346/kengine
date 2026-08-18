@@ -1180,6 +1180,7 @@ name = "kapp"
 version = "0.1.0"
 dependencies = [
  "kasset",
+ "kaudio",
  "kinput",
  "klog",
  "krender",
@@ -1438,6 +1439,7 @@ dependencies = [
  "fxhash",
  "kanim",
  "kasset",
+ "kaudio",
  "kcamera",
  "kcore",
  "kgltf",

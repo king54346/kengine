@@ -122,6 +122,12 @@ struct Game {
     /// 来回播放的精灵。
     sprite_ping: SpriteAnimation,
     sprite_ping_node: Handle<Node>,
+    /// 绕圈的 3D 声源。
+    audio_orbit: Handle<Node>,
+    /// B 键放的一次性提示音。
+    beep_sound: Resource<AudioBuffer>,
+    /// 正在播的一次性音效节点，播完就清掉。
+    beep_nodes: Vec<Handle<Node>>,
     paused: bool,
 }
 
@@ -876,6 +882,126 @@ impl Game {
         }
     }
 
+
+    // ───────────────────────── 音频 ─────────────────────────
+
+    /// 程序化生成一段可辨认的音效，省得往仓库里塞二进制素材。
+    ///
+    /// 两个八度关系的正弦叠一层，再套一个指数衰减包络——比纯正弦好认，
+    /// 也更像一个「音效」而不是测试信号。
+    fn beep(frequency: f32, seconds: f32) -> AudioBuffer {
+        const RATE: u32 = 48_000;
+        let frames = (seconds * RATE as f32) as usize;
+        let samples = (0..frames)
+            .map(|index| {
+                let t = index as f32 / RATE as f32;
+                let envelope = (-4.0 * t / seconds.max(1e-3)).exp();
+                let base = (std::f32::consts::TAU * frequency * t).sin();
+                let octave = (std::f32::consts::TAU * frequency * 2.0 * t).sin() * 0.3;
+                (base + octave) * envelope * 0.4
+            })
+            .collect();
+
+        AudioBuffer::new(samples, 1, RATE)
+    }
+
+    /// 一段能循环得上的低频嗡鸣，给绕圈的声源当音色。
+    fn hum(frequency: f32) -> AudioBuffer {
+        const RATE: u32 = 48_000;
+        // 帧数取成整周期数，首尾才接得上——差一点点就会每循环一次「哒」一声。
+        let periods = 20.0;
+        let frames = (periods * RATE as f32 / frequency).round() as usize;
+        let samples = (0..frames)
+            .map(|index| {
+                let phase = std::f32::consts::TAU * frequency * index as f32 / RATE as f32;
+                (phase.sin() * 0.5 + (phase * 3.0).sin() * 0.15) * 0.35
+            })
+            .collect();
+
+        AudioBuffer::new(samples, 1, RATE)
+    }
+
+    /// 放一个绕着场景转圈的 3D 声源，外加一段 2D 背景音。
+    fn spawn_audio(&mut self, ctx: &mut Context) {
+        ctx.resources.add_loader(AudioLoader);
+
+        // 程序化生成的音频直接登记为资源，不需要外部文件。
+        let hum = ctx.resources.register("builtin/hum", Self::hum(110.0));
+        self.beep_sound = ctx.resources.register("builtin/beep", Self::beep(660.0, 0.35));
+
+        // 绕圈的 3D 声源：挂个小球好看出它在哪。
+        self.audio_orbit = ctx.scene.add_node(
+            Node::new("AudioEmitter")
+                .with_mesh(Mesh::sphere(12, 16))
+                .with_material(PbrMaterial::emissive(
+                    Vec3::new(0.2, 0.9, 0.4),
+                    Vec3::new(0.3, 2.0, 0.8),
+                ))
+                .with_scale(Vec3::splat(0.25))
+                .with_sound(
+                    SoundSource::spatial(
+                        hum,
+                        // 反比衰减、5 米参考距离：走近明显变响，走远迅速淡出。
+                        Spatial::default()
+                            .with_range(5.0, 60.0)
+                            .with_model(Attenuation::Inverse, 1.2),
+                    )
+                    .looping()
+                    .with_gain(0.8),
+                ),
+        );
+
+        klog::info!(
+            "音频：{}；绿色小球是 3D 声源，绕圈时能听出左右与远近，B 键放一声提示音",
+            match ctx.audio.name() {
+                Some(name) => format!("输出到「{name}」"),
+                None => "没有可用输出，静默运行".to_string(),
+            }
+        );
+    }
+
+    /// 每帧驱动音频：让 3D 声源绕圈，处理按键。
+    fn drive_audio(&mut self, ctx: &mut Context) {
+        if self.audio_orbit.is_some() {
+            let angle = ctx.elapsed * 0.6;
+            let radius = 6.0;
+            ctx.scene[self.audio_orbit].transform.position =
+                Vec3::new(angle.cos() * radius, 0.5, angle.sin() * radius);
+        }
+
+        // 一次性音效：每按一次新建一个节点，播完由引擎自己回收。
+        if ctx.input.action_just_pressed("beep") {
+            let node = ctx.scene.add_node(
+                Node::new("Beep")
+                    .with_position(Vec3::new(0.0, 1.0, 0.0))
+                    .with_sound(SoundSource::new(self.beep_sound.clone()).with_gain(0.7)),
+            );
+            self.beep_nodes.push(node);
+            klog::info!("嘀");
+        }
+
+        // 播完的一次性音效连节点一起清掉，免得越积越多。
+        self.beep_nodes.retain(|handle| {
+            let finished = ctx
+                .scene
+                .try_get(*handle)
+                .and_then(Node::sound)
+                .is_some_and(SoundSource::is_finished);
+            if finished {
+                ctx.scene.remove_node(*handle);
+            }
+            !finished
+        });
+
+        if ctx.input.action_just_pressed("mute") {
+            let mut mixer = ctx.audio.mixer().lock();
+            mixer.master_gain = if mixer.master_gain > 0.0 { 0.0 } else { 1.0 };
+            let muted = mixer.master_gain == 0.0;
+            drop(mixer);
+            klog::info!("音频{}", if muted { "已静音" } else { "已恢复" });
+        }
+    }
+
     fn report(ctx: &Context) {
         let stats = ctx.stats;
         let physics = ctx.scene.physics().stats();
@@ -921,6 +1047,8 @@ impl Plugin for Game {
         bindings.bind_action("ragdoll", KeyCode::KeyK);
         bindings.bind_action("save", KeyCode::F5);
         bindings.bind_action("load", KeyCode::F9);
+        bindings.bind_action("beep", KeyCode::KeyB);
+        bindings.bind_action("mute", KeyCode::KeyN);
         bindings.bind_axis("horizontal", KeyCode::KeyD, KeyCode::KeyA);
         bindings.bind_axis("forward", KeyCode::KeyW, KeyCode::KeyS);
         bindings.bind_axis("vertical", KeyCode::KeyE, KeyCode::KeyQ);
@@ -1152,6 +1280,7 @@ impl Plugin for Game {
 
         self.spawn_physics_playground(ctx);
         self.spawn_sprites(ctx);
+        self.spawn_audio(ctx);
         self.spawn_stress_field(ctx);
 
         klog::info!(
@@ -1159,7 +1288,7 @@ impl Plugin for Game {
              1/2/3 切换士兵动作，M 开关狮子形变，Esc 退出"
         );
         klog::info!("物理：P 开火（射线拾取 + 冲量），X 重码箱子，G 开关重力，K 切换士兵布娃娃");
-        klog::info!("资源：F5 存盘，F9 读档");
+        klog::info!("资源：F5 存盘，F9 读档；音频：B 放提示音，N 静音");
     }
 
     fn update(&mut self, ctx: &mut Context) {
@@ -1177,6 +1306,7 @@ impl Plugin for Game {
 
         self.drive_physics(ctx);
         self.drive_sprites(ctx);
+        self.drive_audio(ctx);
         self.drive_roundtrip(ctx);
 
         if ctx.input.action_just_pressed("morph") {

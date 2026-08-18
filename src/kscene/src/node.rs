@@ -6,6 +6,7 @@ use kcore::pool::Handle;
 use kmaterial::Material;
 use kmath::{Aabb, Mat4, Vec3};
 use crate::physics::{Collider, Joint, RigidBody};
+use crate::audio::SoundSource;
 use crate::ragdoll::Ragdoll;
 use crate::skin::{AnimationPlayer, Skin};
 use kparticle::ParticleSystem;
@@ -43,6 +44,7 @@ pub struct Node {
     pub(crate) collider: Option<Box<Collider>>,
     pub(crate) joint: Option<Box<Joint>>,
     pub(crate) ragdoll: Option<Box<Ragdoll>>,
+    pub(crate) sound: Option<Box<SoundSource>>,
     pub(crate) parent: Handle<Node>,
     pub(crate) children: Vec<Handle<Node>>,
     pub(crate) global_transform: Mat4,
@@ -79,6 +81,7 @@ impl Node {
             collider: None,
             joint: None,
             ragdoll: None,
+            sound: None,
             parent: Handle::NONE,
             children: Vec::new(),
             global_transform: Mat4::IDENTITY,
@@ -152,6 +155,20 @@ impl Node {
     /// 挂上关节。
     pub fn with_joint(mut self, joint: Joint) -> Self {
         self.joint = Some(Box::new(joint));
+        self
+    }
+
+    /// 挂上声源。声音的位置跟着本节点的世界变换走。
+    pub fn with_sound(mut self, sound: SoundSource) -> Self {
+        self.sound = Some(Box::new(sound));
+        self
+    }
+
+    /// 把已挂上的声源改成 3D 的。没有声源时什么都不做。
+    pub fn with_sound_spatial(mut self, spatial: kaudio::Spatial) -> Self {
+        if let Some(sound) = self.sound.as_deref_mut() {
+            sound.spatial = Some(spatial);
+        }
         self
     }
 
@@ -335,6 +352,21 @@ impl Node {
     /// 挂上布娃娃。
     pub fn set_ragdoll(&mut self, ragdoll: Ragdoll) {
         self.ragdoll = Some(Box::new(ragdoll));
+    }
+
+    /// 声源的只读引用。
+    pub fn sound(&self) -> Option<&SoundSource> {
+        self.sound.as_deref()
+    }
+
+    /// 声源的可变引用，用来改音量、暂停、重放。
+    pub fn sound_mut(&mut self) -> Option<&mut SoundSource> {
+        self.sound.as_deref_mut()
+    }
+
+    /// 挂上（或替换）声源。
+    pub fn set_sound(&mut self, sound: SoundSource) {
+        self.sound = Some(Box::new(sound));
     }
 
     /// 父节点句柄；根节点返回 [`Handle::NONE`]。

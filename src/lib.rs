@@ -45,6 +45,7 @@
 //! | `kmesh` / `ktexture` / `kmaterial` / `kshader` / `kgltf` / `kpbr` | 资源与渲染数据 | ❌ |
 //! | `kparticle` | 粒子模拟（列式存储 + 并行） | ❌ |
 //! | `ksprite` | 2D 精灵 / 图集 / 帧动画 | ❌ |
+//! | `kaudio` | 混音 / 3D 音频 / 解码（cpal 出声） | ❌，独占 cpal |
 //! | `kphysics` | 刚体物理（rapier 封装） | ❌，独占 rapier |
 //! | `kanim` | 骨骼动画（曲线 / 姿态 / 状态机 / IK） | ❌ |
 //! | `kinput` | 输入采集与映射 | ❌ |
@@ -56,6 +57,7 @@
 pub use kapp;
 pub use kanim;
 pub use kasset;
+pub use kaudio;
 pub use kcamera;
 pub use kcore;
 pub use kgltf;
@@ -111,8 +113,12 @@ pub mod prelude {
         RigidBodyType, ShapeCastOptions, SphericalLimits,
     };
     pub use kscene::{
-        AnimationPlayer, Collider, Joint, LimbDesc, Node, Ragdoll, RagdollBuilder, RagdollLimb,
-        RigidBody, Scene, SceneRayHit, Skin, Transform, hinge_limits,
+        AnimationPlayer, Cell, Collider, Joint, LimbDesc, Node, Ragdoll, RagdollBuilder,
+        RagdollLimb, RigidBody, Scene, SceneRayHit, Skin, SoundSource, Streaming, Transform,
+        hinge_limits,
+    };
+    pub use kaudio::{
+        Attenuation, AudioBuffer, AudioDevice, AudioLoader, Listener, Mixer, Sound, Spatial, Status,
     };
     pub use kshader::{Shader, ShaderLoader};
     pub use ksprite::{Anchor, Atlas, PlayMode, Sprite, SpriteAnimation, SpriteRegion};

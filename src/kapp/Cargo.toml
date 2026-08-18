@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 kasset = { path = "../kasset" }
+kaudio = { path = "../kaudio" }
 kinput = { path = "../kinput" }
 klog = { path = "../klog" }
 krender = { path = "../krender" }
