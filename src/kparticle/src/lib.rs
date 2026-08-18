@@ -38,10 +38,12 @@
 
 #![warn(missing_docs)]
 
+mod collision;
 mod emitter;
 mod gradient;
 mod rng;
 
+pub use collision::{Collision, CollisionResponse, Resolved, SurfaceHit, resolve_at_surface};
 pub use emitter::{Emitter, EmitterShape, Spawn, SpawnClock};
 pub use gradient::{ColorGradient, Curve, Gradient};
 pub use rng::{Lerp, Rng, Span};
@@ -234,15 +236,17 @@ impl<'a> Columns<'a> {
 
 /// 一帧模拟的常量参数。
 #[derive(Debug, Clone, Copy)]
-struct Step {
+struct Step<'a> {
     dt: f32,
     acceleration: Vec3,
     /// 每秒保留的速度比例，1 表示不衰减。
     damping: f32,
+    /// 平面碰撞设置。没有平面时为 [`None`]，推进循环整段跳过。
+    collision: Option<&'a Collision>,
 }
 
 /// 推进一段粒子。**不**处理死亡——回收要串行做，放在这里就没法并行了。
-fn simulate(columns: Columns<'_>, step: Step, color: &ColorGradient, curve: &Curve) {
+fn simulate(columns: Columns<'_>, step: Step<'_>, color: &ColorGradient, curve: &Curve) {
     let Columns {
         position,
         velocity,
@@ -269,6 +273,28 @@ fn simulate(columns: Columns<'_>, step: Step, color: &ColorGradient, curve: &Cur
         velocity[index] = (velocity[index] + step.acceleration * step.dt) * damping;
         position[index] += velocity[index] * step.dt;
         rotation[index] += rotation_speed[index] * step.dt;
+
+        // 碰撞在积分**之后**解算：先让粒子走完这一帧，再把陷进表面的推回来。
+        // 平面是无限大的，所以「穿过去了」和「陷进去了」是同一件事，
+        // 一个符号判定就够，不需要扫掠检测。
+        if let Some(collision) = step.collision
+            && let Some(resolved) = collision::resolve_planes(
+                collision,
+                position[index],
+                velocity[index],
+                lifetime[index],
+            )
+        {
+            position[index] = resolved.position;
+            velocity[index] = resolved.velocity;
+            // 「碰撞即死」与「扣寿命」都归结成推进年龄：死亡判定只有一处，
+            // 回收逻辑不必再认识碰撞这回事。
+            age[index] += if resolved.killed {
+                lifetime[index]
+            } else {
+                resolved.lifetime_cost
+            };
+        }
 
         // 归一化寿命：曲线都以它为横轴，粒子寿命不同也能共用一条曲线。
         let t = (age[index] / lifetime[index]).clamp(0.0, 1.0);
@@ -298,6 +324,8 @@ pub struct ParticleSystem {
     pub texture: Option<Resource<Texture>>,
     /// 是否在推进。设为 `false` 时整个系统冻结，包括已有粒子。
     pub playing: bool,
+    /// 碰撞设置。为 [`None`] 时粒子穿过一切。
+    pub collision: Option<Collision>,
 
     /// 粒子数上限。到顶后新粒子直接不生成，而不是挤掉老粒子。
     capacity: usize,
@@ -306,6 +334,8 @@ pub struct ParticleSystem {
     clock: SpawnClock,
     /// 上一次 [`tick`](Self::tick) 之后的包围盒，空间由 [`space`](Self::space) 决定。
     bounds: Aabb,
+    /// 场景碰撞轮转到哪个粒子了。
+    scene_cursor: usize,
 }
 
 impl Default for ParticleSystem {
@@ -328,6 +358,8 @@ impl ParticleSystem {
             blend: BlendMode::default(),
             color_over_lifetime: ColorGradient::fade_out(Vec3::ONE),
             size_over_lifetime: Curve::constant(1.0),
+            collision: None,
+            scene_cursor: 0,
             texture: None,
             playing: true,
             capacity: Self::DEFAULT_CAPACITY,
@@ -449,12 +481,7 @@ impl ParticleSystem {
         let count = self.clock.tick(self.emitter.rate, dt);
         self.emit(count, world);
 
-        let step = Step {
-            dt,
-            acceleration: self.acceleration,
-            damping: self.damping,
-        };
-        self.step(step);
+        self.step(dt);
         self.retire();
         self.bounds = self.compute_bounds();
     }
@@ -478,7 +505,18 @@ impl ParticleSystem {
     }
 
     /// 推进所有粒子，粒子多时分片并行。
-    fn step(&mut self, step: Step) {
+    fn step(&mut self, dt: f32) {
+        let step = Step {
+            dt,
+            acceleration: self.acceleration,
+            damping: self.damping,
+            // 没配平面时传 None，推进循环里那段分支整个不进。
+            collision: self
+                .collision
+                .as_ref()
+                .filter(|collision| !collision.planes.is_empty()),
+        };
+
         let columns = Columns {
             position: &mut self.particles.position,
             velocity: &mut self.particles.velocity,
@@ -538,6 +576,94 @@ impl ParticleSystem {
             bounds.expand(*position + half);
         }
         bounds
+    }
+
+
+    /// 所有活着粒子的位置。
+    pub fn positions(&self) -> &[Vec3] {
+        &self.particles.position
+    }
+
+    /// 所有活着粒子的速度。
+    pub fn velocities(&self) -> &[Vec3] {
+        &self.particles.velocity
+    }
+
+    /// 用外部提供的射线检测解决与场景几何的碰撞。
+    ///
+    /// `cast(from, to)` 应当返回这一段线段上最近的表面；没打到返回 [`None`]。
+    /// 本 crate 不认识物理引擎，这个洞就是留给上层的——`kscene` 用 `kphysics`
+    /// 把它填上。
+    ///
+    /// # 为什么要按预算轮转
+    ///
+    /// 逐粒子每帧一次射线检测太贵：四千个粒子就是每秒二十四万次查询，
+    /// 足以吃掉整个帧预算。所以每次只处理
+    /// [`Collision::scene_budget`] 个粒子，游标接着上次往下走，
+    /// 靠若干帧覆盖全部。代价是一颗粒子平均每 `粒子数 / 预算` 帧才被检测一次，
+    /// 表现为个别粒子晚几帧才弹起来——这在视觉上察觉不到，
+    /// 而每帧全量检测的卡顿一眼就能看出来。
+    ///
+    /// 返回这一次实际发生碰撞的粒子数。
+    ///
+    /// 必须在 [`tick`](Self::tick) **之后**调用：它依赖这一帧刚积分出的速度
+    /// 去反推粒子从哪来。
+    pub fn resolve_scene_collisions(
+        &mut self,
+        dt: f32,
+        cast: impl Fn(Vec3, Vec3) -> Option<SurfaceHit>,
+    ) -> usize {
+        let Some(collision) = self.collision.as_ref().filter(|c| c.scene) else {
+            return 0;
+        };
+        let count = self.particles.len();
+        if count == 0 || dt <= 0.0 {
+            return 0;
+        }
+
+        let response = collision.response;
+        let budget = collision.scene_budget.max(1).min(count);
+        let mut hits = 0;
+
+        for offset in 0..budget {
+            let index = (self.scene_cursor + offset) % count;
+
+            let to = self.particles.position[index];
+            let velocity = self.particles.velocity[index];
+            // 半隐式欧拉下 `p_new = p_old + v_new·dt`，所以这一步是**精确**的，
+            // 不是近似——粒子这一帧确实是从这里走过来的。
+            let from = to - velocity * dt;
+
+            let Some(hit) = cast(from, to) else {
+                continue;
+            };
+
+            let resolved = resolve_at_surface(
+                &response,
+                hit.point,
+                hit.normal,
+                velocity,
+                self.particles.lifetime[index],
+            );
+            self.particles.position[index] = resolved.position;
+            self.particles.velocity[index] = resolved.velocity;
+            self.particles.age[index] += if resolved.killed {
+                self.particles.lifetime[index]
+            } else {
+                resolved.lifetime_cost
+            };
+            hits += 1;
+        }
+
+        self.scene_cursor = (self.scene_cursor + budget) % count;
+
+        if hits > 0 {
+            // 碰撞可能撞死了粒子、也挪动了位置，两样都得跟着收尾。
+            self.retire();
+            self.bounds = self.compute_bounds();
+        }
+
+        hits
     }
 
     /// 导出可直接上传显存的粒子数组，按到相机的距离**从远到近**排好。
@@ -791,6 +917,7 @@ mod test {
                 dt: 1.0 / 60.0,
                 acceleration: serial.acceleration,
                 damping: serial.damping,
+                collision: serial.collision.as_ref(),
             };
             let columns = Columns {
                 position: &mut serial.particles.position,
