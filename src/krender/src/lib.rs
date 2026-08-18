@@ -126,6 +126,29 @@ struct ObjectUniforms {
     /// 蒙皮实例各有一套骨骼矩阵，但它们拼在同一个缓冲里，
     /// 靠这个偏移各取各的——于是同一个蒙皮网格的多个实例仍然能合批。
     skin: [u32; 4],
+    /// 纹理坐标变换：xy = 缩放，zw = 偏移。
+    ///
+    /// 精灵图集靠它从一张大图里取出一格：整张图的 UV 是 0..1，
+    /// 缩放到格子大小、再偏移到格子位置，就等于「只采样这一格」。
+    uv_transform: [f32; 4],
+}
+
+/// 从材质里取出纹理坐标变换：`[缩放x, 缩放y, 偏移x, 偏移y]`。
+///
+/// 没设过就是恒等变换 `[1, 1, 0, 0]`——普通模型完全不受这套机制影响。
+/// 类型不对（比如有人把 `uv_scale` 设成了 `Float`）也退回恒等，
+/// 而不是把 UV 变成一堆垃圾值：一处写错不该让整个模型的贴图全乱。
+fn uv_transform_of(material: &kmaterial::Material) -> [f32; 4] {
+    fn vec2(material: &kmaterial::Material, name: &str, fallback: kmath::Vec2) -> kmath::Vec2 {
+        match material.get(name) {
+            Some(kmaterial::MaterialValue::Vec2(v)) => *v,
+            _ => fallback,
+        }
+    }
+
+    let scale = vec2(material, kpbr::standard::UV_SCALE, kmath::Vec2::ONE);
+    let offset = vec2(material, kpbr::standard::UV_OFFSET, kmath::Vec2::ZERO);
+    [scale.x, scale.y, offset.x, offset.y]
 }
 
 /// 已上传显存的网格。
@@ -1012,6 +1035,7 @@ impl Renderer {
                         .extend(0.0)
                         .to_array(),
                     skin: [skin_offset.unwrap_or(0), morph.0, morph.1, weight_offset],
+                    uv_transform: uv_transform_of(material),
                 },
             });
         }
@@ -2180,6 +2204,41 @@ mod test {
         assert_eq!(shader.fragment_entry(), Some("fs_main"));
     }
 
+
+    #[test]
+    fn a_plain_material_gets_an_identity_uv_transform() {
+        // 普通模型完全不该受精灵那套 UV 变换影响。
+        assert_eq!(
+            uv_transform_of(&kmaterial::Material::standard()),
+            [1.0, 1.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn atlas_parameters_reach_the_uv_transform() {
+        let material = kmaterial::Material::standard()
+            .with(kpbr::standard::UV_SCALE, kmath::Vec2::new(0.25, 0.5))
+            .with(kpbr::standard::UV_OFFSET, kmath::Vec2::new(0.75, 0.5));
+
+        assert_eq!(uv_transform_of(&material), [0.25, 0.5, 0.75, 0.5]);
+    }
+
+    #[test]
+    fn a_wrongly_typed_uv_parameter_falls_back_to_identity() {
+        // 一处写错不该让整个模型的贴图全乱。
+        let material = kmaterial::Material::standard().with(kpbr::standard::UV_SCALE, 0.5f32);
+
+        assert_eq!(uv_transform_of(&material), [1.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn only_the_missing_half_falls_back() {
+        let material =
+            kmaterial::Material::standard().with(kpbr::standard::UV_OFFSET, kmath::Vec2::splat(0.25));
+
+        assert_eq!(uv_transform_of(&material), [1.0, 1.0, 0.25, 0.25]);
+    }
+
     #[test]
     fn uniform_sizes_match_wgsl_layout() {
         // Globals：view_proj(64) + vec4 × 3 + 光空间矩阵(64) + 阴影参数(16)
@@ -2190,9 +2249,9 @@ mod test {
         );
         assert_eq!(size_of::<Globals>() % 16, 0);
         // ObjectUniforms：mat4x4(64) × 2 + base_color(16) + f32 × 4 + emissive(16)
-        //                 + 骨骼偏移(16) = 192。
+        //                 + 骨骼偏移(16) + UV 变换(16) = 208。
         // 四个 f32 恰好凑满 16 字节，emissive 才能落在 vec4 要求的对齐边界上。
-        assert_eq!(size_of::<ObjectUniforms>(), 192);
+        assert_eq!(size_of::<ObjectUniforms>(), 208);
         assert_eq!(size_of::<ObjectUniforms>() % 16, 0);
     }
 

@@ -116,6 +116,12 @@ struct Game {
     roundtrip_step: u8,
     /// 存盘那一刻的渲染统计，用来和读回来之后对比。
     stats_before: Option<RenderStats>,
+    /// 循环播放的精灵。
+    sprite_loop: SpriteAnimation,
+    sprite_loop_node: Handle<Node>,
+    /// 来回播放的精灵。
+    sprite_ping: SpriteAnimation,
+    sprite_ping_node: Handle<Node>,
     paused: bool,
 }
 
@@ -741,6 +747,135 @@ impl Game {
         }
     }
 
+
+    // ───────────────────────── 2D 精灵 ─────────────────────────
+
+    /// 程序化生成一张 4×2 格的精灵表，每格一个纯色。
+    ///
+    /// 每格颜色不同，动画一跑就能直接看出「取到的是哪一格」——
+    /// 用一张真实的角色表反而不容易一眼确认 UV 有没有错位。
+    fn sprite_sheet() -> Texture {
+        const COLUMNS: u32 = 4;
+        const ROWS: u32 = 2;
+        const CELL: u32 = 32;
+        const COLORS: [[u8; 4]; 8] = [
+            [235, 64, 52, 255],   // 红
+            [235, 158, 52, 255],  // 橙
+            [235, 232, 52, 255],  // 黄
+            [106, 235, 52, 255],  // 绿
+            [52, 235, 213, 255],  // 青
+            [52, 116, 235, 255],  // 蓝
+            [147, 52, 235, 255],  // 紫
+            [235, 52, 177, 255],  // 品红
+        ];
+
+        let (width, height) = (COLUMNS * CELL, ROWS * CELL);
+        let mut data = vec![0u8; (width * height * 4) as usize];
+        for y in 0..height {
+            for x in 0..width {
+                let cell = (y / CELL) * COLUMNS + (x / CELL);
+                let color = COLORS[cell as usize % COLORS.len()];
+                // 每格留一圈深色边，格子的边界一眼可见。
+                let (lx, ly) = (x % CELL, y % CELL);
+                let on_border = lx < 2 || ly < 2 || lx >= CELL - 2 || ly >= CELL - 2;
+                let pixel = if on_border { [20, 20, 24, 255] } else { color };
+
+                let offset = ((y * width + x) * 4) as usize;
+                data[offset..offset + 4].copy_from_slice(&pixel);
+            }
+        }
+
+        Texture::new(width, height, data).with_sampler(Sampler::pixelated())
+    }
+
+    /// 放一排精灵：静止的一格、一条循环动画、一条来回播的动画。
+    fn spawn_sprites(&mut self, ctx: &mut Context) {
+        let sheet = ctx.resources.register("builtin/sprite_sheet", Self::sprite_sheet());
+        let atlas = Atlas::grid(4, 2);
+
+        // 静止：直接取第 0 行第 2 格。
+        let still = Sprite::from_region(atlas.region(2).unwrap())
+            .with_size(Vec2::splat(0.8))
+            .with_anchor(Anchor::BottomCenter);
+        self.spawn_sprite(ctx, "SpriteStill", &still, &sheet, Vec3::new(-2.0, -1.0, 3.0));
+
+        // 循环：第 0 行的四格。
+        self.sprite_loop = SpriteAnimation::new(atlas.row(0), 6.0);
+        self.sprite_loop_node = self.spawn_sprite(
+            ctx,
+            "SpriteLoop",
+            &still.with_region(self.sprite_loop.frame()),
+            &sheet,
+            Vec3::new(-1.0, -1.0, 3.0),
+        );
+
+        // 来回播：第 1 行的四格。两端各只出现一次，接缝比循环连贯。
+        self.sprite_ping = SpriteAnimation::new(atlas.row(1), 6.0).with_mode(PlayMode::PingPong);
+        self.sprite_ping_node = self.spawn_sprite(
+            ctx,
+            "SpritePingPong",
+            &still.with_region(self.sprite_ping.frame()),
+            &sheet,
+            Vec3::new(0.0, -1.0, 3.0),
+        );
+    }
+
+    /// 建一个精灵节点：方片网格 + 带图集 UV 变换的材质。
+    fn spawn_sprite(
+        &mut self,
+        ctx: &mut Context,
+        name: &str,
+        sprite: &Sprite,
+        sheet: &Resource<Texture>,
+        position: Vec3,
+    ) -> Handle<Node> {
+        ctx.scene.add_node(
+            Node::new(name)
+                .with_mesh(sprite.quad())
+                .with_material(Self::sprite_material(sprite, sheet))
+                .with_position(position),
+        )
+    }
+
+    /// 精灵材质：贴图 + 图集 UV 变换，并且**不受光照影响**。
+    ///
+    /// 2D 精灵按惯例是「画上去什么样就是什么样」，走 PBR 会被场景里的
+    /// 方向光和环境光染色。这里把基础色压黑、全部亮度放进自发光，
+    /// 于是它在现有管线里表现为无光照的贴图——不必为此另开一条渲染路径。
+    fn sprite_material(sprite: &Sprite, sheet: &Resource<Texture>) -> Material {
+        Material::standard()
+            .with_base_color(Vec4::new(0.0, 0.0, 0.0, 1.0))
+            .with_base_color_texture(sheet.clone())
+            .with(kengine::kpbr::standard::EMISSIVE, Vec3::ONE)
+            .with(kengine::kpbr::standard::EMISSIVE_TEXTURE, sheet.clone())
+            .with(kengine::kpbr::standard::UV_SCALE, sprite.uv_scale())
+            .with(kengine::kpbr::standard::UV_OFFSET, sprite.uv_offset())
+    }
+
+    /// 每帧推进两条精灵动画，并把当前帧写进材质。
+    ///
+    /// 换帧只改两个数值参数，网格一动不动——这正是把 UV 变换放进材质
+    /// 而不是烘进顶点的理由。
+    fn drive_sprites(&mut self, ctx: &mut Context) {
+        self.sprite_loop.tick(ctx.dt);
+        self.sprite_ping.tick(ctx.dt);
+
+        for (handle, region) in [
+            (self.sprite_loop_node, self.sprite_loop.frame()),
+            (self.sprite_ping_node, self.sprite_ping.frame()),
+        ] {
+            let Some(material) = ctx
+                .scene
+                .try_get_mut(handle)
+                .and_then(Node::material_mut)
+            else {
+                continue;
+            };
+            material.set(kengine::kpbr::standard::UV_SCALE, region.uv_scale());
+            material.set(kengine::kpbr::standard::UV_OFFSET, region.uv_offset());
+        }
+    }
+
     fn report(ctx: &Context) {
         let stats = ctx.stats;
         let physics = ctx.scene.physics().stats();
@@ -998,6 +1133,7 @@ impl Plugin for Game {
         );
 
         self.spawn_physics_playground(ctx);
+        self.spawn_sprites(ctx);
         self.spawn_stress_field(ctx);
 
         klog::info!(
@@ -1022,6 +1158,7 @@ impl Plugin for Game {
         self.drive_lion(ctx);
 
         self.drive_physics(ctx);
+        self.drive_sprites(ctx);
         self.drive_roundtrip(ctx);
 
         if ctx.input.action_just_pressed("morph") {

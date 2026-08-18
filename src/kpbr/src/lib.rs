@@ -61,6 +61,13 @@ pub mod standard {
     pub const EMISSIVE_TEXTURE: &str = "emissive_texture";
     /// 环境光遮蔽贴图，`Texture`。
     pub const OCCLUSION_TEXTURE: &str = "occlusion_texture";
+    /// 纹理坐标缩放，`Vec2`，默认 `(1, 1)`。
+    ///
+    /// 与 [`UV_OFFSET`] 一起用来从图集里取一格：采样坐标 = `uv × 缩放 + 偏移`。
+    /// 所有贴图槽共用同一套变换，否则法线贴图会和基础色错位。
+    pub const UV_SCALE: &str = "uv_scale";
+    /// 纹理坐标偏移，`Vec2`，默认 `(0, 0)`。见 [`UV_SCALE`]。
+    pub const UV_OFFSET: &str = "uv_offset";
 }
 
 /// 环境光照。

@@ -33,6 +33,8 @@ struct ObjectUniforms {
     emissive: vec4<f32>,
     // x = 骨骼矩阵起点，y = 形变增量起点，z = 形变目标数，w = 形变权重起点
     skin: vec4<u32>,
+    // 纹理坐标变换：xy = 缩放，zw = 偏移。图集里取一格子图就靠它。
+    uv_transform: vec4<f32>,
 };
 
 // 一个顶点在某个形变目标下的增量。两个 vec3 各自补齐到 16 字节。
@@ -210,7 +212,10 @@ fn vs_skinned(
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let object = objects[in.instance];
-    let sampled = textureSample(base_color_texture, base_color_sampler, in.uv);
+    // 图集取格：整张图的 UV 是 0..1，缩放到格子大小再偏移到格子位置，
+    // 就等于「只采样这一格」。所有贴图槽用同一套变换，否则法线贴图会错位。
+    let uv = in.uv * object.uv_transform.xy + object.uv_transform.zw;
+    let sampled = textureSample(base_color_texture, base_color_sampler, uv);
     let base = object.base_color * sampled * vec4<f32>(in.color, 1.0);
     let albedo = base.rgb;
 
@@ -224,17 +229,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let tbn = mat3x3<f32>(t, b, geometric_normal);
 
         // 贴图存的是 [0,1]，解回 [-1,1]。
-        var tangent_normal = textureSample(normal_texture, base_color_sampler, in.uv).xyz * 2.0 - 1.0;
+        var tangent_normal = textureSample(normal_texture, base_color_sampler, uv).xyz * 2.0 - 1.0;
         tangent_normal = vec3<f32>(tangent_normal.xy * object.normal_scale, tangent_normal.z);
         n = normalize(tbn * tangent_normal);
     }
 
     // ── 金属度粗糙度贴图（glTF 约定：G 通道粗糙度、B 通道金属度）──
-    let mr = textureSample(metallic_roughness_texture, base_color_sampler, in.uv);
+    let mr = textureSample(metallic_roughness_texture, base_color_sampler, uv);
     let roughness = clamp(object.roughness * mr.g, 0.02, 1.0);
     let metallic = clamp(object.metallic * mr.b, 0.0, 1.0);
 
-    let occlusion = mix(1.0, textureSample(occlusion_texture, base_color_sampler, in.uv).r, object.occlusion_strength);
+    let occlusion = mix(1.0, textureSample(occlusion_texture, base_color_sampler, uv).r, object.occlusion_strength);
     let v = normalize(globals.camera_position.xyz - in.world_position);
 
     // 逐光源累加。光源数量由 CPU 侧截断到数组容量，这里再夹一次以防越界。
@@ -289,7 +294,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     ) * occlusion;
 
     // 自发光不受光照影响，直接叠加。
-    color += object.emissive.rgb * textureSample(emissive_texture, base_color_sampler, in.uv).rgb;
+    color += object.emissive.rgb * textureSample(emissive_texture, base_color_sampler, uv).rgb;
 
     // 输出线性 HDR，不做色调映射也不做 gamma——
     // 那些交给后处理链，Bloom 需要未经压缩的高光才能提取出来。

@@ -1,0 +1,9 @@
+[package]
+name = "ksprite"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kcore = { path = "../kcore" }
+kmath = { path = "../kmath" }
+kmesh = { path = "../kmesh" }

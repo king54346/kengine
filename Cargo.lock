@@ -1184,6 +1184,7 @@ dependencies = [
  "krender",
  "kscene",
  "kshader",
+ "ksprite",
  "ktask",
  "ktexture",
  "kwinit",
@@ -1367,6 +1368,15 @@ dependencies = [
  "kcore",
  "klog",
  "naga",
+]
+
+[[package]]
+name = "ksprite"
+version = "0.1.0"
+dependencies = [
+ "kcore",
+ "kmath",
+ "kmesh",
 ]
 
 [[package]]

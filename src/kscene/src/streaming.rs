@@ -27,7 +27,7 @@ use crate::{Node, Scene};
 use kasset::ResourceManager;
 use kcore::pool::Handle;
 use kmath::Vec3;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// 一个区块的状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -350,7 +350,7 @@ mod test {
     use kmesh::Mesh;
 
     /// 造一个区块场景文件，返回路径。
-    fn write_cell(directory: &Path, name: &str, build: impl FnOnce(&mut Scene)) -> PathBuf {
+    fn write_cell(directory: &std::path::Path, name: &str, build: impl FnOnce(&mut Scene)) -> PathBuf {
         let mut scene = Scene::new();
         build(&mut scene);
         let path = directory.join(format!("{name}.scene"));

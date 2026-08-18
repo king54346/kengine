@@ -44,6 +44,7 @@
 //! | `kasset` | 异步资源加载 | ❌ |
 //! | `kmesh` / `ktexture` / `kmaterial` / `kshader` / `kgltf` / `kpbr` | 资源与渲染数据 | ❌ |
 //! | `kparticle` | 粒子模拟（列式存储 + 并行） | ❌ |
+//! | `ksprite` | 2D 精灵 / 图集 / 帧动画 | ❌ |
 //! | `kphysics` | 刚体物理（rapier 封装） | ❌，独占 rapier |
 //! | `kanim` | 骨骼动画（曲线 / 姿态 / 状态机 / IK） | ❌ |
 //! | `kinput` | 输入采集与映射 | ❌ |
@@ -70,6 +71,7 @@ pub use kpbr;
 pub use krender;
 pub use kscene;
 pub use kshader;
+pub use ksprite;
 pub use ktask;
 pub use ktexture;
 pub use kwinit;
@@ -110,6 +112,7 @@ pub mod prelude {
         RigidBody, Scene, SceneRayHit, Skin, Transform, hinge_limits,
     };
     pub use kshader::{Shader, ShaderLoader};
+    pub use ksprite::{Anchor, Atlas, PlayMode, Sprite, SpriteAnimation, SpriteRegion};
     pub use ktexture::{Sampler, Texture, TextureLoader};
     pub use winit::event::WindowEvent;
 }

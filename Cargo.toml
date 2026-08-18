@@ -20,6 +20,7 @@ members = [
     "src/kwinit",
     "src/kmath",
     "src/kshader",
+    "src/ksprite",
     "src/ktask",
     "src/ktexture",
 ]
@@ -48,6 +49,7 @@ kpbr = { path = "src/kpbr" }
 krender = { path = "src/krender" }
 kscene = { path = "src/kscene" }
 kshader = { path = "src/kshader" }
+ksprite = { path = "src/ksprite" }
 ktask = { path = "src/ktask" }
 ktexture = { path = "src/ktexture" }
 kwinit = { path = "src/kwinit" }
