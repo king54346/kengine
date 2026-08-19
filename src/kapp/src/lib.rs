@@ -40,7 +40,7 @@ pub use stage::Stage;
 
 use kasset::{HotReload, ResourceIo, ResourceManager};
 use kaudio::AudioDevice;
-use kscene::{ScriptEvent, ScriptRuntime};
+use kscript::{ScriptRuntime, Signal};
 use kinput::Input;
 use krender::{RenderOutcome, Renderer};
 use kscene::Scene;
@@ -112,8 +112,8 @@ struct Runtime {
     hot_reload: Option<HotReload>,
     audio: AudioDevice,
     scripts: ScriptRuntime,
-    /// 本帧脚本抛出的事件，供插件在 `update` 里读。
-    script_events: Vec<ScriptEvent>,
+    /// 本帧脚本抛出的信号，供插件在 `update` 里读。
+    script_events: Vec<Signal>,
 }
 
 /// 应用。装载插件、注册系统，然后接管主循环。
@@ -389,9 +389,12 @@ impl AppHandler for App {
             let now = Instant::now();
             let dt = now.duration_since(runtime.last_frame).as_secs_f32();
             let elapsed = now.duration_since(runtime.start_time).as_secs_f32();
-            runtime.script_events = runtime
-                .scene
-                .tick_scripts(&mut runtime.scripts, dt, elapsed);
+            runtime.script_events = runtime.scripts.process(
+                &mut runtime.scene,
+                &runtime.resources,
+                dt,
+                elapsed,
+            );
         }
 
         // ── Input / Update / PostUpdate ──
@@ -430,6 +433,13 @@ impl AppHandler for App {
             let Some(runtime) = self.runtime.as_mut() else {
                 return FrameOutcome::Continue;
             };
+            // 脚本的 `_physics_process`：与 `FixedUpdate` 同一条定长节拍。
+            let now = Instant::now().duration_since(runtime.start_time).as_secs_f32();
+            let signals = runtime
+                .scripts
+                .physics_process(&mut runtime.scene, step, now);
+            runtime.script_events.extend(signals);
+
             runtime.scene.step_physics(step);
 
             exit |= self.run_systems_with_dt(Stage::Physics, Some(step));

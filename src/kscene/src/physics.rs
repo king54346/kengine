@@ -736,6 +736,7 @@ mod scene_test {
         );
     }
 
+
     #[test]
     fn velocities_are_read_back_onto_the_component() {
         let mut scene = Scene::new();

@@ -1,0 +1,496 @@
+//! Rust 与 JS 之间的桥：一组扁平的原生函数。
+//!
+//! 这里刻意**只做最原始的事**——取一个数、写一个数、打一条射线。
+//! `Node`、`Vector3` 那些手感全在 `prelude.js` 里包出来：
+//! getter/setter、类、链式方法在 JS 是母语，用 boa 的对象 API 拼同样的东西
+//! 要多写十倍代码，还更难读。
+//!
+//! 所有函数都遵守同一条纪律：**先把参数从 VM 里取干净，再借场景**。
+//! 取参数可能触发用户的 `toString()`，那会回调进 JS；此时若还持着场景借用，
+//! 就是重入。顺序反过来就结构上不可能发生（见 [`crate::host`]）。
+
+use crate::host::{MAX_SIGNALS, handle_of, id_of, with_host, with_scene};
+use boa_engine::{
+    Context, JsResult, JsValue, NativeFunction, js_string, object::ObjectInitializer,
+    property::Attribute,
+};
+use kcore::pool::Handle;
+use kmath::{Quat, Vec3};
+use kphysics::RayCastOptions;
+use kscene::Node;
+
+/// 向量字段的编号，与 `prelude.js` 里的 `FIELD_*` 一一对应。
+const FIELD_POSITION: u32 = 0;
+const FIELD_SCALE: u32 = 1;
+
+/// 取一个数值参数，缺省当 0。
+fn number(args: &[JsValue], index: usize, context: &mut Context) -> JsResult<f64> {
+    match args.get(index) {
+        Some(value) => value.to_number(context),
+        None => Ok(0.0),
+    }
+}
+
+/// 取三个数值参数当向量。
+fn vec3(args: &[JsValue], start: usize, context: &mut Context) -> JsResult<Vec3> {
+    Ok(Vec3::new(
+        number(args, start, context)? as f32,
+        number(args, start + 1, context)? as f32,
+        number(args, start + 2, context)? as f32,
+    ))
+}
+
+/// 取节点句柄参数。
+fn node_arg(args: &[JsValue], index: usize, context: &mut Context) -> JsResult<Option<Handle<Node>>> {
+    Ok(handle_of(number(args, index, context)?))
+}
+
+/// 非有限的数值一律拦下。
+///
+/// NaN 写进变换，世界矩阵会变 NaN，包围盒随之变 NaN，剔除把它判成不可见——
+/// **物体无声无息地消失**，日志里什么都没有。在边界上拦掉最便宜。
+fn finite(value: Vec3) -> Option<Vec3> {
+    value.is_finite().then_some(value)
+}
+
+/// 把一个 `[f64; 3]` 变成 JS 数组。
+fn array3(value: Vec3, context: &mut Context) -> JsValue {
+    let array = boa_engine::object::builtins::JsArray::new(context);
+    let _ = array.push(JsValue::from(value.x as f64), context);
+    let _ = array.push(JsValue::from(value.y as f64), context);
+    let _ = array.push(JsValue::from(value.z as f64), context);
+    array.into()
+}
+
+/// 往全局装上 `__k` 桥对象。`prelude.js` 会把它包成 `Node` / `Vector3`。
+pub(crate) fn register(context: &mut Context) {
+    let bridge = ObjectInitializer::new(context)
+        // ── 时间 ──
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| {
+                Ok(JsValue::from(with_host(|host| host.elapsed).unwrap_or(0.0) as f64))
+            }),
+            js_string!("time"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| {
+                Ok(JsValue::from(with_host(|host| host.dt).unwrap_or(0.0) as f64))
+            }),
+            js_string!("delta"),
+            0,
+        )
+        // ── 查找 ──
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| {
+                let handle = with_host(|host| host.current).unwrap_or(Handle::NONE);
+                Ok(JsValue::from(id_of(handle)))
+            }),
+            js_string!("selfId"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                // 先把字符串取干净（可能触发 JS 的 toString），再借场景。
+                let name = match args.first() {
+                    Some(value) => value.to_string(context)?.to_std_string_escaped(),
+                    None => String::new(),
+                };
+                let found = with_scene(|scene| scene.find_by_name(&name)).flatten();
+                Ok(JsValue::from(match found {
+                    Some(handle) => id_of(handle),
+                    None => -1.0,
+                }))
+            }),
+            js_string!("find"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let valid = handle
+                    .and_then(|handle| with_scene(|scene| scene.try_get(handle).is_some()))
+                    .unwrap_or(false);
+                Ok(JsValue::from(valid))
+            }),
+            js_string!("isValid"),
+            1,
+        )
+        // ── 读 ──
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let name = handle
+                    .and_then(|handle| {
+                        with_scene(|scene| scene.try_get(handle).map(|node| node.name.clone()))
+                    })
+                    .flatten();
+                Ok(match name {
+                    Some(name) => JsValue::from(js_string!(name.as_str())),
+                    None => JsValue::null(),
+                })
+            }),
+            js_string!("getName"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let field = number(args, 1, context)? as u32;
+                let axis = number(args, 2, context)? as usize;
+
+                let value = handle
+                    .and_then(|handle| {
+                        with_scene(|scene| {
+                            let node = scene.try_get(handle)?;
+                            let vector = match field {
+                                FIELD_SCALE => node.transform.scale,
+                                _ => node.transform.position,
+                            };
+                            Some(match axis {
+                                1 => vector.y,
+                                2 => vector.z,
+                                _ => vector.x,
+                            })
+                        })
+                    })
+                    .flatten();
+                Ok(JsValue::from(value.unwrap_or(0.0) as f64))
+            }),
+            js_string!("getComponent"),
+            3,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let field = number(args, 1, context)? as u32;
+                let axis = number(args, 2, context)? as usize;
+                let value = number(args, 3, context)? as f32;
+
+                if !value.is_finite() {
+                    return Ok(JsValue::undefined());
+                }
+                if let Some(handle) = handle {
+                    with_scene(|scene| {
+                        let Some(node) = scene.try_get_mut(handle) else {
+                            return;
+                        };
+                        let vector = match field {
+                            FIELD_SCALE => &mut node.transform.scale,
+                            _ => &mut node.transform.position,
+                        };
+                        match axis {
+                            1 => vector.y = value,
+                            2 => vector.z = value,
+                            _ => vector.x = value,
+                        }
+                    });
+                }
+                Ok(JsValue::undefined())
+            }),
+            js_string!("setComponent"),
+            4,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let field = number(args, 1, context)? as u32;
+                let Some(value) = finite(vec3(args, 2, context)?) else {
+                    return Ok(JsValue::undefined());
+                };
+
+                if let Some(handle) = handle {
+                    with_scene(|scene| {
+                        if let Some(node) = scene.try_get_mut(handle) {
+                            match field {
+                                FIELD_SCALE => node.transform.scale = value,
+                                _ => node.transform.position = value,
+                            }
+                        }
+                    });
+                }
+                Ok(JsValue::undefined())
+            }),
+            js_string!("setVec"),
+            5,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let position = handle
+                    .and_then(|handle| {
+                        with_scene(|scene| {
+                            scene
+                                .try_get(handle)
+                                .map(|node| node.global_transform().w_axis.truncate())
+                        })
+                    })
+                    .flatten()
+                    .unwrap_or(Vec3::ZERO);
+                Ok(array3(position, context))
+            }),
+            js_string!("getGlobalPosition"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let visible = handle
+                    .and_then(|handle| with_scene(|scene| scene.try_get(handle).map(|n| n.visible)))
+                    .flatten()
+                    .unwrap_or(false);
+                Ok(JsValue::from(visible))
+            }),
+            js_string!("getVisible"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let visible = args.get(1).map(JsValue::to_boolean).unwrap_or(false);
+                if let Some(handle) = handle {
+                    with_scene(|scene| {
+                        if let Some(node) = scene.try_get_mut(handle) {
+                            node.visible = visible;
+                        }
+                    });
+                }
+                Ok(JsValue::undefined())
+            }),
+            js_string!("setVisible"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let velocity = handle
+                    .and_then(|handle| {
+                        with_scene(|scene| {
+                            scene
+                                .try_get(handle)
+                                .and_then(|node| node.rigid_body())
+                                .map(|body| body.linvel())
+                        })
+                    })
+                    .flatten()
+                    .unwrap_or(Vec3::ZERO);
+                Ok(array3(velocity, context))
+            }),
+            js_string!("getLinvel"),
+            1,
+        )
+        // ── 写 ──
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let Some(offset) = finite(vec3(args, 1, context)?) else {
+                    return Ok(JsValue::undefined());
+                };
+                if let Some(handle) = handle {
+                    with_scene(|scene| {
+                        if let Some(node) = scene.try_get_mut(handle) {
+                            node.transform.position += offset;
+                        }
+                    });
+                }
+                Ok(JsValue::undefined())
+            }),
+            js_string!("translate"),
+            4,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let angle = number(args, 1, context)? as f32;
+                if !angle.is_finite() {
+                    return Ok(JsValue::undefined());
+                }
+                if let Some(handle) = handle {
+                    with_scene(|scene| {
+                        if let Some(node) = scene.try_get_mut(handle) {
+                            node.transform.rotation *= Quat::from_rotation_y(angle);
+                        }
+                    });
+                }
+                Ok(JsValue::undefined())
+            }),
+            js_string!("rotateY"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let Some(target) = finite(vec3(args, 1, context)?) else {
+                    return Ok(JsValue::undefined());
+                };
+                if let Some(handle) = handle {
+                    with_scene(|scene| {
+                        let Some(node) = scene.try_get_mut(handle) else {
+                            return;
+                        };
+                        let offset = target - node.transform.position;
+                        // 目标就在脚下时朝向无从谈起，保持原样比转成 NaN 强。
+                        if offset.length_squared() > 1e-12 {
+                            let matrix =
+                                kmath::Mat4::look_at_rh(Vec3::ZERO, offset, Vec3::Y).inverse();
+                            let (_, rotation, _) = matrix.to_scale_rotation_translation();
+                            node.transform.rotation = rotation;
+                        }
+                    });
+                }
+                Ok(JsValue::undefined())
+            }),
+            js_string!("lookAt"),
+            4,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let Some(impulse) = finite(vec3(args, 1, context)?) else {
+                    return Ok(JsValue::undefined());
+                };
+                if let Some(handle) = handle {
+                    with_scene(|scene| {
+                        if let Some(body) = scene
+                            .try_get_mut(handle)
+                            .and_then(kscene::Node::rigid_body_mut)
+                        {
+                            body.apply_impulse(impulse);
+                        }
+                    });
+                }
+                Ok(JsValue::undefined())
+            }),
+            js_string!("applyImpulse"),
+            4,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let Some(velocity) = finite(vec3(args, 1, context)?) else {
+                    return Ok(JsValue::undefined());
+                };
+                if let Some(handle) = handle {
+                    with_scene(|scene| {
+                        if let Some(body) = scene
+                            .try_get_mut(handle)
+                            .and_then(kscene::Node::rigid_body_mut)
+                        {
+                            body.set_linvel(velocity);
+                        }
+                    });
+                }
+                Ok(JsValue::undefined())
+            }),
+            js_string!("setLinvel"),
+            4,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                if let Some(handle) = handle {
+                    with_scene(|scene| {
+                        if let Some(sound) =
+                            scene.try_get_mut(handle).and_then(kscene::Node::sound_mut)
+                        {
+                            sound.restart();
+                        }
+                    });
+                }
+                Ok(JsValue::undefined())
+            }),
+            js_string!("playSound"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                if let Some(handle) = handle {
+                    with_scene(|scene| scene.remove_node(handle));
+                }
+                Ok(JsValue::undefined())
+            }),
+            js_string!("queueFree"),
+            1,
+        )
+        // ── 即时查询：旧架构做不到的那一类 ──
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let origin = vec3(args, 0, context)?;
+                let direction = vec3(args, 3, context)?;
+                let max_distance = number(args, 6, context)? as f32;
+
+                if !origin.is_finite() || !direction.is_finite() {
+                    return Ok(JsValue::null());
+                }
+
+                let hit = with_scene(|scene| {
+                    scene.cast_ray(&RayCastOptions::new(origin, direction, max_distance))
+                })
+                .flatten();
+
+                let Some(hit) = hit else {
+                    return Ok(JsValue::null());
+                };
+                let node = hit
+                    .body_node
+                    .or(hit.collider_node)
+                    .map(id_of)
+                    .unwrap_or(-1.0);
+
+                Ok(ObjectInitializer::new(context)
+                    .property(js_string!("node"), node, Attribute::all())
+                    .property(js_string!("px"), hit.point.x as f64, Attribute::all())
+                    .property(js_string!("py"), hit.point.y as f64, Attribute::all())
+                    .property(js_string!("pz"), hit.point.z as f64, Attribute::all())
+                    .property(js_string!("nx"), hit.normal.x as f64, Attribute::all())
+                    .property(js_string!("ny"), hit.normal.y as f64, Attribute::all())
+                    .property(js_string!("nz"), hit.normal.z as f64, Attribute::all())
+                    .property(js_string!("distance"), hit.distance as f64, Attribute::all())
+                    .build()
+                    .into())
+            }),
+            js_string!("raycast"),
+            7,
+        )
+        // ── 与 Rust 侧通信 ──
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let text = match args.first() {
+                    Some(value) => value.to_string(context)?.to_std_string_escaped(),
+                    None => String::new(),
+                };
+                klog::info!("[脚本] {text}");
+                Ok(JsValue::undefined())
+            }),
+            js_string!("log"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let name = match args.first() {
+                    Some(value) => value.to_string(context)?.to_std_string_escaped(),
+                    None => String::new(),
+                };
+                let value = number(args, 1, context)?;
+                with_host(|host| {
+                    if host.signals.len() < MAX_SIGNALS {
+                        let source = host.current;
+                        host.signals.push(crate::runtime::Signal {
+                            name,
+                            value,
+                            source,
+                        });
+                    }
+                });
+                Ok(JsValue::undefined())
+            }),
+            js_string!("emit"),
+            2,
+        )
+        .build();
+
+    context
+        .register_global_property(js_string!("__k"), bridge, Attribute::all())
+        .expect("__k 是新建运行时里第一个全局属性，不该冲突");
+}

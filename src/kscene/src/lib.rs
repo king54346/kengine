@@ -33,8 +33,7 @@ pub use physics::{Collider, Joint, RigidBody};
 pub use ragdoll::{LimbDesc, Ragdoll, RagdollBuilder, RagdollLimb, hinge_limits};
 pub use serialize::SCENE_FORMAT_VERSION;
 pub use audio::SoundSource;
-pub use kscript::{Script, ScriptRuntime};
-pub use script::{ScriptComponent, ScriptEvent};
+pub use script::ScriptSlot;
 pub use kaudio::{AudioBuffer, AudioDevice, Attenuation, Listener, Spatial};
 pub use skin::{AnimationPlayer, Skin};
 pub use streaming::{Cell, CellState, Streaming, StreamingReport};
@@ -149,6 +148,7 @@ struct NodeIndex {
     joints: Vec<Handle<Node>>,
     ragdolls: Vec<Handle<Node>>,
     sounds: Vec<Handle<Node>>,
+    scripts: Vec<Handle<Node>>,
 }
 
 impl NodeIndex {
@@ -164,6 +164,7 @@ impl NodeIndex {
         self.joints.clear();
         self.ragdolls.clear();
         self.sounds.clear();
+        self.scripts.clear();
     }
 }
 
@@ -629,6 +630,7 @@ impl Scene {
                         node.joint.is_some(),
                         node.ragdoll.is_some(),
                         node.sound.is_some(),
+                        node.script.is_some(),
                     ),
                 )
             };
@@ -644,6 +646,7 @@ impl Scene {
                 has_joint,
                 has_ragdoll,
                 has_sound,
+                has_script,
             ) = components;
             if drawable {
                 self.index.drawables.push(handle);
@@ -677,6 +680,9 @@ impl Scene {
             }
             if has_sound {
                 self.index.sounds.push(handle);
+            }
+            if has_script {
+                self.index.scripts.push(handle);
             }
 
             // 按下标取子节点而不是克隆整个列表：每帧对上万个节点做一次分配，
@@ -1112,6 +1118,13 @@ impl Scene {
     }
 
     // ───────────────────────── 物理 ─────────────────────────
+
+    /// 挂了脚本的节点，由 [`update`](Self::update) 收集。
+    ///
+    /// `kscript` 每帧靠它找到该跑的脚本，不必扫整个节点池。
+    pub fn script_nodes(&self) -> &[Handle<Node>] {
+        &self.index.scripts
+    }
 
     /// 物理世界的只读引用。射线检测等查询走这里。
     pub fn physics(&self) -> &PhysicsWorld {

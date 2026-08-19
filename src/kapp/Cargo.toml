@@ -10,6 +10,7 @@ kinput = { path = "../kinput" }
 klog = { path = "../klog" }
 krender = { path = "../krender" }
 kscene = { path = "../kscene" }
+kscript = { path = "../kscript" }
 kwinit = { path = "../kwinit" }
 pollster = "1.0.1"
 winit = "0.30.13"

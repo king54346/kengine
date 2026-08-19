@@ -1560,6 +1560,7 @@ dependencies = [
  "klog",
  "krender",
  "kscene",
+ "kscript",
  "kwinit",
  "pollster",
  "winit",
@@ -1827,7 +1828,6 @@ dependencies = [
  "kparticle",
  "kpbr",
  "kphysics",
- "kscript",
  "ktask",
 ]
 
@@ -1836,10 +1836,13 @@ name = "kscript"
 version = "0.1.0"
 dependencies = [
  "boa_engine",
+ "fxhash",
  "kasset",
  "kcore",
  "klog",
  "kmath",
+ "kphysics",
+ "kscene",
 ]
 
 [[package]]

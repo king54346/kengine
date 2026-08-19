@@ -8,7 +8,7 @@ use kmath::{Aabb, Mat4, Vec3};
 use crate::physics::{Collider, Joint, RigidBody};
 use crate::audio::SoundSource;
 use crate::ragdoll::Ragdoll;
-use crate::script::ScriptComponent;
+use crate::script::ScriptSlot;
 use crate::skin::{AnimationPlayer, Skin};
 use kparticle::ParticleSystem;
 
@@ -46,7 +46,7 @@ pub struct Node {
     pub(crate) joint: Option<Box<Joint>>,
     pub(crate) ragdoll: Option<Box<Ragdoll>>,
     pub(crate) sound: Option<Box<SoundSource>>,
-    pub(crate) script: Option<Box<ScriptComponent>>,
+    pub(crate) script: Option<Box<ScriptSlot>>,
     pub(crate) parent: Handle<Node>,
     pub(crate) children: Vec<Handle<Node>>,
     pub(crate) global_transform: Mat4,
@@ -175,9 +175,11 @@ impl Node {
         self
     }
 
-    /// 挂上脚本。每帧收到 `update(dt)`。
-    pub fn with_script(mut self, script: ScriptComponent) -> Self {
-        self.script = Some(Box::new(script));
+    /// 挂上脚本，参数是脚本资源路径。
+    ///
+    /// 生命周期由 `kscript` 驱动：`_ready` / `_process(delta)` / `_physics_process(delta)`。
+    pub fn with_script(mut self, path: impl Into<String>) -> Self {
+        self.script = Some(Box::new(ScriptSlot::new(path)));
         self
     }
 
@@ -378,19 +380,19 @@ impl Node {
         self.sound = Some(Box::new(sound));
     }
 
-    /// 脚本的只读引用。
-    pub fn script(&self) -> Option<&ScriptComponent> {
+    /// 脚本槽位的只读引用。
+    pub fn script(&self) -> Option<&ScriptSlot> {
         self.script.as_deref()
     }
 
-    /// 脚本的可变引用，用来开关它或换一份源码。
-    pub fn script_mut(&mut self) -> Option<&mut ScriptComponent> {
+    /// 脚本槽位的可变引用，用来开关它或换一份脚本。
+    pub fn script_mut(&mut self) -> Option<&mut ScriptSlot> {
         self.script.as_deref_mut()
     }
 
-    /// 挂上（或替换）脚本。
-    pub fn set_script(&mut self, script: ScriptComponent) {
-        self.script = Some(Box::new(script));
+    /// 挂上（或替换）脚本槽位。
+    pub fn set_script(&mut self, slot: ScriptSlot) {
+        self.script = Some(Box::new(slot));
     }
 
     /// 父节点句柄；根节点返回 [`Handle::NONE`]。

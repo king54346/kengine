@@ -1,30 +1,47 @@
-//! kscript —— JavaScript 脚本。
+//! kscript —— JavaScript 脚本，接口照 GDScript。
 //!
-//! 脚本挂在场景节点上，每帧收到 `update(dt)`。引擎 API 通过全局 `engine`
-//! 对象暴露：`engine.self()`、`engine.find(name)`、`engine.rotateY(node, a)`……
+//! 脚本挂在场景节点上，**实时读写场景**：写下去立刻生效，还能当场打射线。
 //!
+//! ```js
+//! let speed = 2.0;
+//!
+//! return {
+//!     _ready() {
+//!         print("我醒了：", self.name);
+//!     },
+//!
+//!     _process(delta) {
+//!         self.position.y += speed * delta;          // 写进去立刻生效
+//!         const hit = raycast(self.globalPosition, Vector3.DOWN(), 5.0);
+//!         if (hit) print("脚下 ", hit.distance, " 米是 ", hit.node.name);
+//!     },
+//!
+//!     _physics_process(delta) {
+//!         self.applyImpulse(Vector3.UP().mul(delta));  // delta 恒等于物理步长
+//!     },
+//! };
 //! ```
-//! use kscript::{Script, ScriptRuntime, Snapshot, NodeRef, Command};
 //!
-//! let mut runtime = ScriptRuntime::new();
-//! let script = Script::new("return { update(dt) { engine.rotateY(engine.self(), dt); } };", "spin.js");
-//! runtime.instantiate(&script, NodeRef(0)).unwrap();
+//! # 分层
 //!
-//! let commands = runtime.tick(Snapshot::new(0.5, 0.0));
-//! assert_eq!(commands, vec![Command::RotateY(NodeRef(0), 0.5)]);
-//! ```
+//! `kscene` **不认识**脚本引擎，节点上只有一个存路径的槽位
+//! （[`kscene::ScriptSlot`]，因此脚本能随场景存档）。反过来 kscript 依赖
+//! kscene——脚本要实时读写场景。boa 只有这个 crate 认识。
 //!
-//! # 架构：快照进、命令出
+//! # 实时访问怎么做到的（零 `unsafe`）
 //!
-//! 脚本**不直接访问场景**。每帧把它关心的状态拍成快照递进去，脚本产生一串
-//! 命令，返回后由引擎依次落地。理由与代价见 [`api`] 的模块文档。
+//! tick 期间把整个 `Scene` 用 `mem::swap` 搬进线程局部，跑完再搬回来。
+//! 细节与两条不变量见 `host` 模块。
 
 #![warn(missing_docs)]
 
-pub mod api;
+mod bridge;
+mod host;
 mod runtime;
 mod script;
 
-pub use api::{Command, CommandBuffer, NodeRef, NodeState, Snapshot};
-pub use runtime::{InstanceId, ScriptRuntime, ScriptStats};
+#[cfg(test)]
+mod tests;
+
+pub use runtime::{InstanceId, ScriptRuntime, ScriptStats, Signal, attach};
 pub use script::{SCRIPT_TYPE_UUID, Script, ScriptLoader};

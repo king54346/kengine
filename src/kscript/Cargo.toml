@@ -8,4 +8,7 @@ kasset = { path = "../kasset" }
 kcore = { path = "../kcore" }
 klog = { path = "../klog" }
 kmath = { path = "../kmath" }
+kscene = { path = "../kscene" }
+kphysics = { path = "../kphysics" }
+fxhash = "0.2.1"
 boa_engine = "0.21"
