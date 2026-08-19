@@ -43,5 +43,5 @@ mod script;
 #[cfg(test)]
 mod tests;
 
-pub use runtime::{InstanceId, ScriptRuntime, ScriptStats, Signal, attach};
+pub use runtime::{InstanceId, ScriptRuntime, ScriptStats, Signal};
 pub use script::{SCRIPT_TYPE_UUID, Script, ScriptLoader};

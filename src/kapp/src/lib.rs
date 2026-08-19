@@ -484,8 +484,15 @@ impl AppHandler for App {
             // 热重载排在帧末：这一帧的逻辑与渲染已经用完了旧数据，
             // 换在这里最不容易撞上「用到一半资源被换掉」。
             if let Some(watcher) = runtime.hot_reload.as_mut() {
-                for path in watcher.poll() {
+                let reloaded = watcher.poll();
+                for path in reloaded {
                     klog::info!("热重载：{}", path.display());
+                    // 资源换了新的，但运行时手里还攥着按旧源码建的实例——
+                    // 不作废的话改了文件也没反应，看起来像热重载坏了。
+                    let reset = runtime.scripts.reload_path(&mut runtime.scene, &path);
+                    if reset > 0 {
+                        klog::info!("　└ 重建了 {reset} 个脚本实例");
+                    }
                 }
             }
         }

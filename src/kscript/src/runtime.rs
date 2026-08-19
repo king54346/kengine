@@ -315,6 +315,42 @@ impl ScriptRuntime {
         signals
     }
 
+    /// 某个脚本文件重新加载了：把用它的实例全部作废，下一帧重建。
+    ///
+    /// 返回作废了几个。资源本身由 `kasset` 的热重载负责换掉，这里只管
+    /// 「运行时手里那个旧实例得扔掉」——不扔的话文件改了也没反应，
+    /// 看起来像热重载坏了。
+    ///
+    /// **脚本内部的状态会丢**：新实例从头开始，闭包变量回到初值。
+    /// 要保住得让脚本自己实现存取接口，那是另一件事（见 PLAN 的未做项）。
+    pub fn reload_path(&mut self, scene: &mut Scene, path: &std::path::Path) -> usize {
+        let wanted = normalize(&path.to_string_lossy());
+        let mut reset = 0;
+
+        for position in 0..scene.script_nodes().len() {
+            let handle = scene.script_nodes()[position];
+            let Some(slot) = scene.try_get_mut(handle).and_then(Node::script_mut) else {
+                continue;
+            };
+            if normalize(&slot.path) != wanted {
+                continue;
+            }
+
+            if slot.is_live() {
+                // 槽位记的下标就是实例数组的下标。
+                if let Some(entry) = self.instances.get_mut(slot.instance as usize) {
+                    *entry = None;
+                }
+            }
+            slot.instance = ScriptSlot::NO_INSTANCE;
+            // 上次因为语法错误停用的，改好之后该重新给一次机会。
+            slot.failed = false;
+            reset += 1;
+        }
+
+        reset
+    }
+
     /// 销毁全部实例并清空句柄登记处。切场景时调。
     pub fn clear(&mut self) {
         self.instances.clear();
@@ -358,7 +394,10 @@ fn call_method(
     callable.call(&object.clone().into(), args, context)
 }
 
-/// 给节点挂脚本用的便捷函数：把槽位建好。
-pub fn attach(node: &mut Node, path: impl Into<String>) {
-    node.set_script(ScriptSlot::new(path));
+/// 把路径统一成比较用的形式。
+///
+/// Windows 上写 `assets\a.js`、别处写 `assets/a.js` 指的是同一个文件，
+/// 不统一的话热重载在其中一个平台上就是不响。
+fn normalize(path: &str) -> String {
+    path.replace('\\', "/")
 }

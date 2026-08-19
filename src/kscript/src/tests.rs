@@ -549,3 +549,112 @@ fn script_driven_motion_is_deterministic() {
 
     assert_eq!(run(), run());
 }
+
+// ── 热重载 ──
+
+#[test]
+fn reloading_a_script_rebuilds_its_instances() {
+    // 只换资源不换实例的话，改了文件也没反应——看起来像热重载坏了。
+    let manager = resources(&[("a.js", "return { _process() { emit('v1', 1); } };")]);
+    let mut runtime = ScriptRuntime::new();
+    let mut scene = Scene::new();
+    scene.add_node(Node::new("n").with_script("a.js"));
+
+    let before = process(&mut runtime, &mut scene, &manager, 1, 0.016);
+    assert_eq!(before[0].name, "v1");
+
+    // 换掉磁盘上的内容（这一步平时由 kasset 的热重载做）。
+    let manager = resources(&[("a.js", "return { _process() { emit('v2', 1); } };")]);
+    let reset = runtime.reload_path(&mut scene, std::path::Path::new("a.js"));
+    let after = process(&mut runtime, &mut scene, &manager, 1, 0.016);
+
+    assert_eq!(reset, 1, "没有作废旧实例");
+    assert_eq!(after[0].name, "v2", "跑的还是旧代码");
+}
+
+#[test]
+fn reloading_only_touches_scripts_with_that_path() {
+    let manager = resources(&[
+        ("a.js", "return { _process() { emit('a', 1); } };"),
+        ("b.js", "return { _process() { emit('b', 1); } };"),
+    ]);
+    let mut runtime = ScriptRuntime::new();
+    let mut scene = Scene::new();
+    let a = scene.add_node(Node::new("a").with_script("a.js"));
+    let b = scene.add_node(Node::new("b").with_script("b.js"));
+
+    process(&mut runtime, &mut scene, &manager, 1, 0.016);
+    let reset = runtime.reload_path(&mut scene, std::path::Path::new("a.js"));
+
+    assert_eq!(reset, 1);
+    assert!(!scene[a].script().unwrap().is_live(), "a 该被作废");
+    assert!(scene[b].script().unwrap().is_live(), "b 不该受牵连");
+}
+
+#[test]
+fn a_backslash_path_matches_a_forward_slash_slot() {
+    // Windows 上文件监视器给的是反斜杠路径，槽位里存的是正斜杠。
+    // 不统一的话热重载在 Windows 上就是不响。
+    let manager = resources(&[("dir/a.js", "return { _process() {} };")]);
+    let mut runtime = ScriptRuntime::new();
+    let mut scene = Scene::new();
+    scene.add_node(Node::new("n").with_script("dir/a.js"));
+    process(&mut runtime, &mut scene, &manager, 1, 0.016);
+
+    let reset = runtime.reload_path(&mut scene, std::path::Path::new("dir\\a.js"));
+
+    assert_eq!(reset, 1, "反斜杠路径没匹配上");
+}
+
+#[test]
+fn reloading_gives_a_previously_broken_script_another_chance() {
+    // 改错了、存盘、报错、改回来——这是热重载最常见的用法，
+    // 不重置失败标记的话第二次存盘就没反应了。
+    let manager = resources(&[("a.js", "return { this is broken };")]);
+    let mut runtime = ScriptRuntime::new();
+    let mut scene = Scene::new();
+    let node = scene.add_node(Node::new("n").with_script("a.js"));
+
+    process(&mut runtime, &mut scene, &manager, 1, 0.016);
+    assert!(scene[node].script().unwrap().failed);
+
+    let manager = resources(&[("a.js", "return { _process() { emit('fixed', 1); } };")]);
+    runtime.reload_path(&mut scene, std::path::Path::new("a.js"));
+    let signals = process(&mut runtime, &mut scene, &manager, 1, 0.016);
+
+    assert_eq!(signals.len(), 1);
+    assert_eq!(signals[0].name, "fixed");
+}
+
+#[test]
+fn reloading_an_unrelated_path_changes_nothing() {
+    let manager = resources(&[("a.js", "return { _process() { emit('a', 1); } };")]);
+    let mut runtime = ScriptRuntime::new();
+    let mut scene = Scene::new();
+    scene.add_node(Node::new("n").with_script("a.js"));
+    process(&mut runtime, &mut scene, &manager, 1, 0.016);
+
+    let reset = runtime.reload_path(&mut scene, std::path::Path::new("somewhere/else.js"));
+
+    assert_eq!(reset, 0);
+    assert_eq!(runtime.instance_count(), 1);
+}
+
+#[test]
+fn a_reloaded_script_starts_from_a_clean_state() {
+    // 新实例的闭包变量回到初值——这一条是设计取舍，不是 bug，
+    // 写成测试免得将来有人以为状态该保住。
+    let manager = resources(&[(
+        "a.js",
+        "let n = 0; return { _process() { n += 1; emit('n', n); } };",
+    )]);
+    let mut runtime = ScriptRuntime::new();
+    let mut scene = Scene::new();
+    scene.add_node(Node::new("n").with_script("a.js"));
+
+    process(&mut runtime, &mut scene, &manager, 3, 0.016);
+    runtime.reload_path(&mut scene, std::path::Path::new("a.js"));
+    let signals = process(&mut runtime, &mut scene, &manager, 1, 0.016);
+
+    assert_eq!(signals[0].value, 1.0, "重载后计数该从头开始");
+}

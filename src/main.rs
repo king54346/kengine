@@ -1017,80 +1017,13 @@ impl Game {
 
     // ───────────────────────── 脚本 ─────────────────────────
 
-    /// 自转 + 上下浮动的方块。写法照 GDScript：属性直接读写，写下去立刻生效。
-    const SPINNER_JS: &str = r#"
-let elapsed = 0;
-let direction = 1;
-let reports = 0;
-
-return {
-    _ready() {
-        print("spinner 醒了，挂在", self.name, "上");
-    },
-
-    _process(delta) {
-        elapsed += delta;
-
-        // 这一行就是 GDScript 的手感：读一个分量、加一点、写回去。
-        self.rotateY(delta * 1.5);
-        self.position.y += direction * delta * 0.8;
-
-        if (self.position.y > 1.6) direction = -1;
-        if (self.position.y < 0.4) direction = 1;
-
-        if (elapsed > 2 * (reports + 1)) {
-            reports += 1;
-            emit("spinner.tick", reports);
-        }
-    },
-};
-"#;
-
-    /// 绕着 spinner 转圈，并**当场**朝脚下打一条射线。
-    ///
-    /// 射线是这次重写的关键证据：旧的「快照进、命令出」架构里，脚本没法在
-    /// 中途查询、再根据结果决定下一步——只能把查询排到下一帧。
-    const FOLLOWER_JS: &str = r#"
-let angle = 0;
-let reported = false;
-
-return {
-    _process(delta) {
-        angle += delta * 2.0;
-
-        const target = getNode("ScriptSpinner");
-        if (target === null) return;   // 目标没了就安静待着，GDScript 也是给 null
-
-        // 跨节点读世界坐标，算出一个绕圈的偏移。
-        const center = target.globalPosition;
-        self.position = new Vector3(
-            center.x + Math.cos(angle) * 1.2,
-            center.y,
-            center.z + Math.sin(angle) * 1.2,
-        );
-
-        // 即时射线：当场拿到结果，当场据此行动。
-        const hit = raycast(self.globalPosition, Vector3.DOWN(), 10.0);
-        if (hit !== null && !reported) {
-            reported = true;
-            print("脚下", hit.distance.toFixed(2), "米是", hit.node ? hit.node.name : "?");
-            emit("follower.ground", hit.distance);
-        }
-    },
-};
-"#;
-
     /// 放两个被脚本驱动的方块。
     ///
-    /// 源码内嵌并登记为资源，与内置贴图、程序化音频同一个路子——
-    /// demo 不该往仓库里塞外部文件。真实项目里 `.js` 走 [`ScriptLoader`]
-    /// 从磁盘加载，那条路径由 kscript 的测试覆盖。
+    /// 脚本是**磁盘上的真实 `.js` 文件**，走 [`ScriptLoader`] 异步加载——
+    /// 节点上只记路径，加载完的那一帧才实例化。
+    /// 因为是文件，改完存盘就能热重载（见 [`Game::drive_scripts`]）。
     fn spawn_scripts(&mut self, ctx: &mut Context) {
         ctx.resources.add_loader(ScriptLoader);
-        ctx.resources
-            .register("builtin/spinner.js", Script::new(Self::SPINNER_JS, "spinner.js"));
-        ctx.resources
-            .register("builtin/follower.js", Script::new(Self::FOLLOWER_JS, "follower.js"));
 
         self.script_spinner = ctx.scene.add_node(
             Node::new("ScriptSpinner")
@@ -1098,7 +1031,7 @@ return {
                 .with_material(PbrMaterial::metal(Vec3::new(0.9, 0.6, 0.2), 0.3))
                 .with_position(Vec3::new(-6.0, 1.0, 0.0))
                 .with_scale(Vec3::splat(0.6))
-                .with_script("builtin/spinner.js"),
+                .with_script("assets/scripts/spinner.js"),
         );
 
         ctx.scene.add_node(
@@ -1109,10 +1042,12 @@ return {
                     Vec3::new(0.4, 0.8, 2.5),
                 ))
                 .with_scale(Vec3::splat(0.25))
-                .with_script("builtin/follower.js"),
+                .with_script("assets/scripts/follower.js"),
         );
 
-        klog::info!("脚本：橙色方块由 JS 驱动，蓝色小块绕着它转并朝脚下打射线；J 键开关");
+        klog::info!(
+            "脚本：assets/scripts/*.js 驱动两个方块；改完存盘即热重载，J 键开关"
+        );
     }
 
     /// 处理脚本信号，并响应按键。
