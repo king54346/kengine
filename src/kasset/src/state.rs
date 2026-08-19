@@ -122,7 +122,15 @@ impl UntypedResource {
     }
 
     /// 提交加载结果，并唤醒所有正在等待的任务。
-    pub(crate) fn commit(&self, result: Result<Box<dyn ResourceData>, LoadError>) {
+    ///
+    /// **按值拿走 `self`**，而且在唤醒之前就把它丢掉。加载任务持有的那一份
+    /// 强引用如果活到唤醒之后，等待者一恢复就会看到「引用计数 > 1」——
+    /// [`ResourceManager::collect_unused`](crate::ResourceManager::collect_unused)
+    /// 据此判断「还有人在用」，于是刚加载完的资源**回收不掉**。
+    ///
+    /// 这个窗口只在 IO 池被占满时才张开（任务提交完结果却迟迟没被回收），
+    /// 实测能让两百次里的八十几次漏收。
+    pub(crate) fn commit(self, result: Result<Box<dyn ResourceData>, LoadError>) {
         let new_state = match result {
             Ok(data) => ResourceState::Ok { data },
             Err(error) => ResourceState::Failed { error },
@@ -137,6 +145,10 @@ impl UntypedResource {
                 _ => Vec::new(),
             }
         };
+
+        // 唤醒之前先松手。waker 列表已经取到本地，之后不再需要这个句柄；
+        // 缓存里那一份仍然撑着资源本体，不会被提前释放。
+        drop(self);
 
         for waker in wakers {
             waker.wake();

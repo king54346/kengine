@@ -229,6 +229,43 @@ mod test {
         assert!(manager.is_idle());
     }
 
+
+    #[test]
+    fn a_freshly_loaded_resource_is_collectable_even_under_io_pressure() {
+        // 曾经的一个真 bug：加载任务在 `commit` 之后仍短暂持有一份强引用，
+        // 而 `commit` 内部就已经唤醒了等待者——于是 `block_on` 返回那一刻，
+        // 引用计数还是 2。`collect_unused` 据此判断「还有人在用」，
+        // **刚加载完的资源回收不掉**。
+        //
+        // 这个窗口只在 IO 池忙不过来时才张开，所以单独跑必过、
+        // 全工作区并行跑时偶发——最难查的那一类。
+        use ktask::IoTaskPool;
+
+        // 人为把池占满，把那个窗口撑开。修复前这里两百次里有八十几次漏收。
+        let pool = IoTaskPool::get_or_init(ktask::TaskPool::default);
+        for _ in 0..64 {
+            pool.spawn(async {
+                let start = std::time::Instant::now();
+                while start.elapsed() < std::time::Duration::from_millis(400) {
+                    std::hint::spin_loop();
+                }
+            })
+            .detach();
+        }
+
+        for round in 0..200 {
+            let manager = manager_with(&[("a.txt", "1"), ("b.txt", "2")]);
+            let _kept = manager.request_blocking::<Text>("a.txt").unwrap();
+            manager.request_blocking::<Text>("b.txt").unwrap();
+
+            assert_eq!(
+                manager.collect_unused(),
+                1,
+                "第 {round} 轮：外部已不持有的资源没被回收（加载任务还攥着引用）"
+            );
+        }
+    }
+
     #[test]
     fn collect_unused_keeps_externally_held_resources() {
         let manager = manager_with(&[("a.txt", "1"), ("b.txt", "2")]);

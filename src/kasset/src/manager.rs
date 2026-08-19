@@ -97,7 +97,9 @@ impl ResourceManager {
 
         let Some(loader) = state.loaders.find(&extension) else {
             klog::warn!("没有能处理 `{extension}` 的加载器：{}", path.display());
-            resource.commit(Err(LoadError::NoLoader { path, extension }));
+            resource
+                .clone()
+                .commit(Err(LoadError::NoLoader { path, extension }));
             return resource;
         };
 
