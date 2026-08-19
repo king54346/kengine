@@ -1,0 +1,84 @@
+# kengine CI
+#
+# 三道关，顺序是刻意的：格式 → lint → 测试，从快到慢。
+# 格式问题几秒就能报出来，不必等十分钟的测试跑完才发现少了个空格。
+#
+# `-D warnings` 是这套 CI 的重点。引擎此前只保证 `cargo build` 零警告，
+# clippy 从没接入过，攒到 22 条才一次清完。锁住之后，每条新 lint 在引入的
+# 那次改动里就会被拦下来，而不是攒成一次「清理专场」。
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # 构建失败时打全量后端回溯，CI 上没法手动复现，日志就是唯一线索。
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: 格式 + lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 工具链版本由 rust-toolchain.toml 决定，这里不写死。
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      # `--all-targets` 把测试与 bench 也算进来——它们同样是要维护的代码，
+      # 只查 lib 的话测试里的 lint 会一直漏过去。
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: 测试
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 一个平台挂了也要看到另一个的结果——不然「Windows 特有的问题」和
+      # 「所有平台都有的问题」在日志上分不出来。
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Linux 上 cpal 要 ALSA 的开发头文件才编得过。
+      # 测试本身用的是静音设备，不需要真的声卡。
+      - name: 安装音频依赖（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+  bench-compiles:
+    name: benches 能编过
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: 安装音频依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
+
+      # 只编不跑。CI runner 的性能波动比本机还大，跑出来的数字没有比较意义;
+      # 但 bench 代码会随 API 变动而失效，编不过要立刻知道。
+      - name: cargo bench --no-run
+        run: cargo bench --workspace --no-run

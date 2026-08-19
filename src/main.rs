@@ -1214,18 +1214,14 @@ impl Game {
             stats.cull_micros,
             stats.prepare_micros,
         );
+        if stats.gizmo_vertices > 0 {
+            klog::info!("调试线：{} 段", stats.gizmo_vertices / 2);
+        }
     }
 }
 
 impl Plugin for Game {
     fn init(&mut self, ctx: &mut Context) {
-        // TEMP-VALIDATION
-        ctx.scene.gizmos_mut().set_enabled(true);
-        ctx.debug.physics = PhysicsDebugOptions::all();
-        ctx.debug.scene = SceneDebugOptions {
-            bounds: true, bvh: true, skeletons: true,
-            node_axes: true, lights: true, cameras: true,
-        };
         // ── 输入映射：逻辑里只认动作名，不认具体按键 ──
         let bindings = ctx.input.bindings_mut();
         bindings.bind_action("pause", KeyCode::Space);
