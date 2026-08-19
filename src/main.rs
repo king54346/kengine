@@ -1071,6 +1071,73 @@ impl Game {
         klog::info!("脚本：assets/scripts/*.js 驱动两个方块；改完存盘即热重载，J 键开关");
     }
 
+    /// 调试绘制的开关。
+    ///
+    /// 这是 kgizmo 的演示，也是它自己的验收方式：物理线框对不上碰撞体、
+    /// BVH 的盒子互相穿插、骨架连错父节点——这些都得靠眼睛看。
+    fn drive_gizmos(&mut self, ctx: &mut Context) {
+        // 总开关。关着的时候连形状都不会去算，所以平时可以放心留着不管。
+        if ctx.input.action_just_pressed("gizmos") {
+            let on = ctx.scene.gizmos_mut().toggle();
+            klog::info!("调试绘制{}", if on { "已开启" } else { "已关闭" });
+            if on {
+                klog::info!("　└ F1 物理　F2 包围盒　F3 BVH　F4 骨架/光源/相机");
+            }
+        }
+
+        if ctx.input.action_just_pressed("gizmo_physics") {
+            let on = !ctx.debug.physics.collider_shapes;
+            ctx.debug.physics = if on {
+                PhysicsDebugOptions::default()
+            } else {
+                PhysicsDebugOptions::none()
+            };
+            klog::info!("物理线框{}", if on { "开" } else { "关" });
+        }
+
+        if ctx.input.action_just_pressed("gizmo_bounds") {
+            ctx.debug.scene.bounds = !ctx.debug.scene.bounds;
+            klog::info!("包围盒{}", if ctx.debug.scene.bounds { "开" } else { "关" });
+        }
+
+        if ctx.input.action_just_pressed("gizmo_bvh") {
+            ctx.debug.scene.bvh = !ctx.debug.scene.bvh;
+            klog::info!("BVH{}", if ctx.debug.scene.bvh { "开" } else { "关" });
+        }
+
+        if ctx.input.action_just_pressed("gizmo_rig") {
+            let on = !ctx.debug.scene.skeletons;
+            ctx.debug.scene.skeletons = on;
+            ctx.debug.scene.lights = on;
+            ctx.debug.scene.cameras = on;
+            klog::info!("骨架 / 光源 / 相机{}", if on { "开" } else { "关" });
+        }
+
+        // 手画的部分：即时模式没有句柄，想让它一直在就每帧都画。
+        // 这里画的是「士兵脚下的落点」，顺带演示即时射线 + 覆盖层。
+        if ctx.scene.gizmos().enabled()
+            && let Some(node) = ctx.scene.try_get(self.soldier_node)
+        {
+            let from = node.global_transform().w_axis.truncate() + Vec3::Y;
+            let hit = ctx
+                .scene
+                .cast_ray(&RayCastOptions::new(from, Vec3::NEG_Y, 10.0));
+            let gizmos = ctx.scene.gizmos_mut();
+            match hit {
+                Some(hit) => {
+                    gizmos.arrow(from, hit.point, GizmoColor::CYAN);
+                    gizmos.on_top(|g| {
+                        g.circle(hit.point, hit.normal, 0.3, GizmoColor::CYAN);
+                        g.arrow(hit.point, hit.point + hit.normal * 0.5, GizmoColor::YELLOW);
+                    });
+                }
+                // 什么都没打到也要画出来——不画的话「射线没打中」和
+                // 「射线没发出去」在屏幕上长得一样。
+                None => gizmos.ray(from, Vec3::NEG_Y, 10.0, GizmoColor::RED),
+            }
+        }
+    }
+
     /// 处理脚本信号，并响应按键。
     fn drive_scripts(&mut self, ctx: &mut Context) {
         // 脚本排在插件 update 之前跑，所以这里读到的是**本帧**的信号。
@@ -1152,6 +1219,13 @@ impl Game {
 
 impl Plugin for Game {
     fn init(&mut self, ctx: &mut Context) {
+        // TEMP-VALIDATION
+        ctx.scene.gizmos_mut().set_enabled(true);
+        ctx.debug.physics = PhysicsDebugOptions::all();
+        ctx.debug.scene = SceneDebugOptions {
+            bounds: true, bvh: true, skeletons: true,
+            node_axes: true, lights: true, cameras: true,
+        };
         // ── 输入映射：逻辑里只认动作名，不认具体按键 ──
         let bindings = ctx.input.bindings_mut();
         bindings.bind_action("pause", KeyCode::Space);
@@ -1172,6 +1246,11 @@ impl Plugin for Game {
         bindings.bind_action("beep", KeyCode::KeyB);
         bindings.bind_action("mute", KeyCode::KeyN);
         bindings.bind_action("script", KeyCode::KeyJ);
+        bindings.bind_action("gizmos", KeyCode::KeyH);
+        bindings.bind_action("gizmo_physics", KeyCode::F1);
+        bindings.bind_action("gizmo_bounds", KeyCode::F2);
+        bindings.bind_action("gizmo_bvh", KeyCode::F3);
+        bindings.bind_action("gizmo_rig", KeyCode::F4);
         bindings.bind_axis("horizontal", KeyCode::KeyD, KeyCode::KeyA);
         bindings.bind_axis("forward", KeyCode::KeyW, KeyCode::KeyS);
         bindings.bind_axis("vertical", KeyCode::KeyE, KeyCode::KeyQ);
@@ -1437,6 +1516,7 @@ impl Plugin for Game {
         self.drive_sprites(ctx);
         self.drive_audio(ctx);
         self.drive_scripts(ctx);
+        self.drive_gizmos(ctx);
         self.drive_roundtrip(ctx);
 
         if ctx.input.action_just_pressed("morph") {

@@ -21,12 +21,14 @@ mod streaming;
 mod transform;
 
 pub use audio::SoundSource;
+pub use debug::SceneDebugOptions;
 pub use kaudio::{Attenuation, AudioBuffer, AudioDevice, Listener, Spatial};
 pub use kcamera::{Camera, Frustum, Projection};
 pub use kgizmo::{Color, Gizmos, Layer};
 pub use kmath::{Aabb, Intersection};
 pub use kmesh::{Mesh, Vertex};
 pub use kparticle::ParticleSystem;
+pub use kphysics::PhysicsDebugOptions;
 pub use kphysics::{
     BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, CollisionEvent, InteractionGroups,
     JointDesc, JointHandle, JointKind, PhysicsWorld, RayCastOptions, RayHit, RigidBodyDesc,
@@ -35,8 +37,6 @@ pub use kphysics::{
 pub use node::Node;
 pub use physics::{Collider, Joint, RigidBody};
 pub use ragdoll::{LimbDesc, Ragdoll, RagdollBuilder, RagdollLimb, hinge_limits};
-pub use debug::SceneDebugOptions;
-pub use kphysics::PhysicsDebugOptions;
 pub use script::ScriptSlot;
 pub use serialize::SCENE_FORMAT_VERSION;
 pub use skin::{AnimationPlayer, Skin};
@@ -1161,9 +1161,8 @@ impl Scene {
     /// 两者必须同进同出，否则调试绘制会把正在用的相机也画出来。
     pub fn active_camera_node(&self) -> Option<Handle<Node>> {
         self.index.cameras.iter().copied().find(|&handle| {
-            self.try_get(handle).is_some_and(|node| {
-                node.camera().is_some_and(|c| c.enabled) && node.global_visible
-            })
+            self.try_get(handle)
+                .is_some_and(|node| node.camera().is_some_and(|c| c.enabled) && node.global_visible)
         })
     }
 

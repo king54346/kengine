@@ -308,7 +308,11 @@ mod tests {
     #[test]
     fn shader_compiles_and_exposes_both_entry_points() {
         let module = naga::front::wgsl::parse_str(kgizmo::GIZMO_WGSL).expect("着色器应当能解析");
-        let names: Vec<_> = module.entry_points.iter().map(|e| e.name.as_str()).collect();
+        let names: Vec<_> = module
+            .entry_points
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
         assert!(names.contains(&"gizmo_vs"));
         assert!(names.contains(&"gizmo_fs"));
     }

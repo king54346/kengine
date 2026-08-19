@@ -119,11 +119,7 @@ impl DebugRenderBackend for CallbackBackend<'_> {
         b: rapier3d::math::Vector,
         color: [f32; 4],
     ) {
-        (self.draw)(
-            Vec3::new(a.x, a.y, a.z),
-            Vec3::new(b.x, b.y, b.z),
-            color,
-        );
+        (self.draw)(Vec3::new(a.x, a.y, a.z), Vec3::new(b.x, b.y, b.z), color);
     }
 }
 
@@ -256,7 +252,10 @@ mod tests {
         world.debug_render(PhysicsDebugOptions::shapes_only(), &mut |_, _, c| {
             max_first = max_first.max(c[0]);
         });
-        assert!(max_first > 1.0, "第一分量是色相（0..=360），实测 {max_first}");
+        assert!(
+            max_first > 1.0,
+            "第一分量是色相（0..=360），实测 {max_first}"
+        );
     }
 
     #[test]

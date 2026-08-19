@@ -483,11 +483,11 @@ mod tests {
         let vertices = points(&gizmos);
         assert!(all_finite(&gizmos));
 
-        let nearest = vertices
+        let nearest = vertices.iter().map(|p| -p.z).fold(f32::INFINITY, f32::min);
+        let farthest = vertices
             .iter()
             .map(|p| -p.z)
-            .fold(f32::INFINITY, f32::min);
-        let farthest = vertices.iter().map(|p| -p.z).fold(f32::NEG_INFINITY, f32::max);
+            .fold(f32::NEG_INFINITY, f32::max);
         assert!((nearest - near).abs() < 1e-3, "近平面在 {nearest}");
         assert!((farthest - far).abs() < 1e-1, "远平面在 {farthest}");
     }

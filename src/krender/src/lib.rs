@@ -760,11 +760,8 @@ impl Renderer {
             wgpu::TextureFormat::Depth32Float,
         );
         // 调试线同样画在主 pass 里，格式必须一致。
-        let gizmos = GizmoResources::new(
-            &device,
-            post::HDR_FORMAT,
-            wgpu::TextureFormat::Depth32Float,
-        );
+        let gizmos =
+            GizmoResources::new(&device, post::HDR_FORMAT, wgpu::TextureFormat::Depth32Float);
 
         Self {
             surface,
@@ -1149,9 +1146,9 @@ impl Renderer {
         self.particle_scratch = scratch;
 
         // ── 调试线：整帧攒下来的线段一次传上去 ──
-        let gizmo_draw =
-            self.gizmos
-                .prepare(&self.device, &self.queue, scene.gizmos(), view_proj);
+        let gizmo_draw = self
+            .gizmos
+            .prepare(&self.device, &self.queue, scene.gizmos(), view_proj);
         stats.gizmo_vertices = scene.gizmos().len() as u32;
 
         // 统计在取交换链纹理之前定格：那一步会因垂直同步而阻塞，

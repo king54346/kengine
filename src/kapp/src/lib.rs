@@ -341,6 +341,7 @@ impl AppHandler for App {
             },
             scripts: ScriptRuntime::new(),
             script_events: Vec::new(),
+            debug: DebugDraw::none(),
         });
 
         // 看门人要在资源管理器建好之后再建，它一上来就要把现有资源的
@@ -462,18 +463,19 @@ impl AppHandler for App {
 
         exit |= self.run_systems(Stage::Transform);
 
-        // ── 调试叠加层 ──
-        // 排在这里有两个理由：`update` 刚跑完，BVH 与包围盒是本帧的；
-        // 而渲染还没开始，线段还来得及上传。
-        let debug = runtime.debug;
-        runtime.scene.debug_draw(debug.scene);
-        runtime.scene.debug_draw_physics(debug.physics);
-
         // ── Culling + Render：剔除在渲染器内部完成 ──
         exit |= self.run_systems(Stage::Culling);
         let Some(runtime) = self.runtime.as_mut() else {
             return FrameOutcome::Continue;
         };
+
+        // ── 调试叠加层 ──
+        // 排在渲染的前一步：`update` 刚跑完，BVH 与包围盒都是本帧的；
+        // 而且这是最后一个还来得及往缓冲里加线段的位置。
+        let debug = runtime.debug;
+        runtime.scene.debug_draw(debug.scene);
+        runtime.scene.debug_draw_physics(debug.physics);
+
         match runtime.renderer.render(&runtime.scene) {
             RenderOutcome::Ok | RenderOutcome::Skip => {}
             RenderOutcome::Reconfigure => {

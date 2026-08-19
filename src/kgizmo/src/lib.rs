@@ -225,7 +225,11 @@ impl Gizmos {
 
     /// 从一点出发、给定方向与长度的射线。
     pub fn ray(&mut self, origin: Vec3, direction: Vec3, length: f32, color: Color) {
-        self.line(origin, origin + direction.normalize_or_zero() * length, color);
+        self.line(
+            origin,
+            origin + direction.normalize_or_zero() * length,
+            color,
+        );
     }
 
     /// 一个「点」——三条互相垂直的小短线，比单个像素好找。

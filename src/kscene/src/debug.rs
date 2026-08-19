@@ -193,7 +193,7 @@ impl Scene {
             .iter()
             .filter_map(|h| {
                 let node = self.try_get(*h)?;
-                Some((node.global_transform, node.light()?.clone()))
+                Some((node.global_transform, *node.light()?))
             })
             .collect();
 
@@ -455,8 +455,10 @@ mod tests {
         assert!(scene.gizmos().is_empty());
 
         // 再加一个停用的相机，它不是活动的，应当被画出来。
-        let mut disabled = Camera::default();
-        disabled.enabled = false;
+        let disabled = Camera {
+            enabled: false,
+            ..Default::default()
+        };
         scene.add_node(
             Node::new("other")
                 .with_camera(disabled)

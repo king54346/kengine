@@ -61,6 +61,7 @@ pub use kasset;
 pub use kaudio;
 pub use kcamera;
 pub use kcore;
+pub use kgizmo;
 pub use kgltf;
 pub use kinput;
 pub use klight;
@@ -84,13 +85,16 @@ mod task;
 
 /// 常用类型的集中导出。
 pub mod prelude {
-    pub use kapp::{App, Context, PhysicsClock, Plugin, Stage};
+    pub use kapp::{App, Context, DebugDraw, PhysicsClock, Plugin, Stage};
     pub use kasset::{
         BoxedLoaderFuture, LoadError, Resource, ResourceData, ResourceIo, ResourceLoader,
         ResourceManager,
     };
     pub use kcamera::{Camera, Frustum, Projection};
     pub use kcore::pool::Handle;
+    // `Color` 在引擎里只有调试线用得上，导出时冠上来源，免得和材质的
+    // 颜色向量混起来。
+    pub use kgizmo::{Color as GizmoColor, Gizmos, Layer as GizmoLayer};
     pub use kgltf::{GltfLoader, Model};
     pub use kinput::{Binding, Input, KeyCode, MouseButton};
     pub use kmaterial::{Material, MaterialValue};
@@ -113,14 +117,14 @@ pub mod prelude {
     pub use kpbr::{Environment, PbrMaterial};
     pub use kphysics::{
         BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, CollisionEvent, InteractionGroups,
-        JointDesc, JointHandle, JointKind, PhysicsWorld, RayCastOptions, RayHit, RigidBodyDesc,
-        RigidBodyType, ShapeCastOptions, SphericalLimits,
+        JointDesc, JointHandle, JointKind, PhysicsDebugOptions, PhysicsWorld, RayCastOptions,
+        RayHit, RigidBodyDesc, RigidBodyType, ShapeCastOptions, SphericalLimits,
     };
     pub use krender::RenderStats;
     pub use kscene::{
         AnimationPlayer, Cell, Collider, Joint, LimbDesc, Node, Ragdoll, RagdollBuilder,
-        RagdollLimb, RigidBody, Scene, SceneRayHit, ScriptSlot, Skin, SoundSource, Streaming,
-        Transform, hinge_limits,
+        RagdollLimb, RigidBody, Scene, SceneDebugOptions, SceneRayHit, ScriptSlot, Skin,
+        SoundSource, Streaming, Transform, hinge_limits,
     };
     pub use kscript::{Script, ScriptLoader, ScriptRuntime, ScriptStats, Signal};
     pub use kshader::{Shader, ShaderLoader};

@@ -56,11 +56,11 @@ mod visit;
 mod world;
 
 pub use body::{BodyMut, BodyRef, RigidBodyDesc, RigidBodyType};
-pub use debug::PhysicsDebugOptions;
 pub use collider::{
     Axis, CoefficientCombineRule, ColliderDesc, ColliderMut, ColliderRef, ColliderShape,
     InteractionGroups, TriMeshData,
 };
+pub use debug::PhysicsDebugOptions;
 pub use events::{CollisionEvent, ContactForceEvent};
 pub use joint::{JointDesc, JointKind, SphericalLimits};
 pub use query::{PointProjection, RayCastOptions, RayHit, ShapeCastOptions, ShapeHit};
