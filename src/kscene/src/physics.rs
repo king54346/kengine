@@ -679,6 +679,63 @@ mod scene_test {
         );
     }
 
+
+
+    #[test]
+    fn collision_events_must_be_read_after_every_substep() {
+        // 这是 FixedUpdate 调度存在的具体理由，也是一个真出现过的 bug：
+        // `PhysicsWorld::step` 每次开头都清空事件队列。一帧跑多个子步时，
+        // 只在帧末读一次的话，除最后一个子步之外的事件**全部丢失**——
+        // 一次完整的「进入传感器 + 离开传感器」可能一个都收不到。
+        //
+        // 所以 `Stage::Physics` 跟着子步跑，而不是每帧一次。
+        fn count(read_every_substep: bool) -> usize {
+            let mut scene = Scene::new();
+            scene.add_node(
+                Node::new("sensor")
+                    .with_position(Vec3::Y * 3.0)
+                    .with_collider(Collider::new(
+                        ColliderDesc::cuboid(Vec3::splat(0.5))
+                            .as_sensor()
+                            .with_collision_events(),
+                    )),
+            );
+            scene.add_node(
+                Node::new("ball")
+                    .with_position(Vec3::Y * 8.0)
+                    .with_rigid_body(RigidBody::dynamic())
+                    .with_collider(Collider::new(
+                        ColliderDesc::ball(0.3).with_collision_events(),
+                    )),
+            );
+
+            let step = 1.0 / 60.0;
+            let mut seen = 0;
+            // 每帧 4 个子步：模拟掉帧后的追帧，或 15 FPS。
+            for _ in 0..120 {
+                for _ in 0..4 {
+                    scene.step_physics(step);
+                    scene.update();
+                    if read_every_substep {
+                        seen += scene.collision_events().len();
+                    }
+                }
+                if !read_every_substep {
+                    seen += scene.collision_events().len();
+                }
+            }
+            seen
+        }
+
+        // 球穿过传感器：一进一出，两个事件。
+        assert_eq!(count(true), 2, "逐子步读该收到进入与离开两个事件");
+        assert_eq!(
+            count(false),
+            0,
+            "只在帧末读会丢事件——这正是 Stage::Physics 必须跟着子步的原因"
+        );
+    }
+
     #[test]
     fn velocities_are_read_back_onto_the_component() {
         let mut scene = Scene::new();

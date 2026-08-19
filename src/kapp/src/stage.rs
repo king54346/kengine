@@ -12,9 +12,17 @@ pub enum Stage {
     Update,
     /// 逻辑收尾。适合放依赖 `Update` 结果的处理，如相机跟随。
     PostUpdate,
-    /// 推进物理并与场景图同步。引擎内置。
+    /// **定长**逻辑，每个物理子步**之前**跑一次。
     ///
-    /// 挂在这里的系统跑在物理步进**之后**，正好读碰撞事件与新的位姿。
+    /// 一帧可能跑 0 次（帧率高于物理步频）、1 次或多次（掉帧后追帧）。
+    /// 这里的 `ctx.dt` 恒等于物理步长，不是帧间隔。
+    ///
+    /// 施力、角色控制这类「结果不该随帧率变化」的逻辑写在这里。
+    FixedUpdate,
+    /// 读物理结果，每个物理子步**之后**跑一次。
+    ///
+    /// 跟着子步而不是每帧一次，是因为碰撞事件在每次步进开头就被清空——
+    /// 每帧只读一次的话，一帧内除最后一个子步之外的事件全都收不到。
     Physics,
     /// 重算世界变换与包围盒。引擎内置，用户一般不往这里挂。
     Transform,
@@ -28,10 +36,11 @@ pub enum Stage {
 
 impl Stage {
     /// 按执行顺序排列的全部阶段。
-    pub const ORDER: [Stage; 8] = [
+    pub const ORDER: [Stage; 9] = [
         Stage::Input,
         Stage::Update,
         Stage::PostUpdate,
+        Stage::FixedUpdate,
         Stage::Physics,
         Stage::Transform,
         Stage::Culling,
@@ -41,12 +50,17 @@ impl Stage {
 
     /// 用户逻辑通常可以安全挂载的阶段。
     ///
-    /// `Physics` / `Transform` / `Culling` / `Render` 由引擎内置流程占用，
+    /// `Transform` / `Culling` / `Render` 由引擎内置流程占用，
     /// 往里挂东西需要清楚自己在做什么。
     pub fn is_user_stage(&self) -> bool {
         matches!(
             self,
-            Stage::Input | Stage::Update | Stage::PostUpdate | Stage::FrameEnd
+            Stage::Input
+                | Stage::Update
+                | Stage::PostUpdate
+                | Stage::FixedUpdate
+                | Stage::Physics
+                | Stage::FrameEnd
         )
     }
 }
@@ -87,6 +101,23 @@ mod test {
         assert!(Stage::Update < Stage::Transform);
         assert!(Stage::Transform < Stage::Culling);
         assert!(Stage::Culling < Stage::Render);
+    }
+
+
+    #[test]
+    fn fixed_update_sits_between_logic_and_physics_results() {
+        // 定长逻辑要能读到这一帧的输入与游戏逻辑（所以排在 PostUpdate 之后），
+        // 又要在物理步进之前施力（所以排在 Physics 之前）。
+        assert!(Stage::PostUpdate < Stage::FixedUpdate);
+        assert!(Stage::FixedUpdate < Stage::Physics);
+        assert!(Stage::Physics < Stage::Transform);
+    }
+
+    #[test]
+    fn both_fixed_stages_are_open_to_user_code() {
+        // 这两个阶段就是给用户逻辑准备的：一个施力，一个读碰撞结果。
+        assert!(Stage::FixedUpdate.is_user_stage());
+        assert!(Stage::Physics.is_user_stage());
     }
 
     #[test]

@@ -76,6 +76,17 @@ pub trait Plugin: 'static {
         let _ = ctx;
     }
 
+    /// **定长**调用，对应 [`Stage::FixedUpdate`]，每个物理子步之前一次。
+    ///
+    /// 一帧可能调 0 次（帧率高于物理步频）、1 次或多次（掉帧后追帧）。
+    /// `ctx.dt` 在这里**恒等于物理步长**，不是帧间隔。
+    ///
+    /// 施力、驱动角色控制器、任何「结果不该随帧率变化」的逻辑都该写在这里；
+    /// 读输入、改 UI 那些每帧一次就够的，仍然写在 [`update`](Self::update)。
+    fn fixed_update(&mut self, ctx: &mut Context) {
+        let _ = ctx;
+    }
+
     /// 收到窗口事件。引擎已处理关闭与尺寸变化，这里拿到的是原始事件。
     fn on_os_event(&mut self, event: &WindowEvent, ctx: &mut Context) {
         let _ = (event, ctx);
@@ -214,12 +225,21 @@ impl App {
 
     /// 在给定阶段执行所有注册到该阶段的系统。
     fn run_systems(&mut self, stage: Stage) -> bool {
+        self.run_systems_with_dt(stage, None)
+    }
+
+    /// 在给定阶段执行系统，可覆盖 `ctx.dt`。
+    ///
+    /// 定长阶段要覆盖成**固定步长**：`FixedUpdate` 里写 `v * ctx.dt` 的代码
+    /// 拿到帧间隔的话，定长调度就白做了——那正是它要消除的东西。
+    fn run_systems_with_dt(&mut self, stage: Stage, dt_override: Option<f32>) -> bool {
         let Some(runtime) = self.runtime.as_mut() else {
             return false;
         };
 
         let now = Instant::now();
-        let dt = now.duration_since(runtime.last_frame).as_secs_f32();
+        let dt = dt_override
+            .unwrap_or_else(|| now.duration_since(runtime.last_frame).as_secs_f32());
         let elapsed = now.duration_since(runtime.start_time).as_secs_f32();
         let stats = runtime.renderer.stats();
 
@@ -249,14 +269,24 @@ impl App {
     /// 对每个插件调用 `callback`，返回是否有人请求退出。
     fn dispatch(
         &mut self,
+        callback: impl FnMut(&mut Box<dyn Plugin>, &mut Context),
+    ) -> bool {
+        self.dispatch_with_dt(callback, None)
+    }
+
+    /// 对每个插件调用 `callback`，可覆盖 `ctx.dt`。
+    fn dispatch_with_dt(
+        &mut self,
         mut callback: impl FnMut(&mut Box<dyn Plugin>, &mut Context),
+        dt_override: Option<f32>,
     ) -> bool {
         let Some(runtime) = self.runtime.as_mut() else {
             return false;
         };
 
         let now = Instant::now();
-        let dt = now.duration_since(runtime.last_frame).as_secs_f32();
+        let dt = dt_override
+            .unwrap_or_else(|| now.duration_since(runtime.last_frame).as_secs_f32());
         let elapsed = now.duration_since(runtime.start_time).as_secs_f32();
         let stats = runtime.renderer.stats();
 
@@ -387,10 +417,24 @@ impl AppHandler for App {
         // 排在世界变换之前：物理写的也是局部变换。
         let steps = runtime.physics_clock.accumulate(dt);
         let step = runtime.physics_clock.step();
+
+        // 每个子步都完整走一遍「FixedUpdate → 步进 → Physics」。
+        //
+        // `Physics` 必须**跟着子步**而不是每帧一次：`PhysicsWorld::step` 每次
+        // 开头都清空事件队列，一帧跑多个子步时，除最后一个之外的碰撞事件
+        // 会全部丢失——一次穿过传感器的完整「进入 + 离开」可能一个都收不到。
         for _ in 0..steps {
+            exit |= self.run_systems_with_dt(Stage::FixedUpdate, Some(step));
+            exit |= self.dispatch_with_dt(|plugin, ctx| plugin.fixed_update(ctx), Some(step));
+
+            let Some(runtime) = self.runtime.as_mut() else {
+                return FrameOutcome::Continue;
+            };
             runtime.scene.step_physics(step);
+
+            exit |= self.run_systems_with_dt(Stage::Physics, Some(step));
         }
-        exit |= self.run_systems(Stage::Physics);
+
         let Some(runtime) = self.runtime.as_mut() else {
             return FrameOutcome::Continue;
         };

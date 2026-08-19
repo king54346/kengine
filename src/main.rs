@@ -130,6 +130,14 @@ struct Game {
     beep_nodes: Vec<Handle<Node>>,
     /// 被 JS 驱动的方块。
     script_spinner: Handle<Node>,
+    /// 定长调度的计数：物理子步数、渲染帧数。
+    fixed_steps: u32,
+    frames: u32,
+    /// 上一次汇报时的计数与时刻，用来算**窗口内**速率。
+    ///
+    /// 从启动累计的话，加载期那几帧超长间隔（会被死亡螺旋保护截断）会把
+    /// 平均值永久拉低，看起来像定长调度没生效——其实只是启动artefact。
+    last_report: (u32, u32, f32),
     paused: bool,
 }
 
@@ -1139,7 +1147,7 @@ return {
         }
     }
 
-    fn report(ctx: &Context) {
+    fn report(&mut self, ctx: &Context) {
         let stats = ctx.stats;
         {
             let mixer = ctx.audio.mixer().lock();
@@ -1152,6 +1160,18 @@ return {
                 if ctx.audio.is_silent() { "（静默模式）" } else { "" },
             );
         }
+        let (last_frames, last_steps, last_time) = self.last_report;
+        let window = (ctx.elapsed - last_time).max(1e-3);
+        klog::info!(
+            "调度：窗口内 {} 帧 / {} 子步 → {:.1} FPS，{:.1} 步/秒（目标 60）；             累计 {} 帧 / {} 子步",
+            self.frames - last_frames,
+            self.fixed_steps - last_steps,
+            (self.frames - last_frames) as f32 / window,
+            (self.fixed_steps - last_steps) as f32 / window,
+            self.frames,
+            self.fixed_steps,
+        );
+        self.last_report = (self.frames, self.fixed_steps, ctx.elapsed);
         let physics = ctx.scene.physics().stats();
         klog::info!(
             "物理：刚体 {} / 碰撞体 {} / 关节 {}；单步 {} µs",
@@ -1441,7 +1461,22 @@ impl Plugin for Game {
         klog::info!("资源：F5 存盘，F9 读档；音频：B 放提示音，N 静音；脚本：J 开关");
     }
 
+    /// 定长逻辑：每个物理子步跑一次，`ctx.dt` 恒等于物理步长。
+    ///
+    /// 这里只做计数，用来在统计里对照「每秒子步数」是否稳定在 60——
+    /// 帧率无论 30 还是 240，这个数都该一样，那才叫定长。
+    fn fixed_update(&mut self, ctx: &mut Context) {
+        self.fixed_steps += 1;
+        debug_assert!(
+            (ctx.dt - 1.0 / 60.0).abs() < 1e-6,
+            "FixedUpdate 拿到的不是固定步长：{}",
+            ctx.dt
+        );
+    }
+
     fn update(&mut self, ctx: &mut Context) {
+        self.frames += 1;
+
         // 骨骼动画模型同样是异步加载的，就绪后建状态机。
         if !self.soldier_spawned {
             self.spawn_soldier(ctx);
@@ -1491,10 +1526,12 @@ impl Plugin for Game {
             );
         }
 
-        // 启动 2 秒后自动汇报一次渲染统计，方便无人值守时确认剔除生效。
-        if !self.stats_reported && ctx.elapsed > self.report_at.max(2.0) {
+        // 启动 2 秒后开始周期汇报，方便无人值守时确认剔除与定长调度都生效。
+        // 只报一次的话，读到的全是加载期那几帧的数字，看不到稳态。
+        if ctx.elapsed > self.report_at.max(2.0) {
             self.stats_reported = true;
-            Self::report(ctx);
+            self.report_at = ctx.elapsed + 5.0;
+            self.report(ctx);
         }
 
         // 配置是异步加载的，没就绪时用默认值，就绪后自动生效。
@@ -1515,7 +1552,7 @@ impl Plugin for Game {
         }
 
         if ctx.input.action_just_pressed("stats") {
-            Self::report(ctx);
+            self.report(ctx);
         }
 
         // 一次性喷发：爆炸、受击这类效果都是这么做的，
