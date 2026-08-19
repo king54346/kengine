@@ -13,6 +13,7 @@ mod cull;
 mod node;
 mod physics;
 mod ragdoll;
+mod script;
 mod serialize;
 mod skin;
 mod streaming;
@@ -32,6 +33,8 @@ pub use physics::{Collider, Joint, RigidBody};
 pub use ragdoll::{LimbDesc, Ragdoll, RagdollBuilder, RagdollLimb, hinge_limits};
 pub use serialize::SCENE_FORMAT_VERSION;
 pub use audio::SoundSource;
+pub use kscript::{Script, ScriptRuntime};
+pub use script::{ScriptComponent, ScriptEvent};
 pub use kaudio::{AudioBuffer, AudioDevice, Attenuation, Listener, Spatial};
 pub use skin::{AnimationPlayer, Skin};
 pub use streaming::{Cell, CellState, Streaming, StreamingReport};
@@ -1206,6 +1209,34 @@ impl Scene {
         self.sync_bodies_to_physics();
         self.sync_colliders_to_physics();
         self.sync_joints_to_physics();
+        // 排队的冲量与力必须等碰撞体建完才能施加。
+        //
+        // 刚体的质量是**碰撞体按密度算出来的**：只有刚体、没有碰撞体时质量为 0，
+        // 而 rapier 的 `apply_impulse` 是 `Δv = 冲量 × 质量倒数`——质量 0 时
+        // 倒数也是 0，冲量被**静默吞掉**，既不报错也没有任何迹象。
+        // 症状是「新生成的物体第一帧推不动」，第二帧起又正常，极难查。
+        self.flush_body_actions();
+    }
+
+    /// 把各刚体排队的操作推给物理世界。
+    fn flush_body_actions(&mut self) {
+        for position in 0..self.index.rigid_bodies.len() {
+            let handle = self.index.rigid_bodies[position];
+            let Some(mut body) = self
+                .nodes
+                .try_borrow_mut(handle)
+                .ok()
+                .and_then(|node| node.rigid_body.take())
+            else {
+                continue;
+            };
+
+            body.flush(&mut self.physics);
+
+            if let Ok(node) = self.nodes.try_borrow_mut(handle) {
+                node.rigid_body = Some(body);
+            }
+        }
     }
 
     fn sync_bodies_to_physics(&mut self) {
@@ -1260,7 +1291,7 @@ impl Scene {
                 },
             }
 
-            body.flush(&mut self.physics);
+            // 排队的动作不在这里 flush，见 `sync_to_physics` 的注释。
 
             if let Ok(node) = self.nodes.try_borrow_mut(handle) {
                 node.rigid_body = Some(body);

@@ -128,6 +128,8 @@ struct Game {
     beep_sound: Option<Resource<AudioBuffer>>,
     /// 正在播的一次性音效节点，播完就清掉。
     beep_nodes: Vec<Handle<Node>>,
+    /// 被 JS 驱动的方块。
+    script_spinner: Handle<Node>,
     paused: bool,
 }
 
@@ -1004,6 +1006,139 @@ impl Game {
         }
     }
 
+
+    // ───────────────────────── 脚本 ─────────────────────────
+
+    /// 一个自转 + 上下浮动的方块。
+    ///
+    /// 演示闭包状态（`elapsed` 每实例一份）、`engine.self()`、按 dt 积分、
+    /// 以及往 Rust 侧抛事件。
+    const SPINNER_JS: &str = r#"
+let elapsed = 0;
+let direction = 1;
+let reports = 0;
+
+return {
+    init() {
+        engine.log("spinner 启动，挂在「" + engine.name(engine.self()) + "」上");
+    },
+
+    update(dt) {
+        elapsed += dt;
+        const me = engine.self();
+        engine.rotateY(me, dt * 1.5);
+
+        // 读自己的位置，算出新的，写回去。
+        const p = engine.position(me);
+        if (p.y > 1.6) direction = -1;
+        if (p.y < 0.4) direction = 1;
+        engine.setPosition(me, p.x, p.y + direction * dt * 0.8, p.z);
+
+        // 每两秒给 Rust 侧抛一次事件。
+        if (elapsed > 2 * (reports + 1)) {
+            reports += 1;
+            engine.emit("spinner.tick", reports);
+        }
+    },
+
+    destroy() {
+        engine.log("spinner 收工，共跑了 " + elapsed.toFixed(1) + " 秒");
+    },
+};
+"#;
+
+    /// 绕着 spinner 转圈的小方块，演示跨节点访问。
+    ///
+    /// 它自己不记位置——每帧读目标的**世界**坐标再算偏移，
+    /// 所以目标怎么动它都跟得上。
+    const FOLLOWER_JS: &str = r#"
+let angle = 0;
+
+return {
+    update(dt) {
+        angle += dt * 2.0;
+
+        const target = engine.find("ScriptSpinner");
+        if (target === 4294967295) {
+            // 目标没了（被删了），安静待着就行。
+            return;
+        }
+
+        const t = engine.worldPosition(target);
+        engine.setPosition(
+            engine.self(),
+            t.x + Math.cos(angle) * 1.2,
+            t.y,
+            t.z + Math.sin(angle) * 1.2,
+        );
+    },
+};
+"#;
+
+    /// 放两个被脚本驱动的方块。
+    ///
+    /// 源码直接内嵌并登记为资源，与内置贴图、程序化音频同一个路子——
+    /// demo 不该往仓库里塞外部文件。真实项目里 `.js` 走 [`ScriptLoader`]
+    /// 从磁盘加载，那条路径由 kscript / kscene 的测试覆盖。
+    fn spawn_scripts(&mut self, ctx: &mut Context) {
+        ctx.resources.add_loader(ScriptLoader);
+
+        let spinner = ctx
+            .resources
+            .register("builtin/spinner.js", Script::new(Self::SPINNER_JS, "spinner.js"));
+        let follower = ctx
+            .resources
+            .register("builtin/follower.js", Script::new(Self::FOLLOWER_JS, "follower.js"));
+
+        self.script_spinner = ctx.scene.add_node(
+            Node::new("ScriptSpinner")
+                .with_mesh(Mesh::cube())
+                .with_material(PbrMaterial::metal(Vec3::new(0.9, 0.6, 0.2), 0.3))
+                .with_position(Vec3::new(-6.0, 1.0, 0.0))
+                .with_scale(Vec3::splat(0.6))
+                .with_script(ScriptComponent::new(spinner)),
+        );
+
+        ctx.scene.add_node(
+            Node::new("ScriptFollower")
+                .with_mesh(Mesh::cube())
+                .with_material(PbrMaterial::emissive(
+                    Vec3::new(0.3, 0.5, 1.0),
+                    Vec3::new(0.4, 0.8, 2.5),
+                ))
+                .with_scale(Vec3::splat(0.25))
+                .with_script(ScriptComponent::new(follower)),
+        );
+
+        klog::info!("脚本：橙色方块由 JS 驱动自转+浮动，蓝色小块绕着它转；J 键停掉脚本");
+    }
+
+    /// 处理脚本事件，并响应按键。
+    fn drive_scripts(&mut self, ctx: &mut Context) {
+        // 脚本排在插件 update 之前跑，所以这里读到的是**本帧**的事件。
+        for event in ctx.script_events {
+            klog::info!(
+                "收到脚本事件：{} = {}（来自节点 {:?}）",
+                event.name,
+                event.value,
+                event.source
+            );
+        }
+
+        if ctx.input.action_just_pressed("script") {
+            let Some(component) = ctx
+                .scene
+                .try_get_mut(self.script_spinner)
+                .and_then(Node::script_mut)
+            else {
+                return;
+            };
+            component.enabled = !component.enabled;
+            let enabled = component.enabled;
+            klog::info!("脚本{}", if enabled { "已恢复" } else { "已停用" });
+        }
+    }
+
     fn report(ctx: &Context) {
         let stats = ctx.stats;
         {
@@ -1062,6 +1197,7 @@ impl Plugin for Game {
         bindings.bind_action("load", KeyCode::F9);
         bindings.bind_action("beep", KeyCode::KeyB);
         bindings.bind_action("mute", KeyCode::KeyN);
+        bindings.bind_action("script", KeyCode::KeyJ);
         bindings.bind_axis("horizontal", KeyCode::KeyD, KeyCode::KeyA);
         bindings.bind_axis("forward", KeyCode::KeyW, KeyCode::KeyS);
         bindings.bind_axis("vertical", KeyCode::KeyE, KeyCode::KeyQ);
@@ -1294,6 +1430,7 @@ impl Plugin for Game {
         self.spawn_physics_playground(ctx);
         self.spawn_sprites(ctx);
         self.spawn_audio(ctx);
+        self.spawn_scripts(ctx);
         self.spawn_stress_field(ctx);
 
         klog::info!(
@@ -1301,7 +1438,7 @@ impl Plugin for Game {
              1/2/3 切换士兵动作，M 开关狮子形变，Esc 退出"
         );
         klog::info!("物理：P 开火（射线拾取 + 冲量），X 重码箱子，G 开关重力，K 切换士兵布娃娃");
-        klog::info!("资源：F5 存盘，F9 读档；音频：B 放提示音，N 静音");
+        klog::info!("资源：F5 存盘，F9 读档；音频：B 放提示音，N 静音；脚本：J 开关");
     }
 
     fn update(&mut self, ctx: &mut Context) {
@@ -1320,6 +1457,7 @@ impl Plugin for Game {
         self.drive_physics(ctx);
         self.drive_sprites(ctx);
         self.drive_audio(ctx);
+        self.drive_scripts(ctx);
         self.drive_roundtrip(ctx);
 
         if ctx.input.action_just_pressed("morph") {

@@ -46,6 +46,7 @@
 //! | `kparticle` | 粒子模拟（列式存储 + 并行） | ❌ |
 //! | `ksprite` | 2D 精灵 / 图集 / 帧动画 | ❌ |
 //! | `kaudio` | 混音 / 3D 音频 / 解码（cpal 出声） | ❌，独占 cpal |
+//! | `kscript` | JavaScript 脚本（boa） | ❌，独占 boa |
 //! | `kphysics` | 刚体物理（rapier 封装） | ❌，独占 rapier |
 //! | `kanim` | 骨骼动画（曲线 / 姿态 / 状态机 / IK） | ❌ |
 //! | `kinput` | 输入采集与映射 | ❌ |
@@ -72,6 +73,7 @@ pub use kphysics;
 pub use kpbr;
 pub use krender;
 pub use kscene;
+pub use kscript;
 pub use kshader;
 pub use ksprite;
 pub use ktask;
@@ -114,11 +116,14 @@ pub mod prelude {
     };
     pub use kscene::{
         AnimationPlayer, Cell, Collider, Joint, LimbDesc, Node, Ragdoll, RagdollBuilder,
-        RagdollLimb, RigidBody, Scene, SceneRayHit, Skin, SoundSource, Streaming, Transform,
-        hinge_limits,
+        RagdollLimb, RigidBody, Scene, SceneRayHit, ScriptComponent, ScriptEvent, Skin,
+        SoundSource, Streaming, Transform, hinge_limits,
     };
     pub use kaudio::{
         Attenuation, AudioBuffer, AudioDevice, AudioLoader, Listener, Mixer, Sound, Spatial, Status,
+    };
+    pub use kscript::{
+        Command as ScriptCommand, NodeRef, Script, ScriptLoader, ScriptRuntime, ScriptStats,
     };
     pub use kshader::{Shader, ShaderLoader};
     pub use ksprite::{Anchor, Atlas, PlayMode, Sprite, SpriteAnimation, SpriteRegion};

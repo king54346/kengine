@@ -40,6 +40,7 @@ pub use stage::Stage;
 
 use kasset::{HotReload, ResourceIo, ResourceManager};
 use kaudio::AudioDevice;
+use kscene::{ScriptEvent, ScriptRuntime};
 use kinput::Input;
 use krender::{RenderOutcome, Renderer};
 use kscene::Scene;
@@ -99,6 +100,9 @@ struct Runtime {
     /// 资源热重载看门人。关掉时为 `None`。
     hot_reload: Option<HotReload>,
     audio: AudioDevice,
+    scripts: ScriptRuntime,
+    /// 本帧脚本抛出的事件，供插件在 `update` 里读。
+    script_events: Vec<ScriptEvent>,
 }
 
 /// 应用。装载插件、注册系统，然后接管主循环。
@@ -233,6 +237,7 @@ impl App {
                 window: &runtime.window,
                 stats,
                 audio: &runtime.audio,
+                script_events: &runtime.script_events,
                 exit_requested: &mut exit_requested,
             };
             system(&mut context);
@@ -266,6 +271,7 @@ impl App {
                 window: &runtime.window,
                 stats,
                 audio: &runtime.audio,
+                script_events: &runtime.script_events,
                 exit_requested: &mut exit_requested,
             };
             callback(plugin, &mut context);
@@ -302,6 +308,8 @@ impl AppHandler for App {
             } else {
                 AudioDevice::silent()
             },
+            scripts: ScriptRuntime::new(),
+            script_events: Vec::new(),
         });
 
         // 看门人要在资源管理器建好之后再建，它一上来就要把现有资源的
@@ -342,6 +350,19 @@ impl AppHandler for App {
 
     fn on_frame(&mut self) -> FrameOutcome {
         let mut exit = false;
+
+        // ── Script ──
+        // 排在插件 `update` **之前**：脚本发出的事件这一帧就能被插件读到
+        // （`ctx.script_events`），不必等下一帧。
+        // 脚本读到的仍然是上一帧末的变换——快照语义本来如此，见 `kscript`。
+        if let Some(runtime) = self.runtime.as_mut() {
+            let now = Instant::now();
+            let dt = now.duration_since(runtime.last_frame).as_secs_f32();
+            let elapsed = now.duration_since(runtime.start_time).as_secs_f32();
+            runtime.script_events = runtime
+                .scene
+                .tick_scripts(&mut runtime.scripts, dt, elapsed);
+        }
 
         // ── Input / Update / PostUpdate ──
         exit |= self.run_systems(Stage::Input);

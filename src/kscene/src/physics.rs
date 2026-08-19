@@ -651,6 +651,35 @@ mod scene_test {
     }
 
     #[test]
+    fn an_impulse_works_on_the_very_frame_the_body_is_created() {
+        // 曾经的一个真 bug：刚体先建好、冲量当场 flush，而碰撞体要到下一步
+        // 才加上——那时刚体质量还是 0，而 rapier 的 `Δv = 冲量 × 质量倒数`
+        // 在质量为 0 时倒数也是 0，**冲量被静默吞掉**，不报错也没有任何迹象。
+        // 症状是「新生成的物体第一帧推不动」，第二帧起又正常。
+        // 抛射物、爆炸击飞这类「生成即施力」的用法全中招。
+        let mut scene = Scene::new();
+        let ball = scene.add_node(
+            Node::new("projectile")
+                .with_rigid_body(RigidBody::new(
+                    kphysics::RigidBodyDesc::dynamic().with_gravity_scale(0.0),
+                ))
+                .with_collider(Collider::ball(0.5)),
+        );
+
+        // 建好的当帧就施加冲量，中间不插任何一次 step。
+        scene[ball].rigid_body_mut().unwrap().apply_impulse(Vec3::Y * 10.0);
+        scene.step_physics(1.0 / 60.0);
+
+        let mass = 4.0 / 3.0 * std::f32::consts::PI * 0.5f32.powi(3);
+        let velocity = scene[ball].rigid_body().unwrap().linvel().y;
+        assert!(
+            (velocity - 10.0 / mass).abs() < 0.5,
+            "冲量没生效或算错了：{velocity}，期望 {}",
+            10.0 / mass
+        );
+    }
+
+    #[test]
     fn velocities_are_read_back_onto_the_component() {
         let mut scene = Scene::new();
         add_ground(&mut scene);

@@ -4,7 +4,7 @@ use kasset::ResourceManager;
 use kaudio::AudioDevice;
 use kinput::Input;
 use krender::RenderStats;
-use kscene::Scene;
+use kscene::{Scene, ScriptEvent};
 use winit::window::Window;
 
 /// 引擎在回调中交给用户的一组引用。
@@ -28,6 +28,10 @@ pub struct Context<'a> {
     /// 场景里挂了 [`SoundSource`](kscene::SoundSource) 的节点会由引擎自动
     /// 同步，一般不必碰这个。
     pub audio: &'a AudioDevice,
+    /// 本帧脚本抛出的事件（`engine.emit(name, value)`）。
+    ///
+    /// 脚本排在插件的 `update` 之前跑，所以这里拿到的是**本帧**的事件。
+    pub script_events: &'a [ScriptEvent],
     pub(crate) exit_requested: &'a mut bool,
 }
 
