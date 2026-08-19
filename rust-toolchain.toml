@@ -1,0 +1,8 @@
+# 钉住工具链版本。
+#
+# 不钉的话 CI 会跟着 stable 漂：clippy 每次发版都会加新 lint，而 CI 上开着
+# `-D warnings`，于是「什么都没改却红了」会周期性发生。要升版本就改这里，
+# 顺手把新 lint 一次清完，而不是让它随机砸在某次无关的提交上。
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
