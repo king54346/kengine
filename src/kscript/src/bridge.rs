@@ -145,6 +145,9 @@ pub(crate) fn register(context: &mut Context) {
                             let node = scene.try_get(handle)?;
                             let vector = match field {
                                 FIELD_SCALE => node.transform.scale,
+                                FIELD_POSITION => node.transform.position,
+                                // 认不出的字段号只可能是前奏与桥对不上了，
+                                // 退回位置比返回垃圾值好排查。
                                 _ => node.transform.position,
                             };
                             Some(match axis {
@@ -177,6 +180,7 @@ pub(crate) fn register(context: &mut Context) {
                         };
                         let vector = match field {
                             FIELD_SCALE => &mut node.transform.scale,
+                            FIELD_POSITION => &mut node.transform.position,
                             _ => &mut node.transform.position,
                         };
                         match axis {
@@ -204,6 +208,7 @@ pub(crate) fn register(context: &mut Context) {
                         if let Some(node) = scene.try_get_mut(handle) {
                             match field {
                                 FIELD_SCALE => node.transform.scale = value,
+                                FIELD_POSITION => node.transform.position = value,
                                 _ => node.transform.position = value,
                             }
                         }
