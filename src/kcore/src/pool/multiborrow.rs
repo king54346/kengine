@@ -1,5 +1,4 @@
 use super::{Handle, ObjectOrVariant, PayloadContainer, Pool, PoolError, RefCounter};
-use crate::reflect::Reflect;
 use std::{
     cell::RefCell,
     cmp::Ordering,
@@ -297,46 +296,6 @@ where
         self.free_indices.borrow_mut().push(handle.index);
 
         Ok(payload)
-    }
-}
-
-impl<'a, T, P> MultiBorrowContext<'a, T, P>
-where
-    T: Sized + Reflect,
-    P: PayloadContainer<Element = T> + 'static,
-{
-    /// 尝试借用指定句柄的节点，并向下转型为指定类型。
-    /// 若转型失败，则尝试查找该类型的字段。
-    #[inline]
-    pub fn try_get_or_field_ref<'b: 'a, C>(
-        &'b self,
-        handle: Handle<T>,
-    ) -> Result<Ref<'a, 'b, C>, PoolError>
-    where
-        C: Reflect,
-    {
-        self.try_get_internal(handle, move |obj| {
-            (obj as &dyn Reflect)
-                .self_or_field_ref::<C>()
-                .ok_or(PoolError::NoSuchField(handle.into()))
-        })
-    }
-
-    /// 尝试借用指定句柄的节点，并向下转型为指定类型（可变版本）。
-    /// 若转型失败，则尝试查找该类型的字段。
-    #[inline]
-    pub fn try_get_or_field_mut<'b: 'a, C>(
-        &'b self,
-        handle: Handle<T>,
-    ) -> Result<RefMut<'a, 'b, C>, PoolError>
-    where
-        C: Reflect,
-    {
-        self.try_get_mut_internal(handle, move |obj| {
-            (obj as &mut dyn Reflect)
-                .self_or_field_mut::<C>()
-                .ok_or(PoolError::NoSuchField(handle.into()))
-        })
     }
 }
 

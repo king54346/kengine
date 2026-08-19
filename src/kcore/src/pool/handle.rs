@@ -1,8 +1,6 @@
 use crate::pool::ObjectOrVariant;
-use crate::reflect::{ReflectHandle, TypeInfo};
-use crate::{pool::INVALID_GENERATION, reflect::prelude::*, visitor::prelude::*};
+use crate::{pool::INVALID_GENERATION, visitor::prelude::*};
 use serde::{Deserialize, Serialize};
-use std::any::{type_name, TypeId};
 use std::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter},
@@ -24,174 +22,6 @@ pub struct Handle<T> {
     pub(super) type_marker: PhantomData<T>,
 }
 
-impl<T: Reflect> ReflectHandle for Handle<T> {
-    fn reflect_inner_type_id(&self) -> TypeId {
-        TypeId::of::<T>()
-    }
-
-    fn reflect_inner_type_name(&self) -> &'static str {
-        type_name::<T>()
-    }
-
-    fn reflect_is_some(&self) -> bool {
-        self.is_some()
-    }
-
-    fn reflect_set_index(&mut self, index: u32) {
-        self.index = index;
-    }
-
-    fn reflect_index(&self) -> u32 {
-        self.index
-    }
-
-    fn reflect_set_generation(&mut self, generation: u32) {
-        self.generation = generation;
-    }
-
-    fn reflect_generation(&self) -> u32 {
-        self.generation
-    }
-
-    fn reflect_as_erased(&self) -> ErasedHandle {
-        ErasedHandle::new(self.index, self.generation)
-    }
-}
-
-static INDEX_METADATA: FieldMetadata = FieldMetadata {
-    name: "Index",
-    display_name: "Index",
-    tag: "",
-    read_only: false,
-    immutable_collection: false,
-    min_value: None,
-    max_value: None,
-    step: None,
-    precision: None,
-    doc: "",
-};
-
-static GENERATION_METADATA: FieldMetadata = FieldMetadata {
-    name: "Generation",
-    display_name: "Generation",
-    tag: "",
-    read_only: false,
-    immutable_collection: false,
-    min_value: None,
-    max_value: None,
-    step: None,
-    precision: None,
-    doc: "",
-};
-
-impl<T: Reflect> Reflect for Handle<T> {
-    fn type_info() -> TypeInfo {
-        TypeInfo {
-            source_path: file!(),
-            type_name: type_name::<Self>(),
-            assembly_name: env!("CARGO_PKG_NAME"),
-            doc_comment: "",
-            derived_types: T::type_info().derived_types,
-            type_uuid: combine_uuids(
-                uuid::uuid!("30c0668d-7a2c-47e6-8c7b-208fdcc905a1"),
-                T::type_info().type_uuid,
-            ),
-        }
-    }
-
-    fn type_info_ref(&self) -> TypeInfo {
-        Self::type_info()
-    }
-
-    fn try_clone_box(&self) -> Option<Box<dyn Reflect>> {
-        Some(Box::new(*self))
-    }
-
-    fn fields_ref(&self, func: &mut dyn FnMut(&[FieldRef])) {
-        func(&[
-            {
-                FieldRef {
-                    metadata: &INDEX_METADATA,
-                    value: &self.index,
-                }
-            },
-            {
-                FieldRef {
-                    metadata: &GENERATION_METADATA,
-                    value: &self.generation,
-                }
-            },
-        ])
-    }
-
-    fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [FieldMut])) {
-        func(&mut [
-            {
-                FieldMut {
-                    metadata: &INDEX_METADATA,
-                    value: &mut self.index,
-                }
-            },
-            {
-                FieldMut {
-                    metadata: &GENERATION_METADATA,
-                    value: &mut self.generation,
-                }
-            },
-        ])
-    }
-
-    fn set(&mut self, value: Box<dyn Reflect>) -> Result<Box<dyn Reflect>, Box<dyn Reflect>> {
-        let this = std::mem::replace(self, value.take()?);
-        Ok(Box::new(this))
-    }
-
-    fn as_handle(&self) -> Option<&dyn ReflectHandle> {
-        Some(self)
-    }
-
-    fn as_handle_mut(&mut self) -> Option<&mut dyn ReflectHandle> {
-        Some(self)
-    }
-
-    fn field_direct_ref(&self, index: usize) -> Option<FieldRef<'_, '_>> {
-        if index == 0 {
-            Some(FieldRef {
-                metadata: &INDEX_METADATA,
-                value: &self.index,
-            })
-        } else if index == 1 {
-            Some(FieldRef {
-                metadata: &GENERATION_METADATA,
-                value: &self.generation,
-            })
-        } else {
-            None
-        }
-    }
-
-    fn field_direct_mut(&mut self, index: usize) -> Option<FieldMut<'_, '_>> {
-        if index == 0 {
-            Some(FieldMut {
-                metadata: &INDEX_METADATA,
-                value: &mut self.index,
-            })
-        } else if index == 1 {
-            Some(FieldMut {
-                metadata: &GENERATION_METADATA,
-                value: &mut self.generation,
-            })
-        } else {
-            None
-        }
-    }
-
-    fn try_compare(&self, other: &dyn Reflect) -> Option<bool> {
-        (other as &dyn std::any::Any)
-            .downcast_ref::<Self>()
-            .map(|other| other == self)
-    }
-}
 
 impl<T> Copy for Handle<T> {}
 
@@ -398,15 +228,12 @@ impl Debug for AtomicHandle {
 
 /// 类型擦除的句柄。
 #[derive(
-    Copy, Clone, Debug, Ord, PartialOrd, PartialEq, Eq, Hash, Reflect, Visit, Serialize, Deserialize,
+    Copy, Clone, Debug, Ord, PartialOrd, PartialEq, Eq, Hash, Visit, Serialize, Deserialize,
 )]
-#[reflect(type_uuid = "50131acc-8b3b-40b5-b495-e2c552c94db3")]
 pub struct ErasedHandle {
     /// 对象在对象池中的索引。
-    #[reflect(read_only)]
     index: u32,
     /// 代次编号：当记录的代次与句柄的代次相同时，句柄才有效。
-    #[reflect(read_only)]
     generation: u32,
 }
 

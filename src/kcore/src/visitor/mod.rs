@@ -243,13 +243,8 @@ bitflags! {
     /// Flags that can be used to influence the behavior of [Visit::visit] methods.
     #[derive(Debug)]
     pub struct VisitorFlags: u32 {
-        /// No flags set, do nothing special.
+        /// 无特殊行为。
         const NONE = 0;
-        /// Tell [crate::variable::InheritableVariable::visit] to assume that it's
-        /// [VariableFlags::MODIFIED](create::variable::VariableFlags::MODIFIED) is set,
-        /// and therefore write its data. Otherwise, InheritableVariable has the special
-        /// property of *not writing itself* when the `MODIFIED` flag is not set.
-        const SERIALIZE_EVERYTHING = 1 << 1;
     }
 }
 
@@ -295,7 +290,7 @@ pub struct Visitor {
     version: u32,
     /// 存储读写时可能需要的辅助对象。
     pub blackboard: Blackboard,
-    /// 可激活某些 Visit 实现特殊行为的标志，如 [crate::variable::InheritableVariable]。
+    /// 可激活某些 Visit 实现特殊行为的标志。
     pub flags: VisitorFlags,
 }
 
@@ -384,8 +379,6 @@ pub trait Visit {
     ///
     /// 有特殊需求的类型可以选择以非常规方式读写。例如，某个值可以尝试以多种方式
     /// 读取数据，以保持与旧版本数据格式的向后兼容性。
-    ///
-    /// 参见 [crate::variable::InheritableVariable::visit] 的特殊实现示例。
     fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult;
 }
 

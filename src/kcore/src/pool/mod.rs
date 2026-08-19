@@ -15,8 +15,7 @@
 //! 连续内存块提高了内存操作效率——CPU 会逐块将数据加载到缓存中，
 //! 避免了可能导致缓存失效的间接引用，即所谓的缓存友好性。
 
-use crate::{reflect::prelude::*, visitor::prelude::*};
-use std::any::type_name;
+use crate::visitor::prelude::*;
 use std::cell::UnsafeCell;
 use std::fmt::{Display, Formatter};
 use std::{
@@ -30,7 +29,6 @@ pub mod handle;
 pub mod multiborrow;
 pub mod payload;
 
-use crate::reflect::TypeInfo;
 pub use handle::*;
 pub use multiborrow::*;
 pub use payload::*;
@@ -111,99 +109,6 @@ where
     }
     fn convert_to_dest_type_mut(object: &mut T) -> Option<&mut Self> {
         PhantomData::<U>::convert_to_dest_type_helper_mut(object)
-    }
-}
-
-impl<T, P> Reflect for Pool<T, P>
-where
-    T: Reflect + PartialEq,
-    P: PayloadContainer<Element = T> + Reflect + PartialEq,
-    Pool<T, P>: Clone,
-{
-    fn type_info() -> TypeInfo {
-        TypeInfo {
-            source_path: file!(),
-            type_name: type_name::<Self>(),
-            assembly_name: env!("CARGO_PKG_NAME"),
-            doc_comment: "",
-            derived_types: &[],
-            type_uuid: combine_uuids(
-                uuid!("1f615965-820a-4948-970d-8e99cd588006"),
-                combine_uuids(T::type_info().type_uuid, P::type_info().type_uuid),
-            ),
-        }
-    }
-
-    fn type_info_ref(&self) -> TypeInfo {
-        Self::type_info()
-    }
-
-    fn try_clone_box(&self) -> Option<Box<dyn Reflect>> {
-        Some(Box::new(self.clone()))
-    }
-
-    fn try_compare(&self, other: &dyn Reflect) -> Option<bool> {
-        (other as &dyn std::any::Any)
-            .downcast_ref::<Self>()
-            .map(|other| other == self)
-    }
-
-    #[inline]
-    fn fields_ref(&self, func: &mut dyn FnMut(&[FieldRef])) {
-        func(&[])
-    }
-
-    #[inline]
-    fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [FieldMut])) {
-        func(&mut [])
-    }
-
-    #[inline]
-    fn set(&mut self, value: Box<dyn Reflect>) -> Result<Box<dyn Reflect>, Box<dyn Reflect>> {
-        let this = std::mem::replace(self, value.take()?);
-        Ok(Box::new(this))
-    }
-
-    fn field_direct_ref(&self, _index: usize) -> Option<FieldRef<'_, '_>> {
-        None
-    }
-
-    fn field_direct_mut(&mut self, _index: usize) -> Option<FieldMut<'_, '_>> {
-        None
-    }
-
-    #[inline]
-    fn as_array(&self) -> Option<&dyn ReflectArray> {
-        Some(self)
-    }
-
-    #[inline]
-    fn as_array_mut(&mut self) -> Option<&mut dyn ReflectArray> {
-        Some(self)
-    }
-}
-
-impl<T, P> ReflectArray for Pool<T, P>
-where
-    T: Reflect + PartialEq,
-    P: PayloadContainer<Element = T> + Reflect + PartialEq,
-    Pool<T, P>: Clone,
-{
-    #[inline]
-    fn reflect_index(&self, index: usize) -> Option<&dyn Reflect> {
-        self.at(index as u32).ok().map(|p| p as &dyn Reflect)
-    }
-
-    #[inline]
-    fn reflect_index_mut(&mut self, index: usize) -> Option<&mut dyn Reflect> {
-        self.at_mut(index as u32)
-            .ok()
-            .map(|p| p as &mut dyn Reflect)
-    }
-
-    #[inline]
-    fn reflect_len(&self) -> usize {
-        self.get_capacity() as usize
     }
 }
 
@@ -1319,38 +1224,6 @@ where
             }
         }
         Handle::NONE
-    }
-}
-
-impl<T, P> Pool<T, P>
-where
-    T: Reflect,
-    P: PayloadContainer<Element = T> + 'static,
-{
-    /// 尝试借用对象并获取其指定类型的分量（共享引用）。
-    #[inline]
-    pub fn try_get_or_field_ref<C>(&self, handle: Handle<T>) -> Result<&C, PoolError>
-    where
-        C: Reflect,
-    {
-        self.try_borrow(handle).and_then(|n| {
-            (n as &dyn Reflect)
-                .self_or_field_ref::<C>()
-                .ok_or(PoolError::NoSuchField(handle.into()))
-        })
-    }
-
-    /// 尝试借用对象并获取其指定类型的分量（可变引用）。
-    #[inline]
-    pub fn try_get_or_field_mut<C>(&mut self, handle: Handle<T>) -> Result<&mut C, PoolError>
-    where
-        C: Reflect,
-    {
-        self.try_borrow_mut(handle).and_then(|n| {
-            (n as &mut dyn Reflect)
-                .self_or_field_mut::<C>()
-                .ok_or(PoolError::NoSuchField(handle.into()))
-        })
     }
 }
 
