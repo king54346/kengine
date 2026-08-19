@@ -16,12 +16,12 @@ pub use post::PostSettings;
 pub use tonemap::ToneMapping;
 
 use kcamera::{Camera, Frustum};
-use particle::ParticleResources;
-use post::PostProcess;
-use kparticle::GpuParticle;
 use klight::{GpuLight, MAX_LIGHTS, shadow::ShadowSettings};
 use kmesh::{MorphDelta, SkinVertex, Vertex};
+use kparticle::GpuParticle;
 use kscene::Scene;
+use particle::ParticleResources;
+use post::PostProcess;
 
 /// 顶点属性布局。字段顺序必须与 [`Vertex`] 及着色器的 `@location` 一致。
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
@@ -55,12 +55,12 @@ fn skin_layout() -> wgpu::VertexBufferLayout<'static> {
     }
 }
 use bytemuck::{Pod, Zeroable};
+use fxhash::FxHashMap;
 use kcore::uuid::Uuid;
 use kmaterial::Material;
 use kmath::{Mat4, Vec3};
 use kpbr::GpuEnvironment;
 use ktexture::{FilterMode, Texture, TextureFormat, WrapMode};
-use fxhash::FxHashMap;
 use std::{num::NonZeroU64, sync::Arc, time::Instant};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -744,8 +744,7 @@ impl Renderer {
             ),
         };
 
-        let brdf_bind_group =
-            create_brdf_lut(&device, &queue, &brdf_layout, &shadow.depth_view);
+        let brdf_bind_group = create_brdf_lut(&device, &queue, &brdf_layout, &shadow.depth_view);
         let post = PostProcess::new(&device, config.width, config.height, config.format);
         // 粒子画在主 pass 里，因此目标格式与深度格式都要与主 pass 一致。
         let particles = ParticleResources::new(
@@ -755,7 +754,7 @@ impl Renderer {
             wgpu::TextureFormat::Depth32Float,
         );
 
-        let renderer = Self {
+        Self {
             surface,
             device,
             queue,
@@ -793,9 +792,7 @@ impl Renderer {
             default_textures,
             meshes: FxHashMap::default(),
             stats: RenderStats::default(),
-        };
-
-        renderer
+        }
     }
 
     /// 当前渲染目标尺寸。
@@ -829,7 +826,8 @@ impl Renderer {
         self.config.height = new_size.height;
         self.surface.configure(&self.device, &self.config);
         self.depth_view = Self::create_depth_view(&self.device, &self.config);
-        self.post.resize(&self.device, new_size.width, new_size.height);
+        self.post
+            .resize(&self.device, new_size.width, new_size.height);
     }
 
     /// 绘制一帧。
@@ -869,9 +867,7 @@ impl Renderer {
                 continue;
             }
             if light_count >= MAX_LIGHTS {
-                klog::once!(klog::warn!(
-                    "场景光源超过上限 {MAX_LIGHTS}，多余的已被忽略"
-                ));
+                klog::once!(klog::warn!("场景光源超过上限 {MAX_LIGHTS}，多余的已被忽略"));
                 break;
             }
             lights[light_count] = light.to_gpu(transform);
@@ -1149,9 +1145,8 @@ impl Renderer {
         self.morph_weight_scratch = morph_weights;
 
         let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
-                t
-            }
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
                 return RenderOutcome::Skip;
             }
@@ -1184,8 +1179,7 @@ impl Renderer {
                 self.shadow.joint_capacity = capacity;
             }
             // 深度 pass 有自己的一份形变权重缓冲，数据同主 pass。
-            let shadow_weights_grew =
-                morph_weight_count as u64 > self.shadow.morph_weight_capacity;
+            let shadow_weights_grew = morph_weight_count as u64 > self.shadow.morph_weight_capacity;
             if shadow_weights_grew {
                 let capacity = (morph_weight_count as u64).next_power_of_two();
                 self.shadow.morph_weight_buffer =
@@ -1594,7 +1588,6 @@ impl Renderer {
         texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
 }
-
 
 /// 建一条标准着色管线。静态与蒙皮只差入口函数与顶点布局。
 fn create_standard_pipeline(
@@ -2204,7 +2197,6 @@ mod test {
         assert_eq!(shader.fragment_entry(), Some("fs_main"));
     }
 
-
     #[test]
     fn a_plain_material_gets_an_identity_uv_transform() {
         // 普通模型完全不该受精灵那套 UV 变换影响。
@@ -2233,8 +2225,8 @@ mod test {
 
     #[test]
     fn only_the_missing_half_falls_back() {
-        let material =
-            kmaterial::Material::standard().with(kpbr::standard::UV_OFFSET, kmath::Vec2::splat(0.25));
+        let material = kmaterial::Material::standard()
+            .with(kpbr::standard::UV_OFFSET, kmath::Vec2::splat(0.25));
 
         assert_eq!(uv_transform_of(&material), [1.0, 1.0, 0.25, 0.25]);
     }
@@ -2365,7 +2357,7 @@ mod test {
 
     #[test]
     fn batches_cover_every_object_exactly_once() {
-        let draws: Vec<DrawCall> = (0..64).map(|i| draw(i % 5, (i % 3) as u128)).collect();
+        let draws: Vec<DrawCall> = (0..64).map(|i| draw(i % 5, i % 3)).collect();
 
         let (batches, instances) = batch(&draws);
 
@@ -2412,7 +2404,11 @@ mod test {
 
         assert_eq!(batches.len(), 2);
         for batch in &batches {
-            let expected = if batch.mesh_id == Uuid::from_u128(1) { 2.0 } else { 1.0 };
+            let expected = if batch.mesh_id == Uuid::from_u128(1) {
+                2.0
+            } else {
+                1.0
+            };
             assert_eq!(instances[batch.first as usize].metallic, expected);
         }
     }

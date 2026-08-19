@@ -40,8 +40,7 @@ pub const IBL_WGSL: &str = include_str!("ibl.wgsl");
 /// 常用项的集中导出。
 pub mod prelude {
     pub use crate::{
-        Environment, GpuEnvironment, IBL_WGSL, PBR_WGSL, PbrMaterial, brdf, ibl, sky::Sky,
-        standard,
+        Environment, GpuEnvironment, IBL_WGSL, PBR_WGSL, PbrMaterial, brdf, ibl, sky::Sky, standard,
     };
 }
 
@@ -248,8 +247,10 @@ mod test {
 
     #[test]
     fn gpu_environment_carries_intensity() {
-        let mut env = Environment::default();
-        env.intensity = 0.75;
+        let env = Environment {
+            intensity: 0.75,
+            ..Default::default()
+        };
 
         // 强度打包在 sun_color 的 a 分量里，着色器靠它缩放环境光。
         assert_eq!(env.to_gpu().sun_color[3], 0.75);
@@ -314,8 +315,10 @@ mod test {
 
     #[test]
     fn negative_intensity_yields_no_light() {
-        let mut env = Environment::default();
-        env.intensity = -1.0;
+        let env = Environment {
+            intensity: -1.0,
+            ..Default::default()
+        };
 
         assert_eq!(env.irradiance(Vec3::Y), Vec3::ZERO);
     }

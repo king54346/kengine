@@ -103,10 +103,7 @@ impl Visit for TriMeshData {
         // 走二进制大块：一张地形碰撞网格可能有几十万个三角形。
         // glam 的 `Vec3` 没开 bytemuck 特性，先摊成 `[f32; 3]`。
         let mut vertices: Vec<[f32; 3]> = self.vertices.iter().map(|v| v.to_array()).collect();
-        BinaryBlob {
-            vec: &mut vertices,
-        }
-        .visit("Vertices", &mut region)?;
+        BinaryBlob { vec: &mut vertices }.visit("Vertices", &mut region)?;
         BinaryBlob {
             vec: &mut self.indices,
         }
@@ -262,7 +259,8 @@ impl Visit for ColliderDesc {
         self.restitution.visit("Restitution", &mut region)?;
         self.density.visit("Density", &mut region)?;
         self.is_sensor.visit("IsSensor", &mut region)?;
-        self.collision_groups.visit("CollisionGroups", &mut region)?;
+        self.collision_groups
+            .visit("CollisionGroups", &mut region)?;
         self.solver_groups.visit("SolverGroups", &mut region)?;
         self.friction_combine_rule
             .visit("FrictionCombine", &mut region)?;
@@ -289,7 +287,8 @@ impl Visit for RigidBodyDesc {
         self.additional_mass.visit("AdditionalMass", &mut region)?;
         self.locked_translations
             .visit("LockedTranslations", &mut region)?;
-        self.locked_rotations.visit("LockedRotations", &mut region)?;
+        self.locked_rotations
+            .visit("LockedRotations", &mut region)?;
         self.ccd_enabled.visit("Ccd", &mut region)?;
         self.can_sleep.visit("CanSleep", &mut region)?;
         self.dominance_group.visit("Dominance", &mut region)?;
@@ -388,7 +387,8 @@ impl Visit for JointDesc {
         self.local_anchor2.visit("Anchor2", &mut region)?;
         self.local_basis1.visit("Basis1", &mut region)?;
         self.local_basis2.visit("Basis2", &mut region)?;
-        self.contacts_enabled.visit("ContactsEnabled", &mut region)?;
+        self.contacts_enabled
+            .visit("ContactsEnabled", &mut region)?;
 
         Ok(())
     }
@@ -398,10 +398,7 @@ impl Visit for JointDesc {
 mod test {
     use super::*;
 
-    fn roundtrip<T: Visit + Default>(value: &T) -> T
-    where
-        T: Clone,
-    {
+    fn roundtrip<T: Visit + Default + Clone>(value: &T) -> T {
         let mut visitor = Visitor::new();
         let mut source = value.clone();
         source.visit("V", &mut visitor).unwrap();
@@ -503,7 +500,11 @@ mod test {
     #[test]
     fn a_compound_shape_survives_a_roundtrip() {
         let shape = ColliderShape::Compound(vec![
-            (Vec3::X, Quat::from_rotation_y(0.5), ColliderShape::ball(0.4)),
+            (
+                Vec3::X,
+                Quat::from_rotation_y(0.5),
+                ColliderShape::ball(0.4),
+            ),
             (
                 Vec3::NEG_X,
                 Quat::IDENTITY,

@@ -12,8 +12,8 @@
 //! cargo run --release -- --stress 20000
 //! ```
 
-use kengine::prelude::*;
 use kcore::uuid::{Uuid, uuid};
+use kengine::prelude::*;
 use std::{path::PathBuf, sync::Arc};
 
 /// 一个自定义资源类型：从文本文件读出的关卡配置。
@@ -236,7 +236,10 @@ impl Game {
         ));
 
         self.locomotion = Some(machine);
-        klog::info!("士兵已载入：{} 个动画，按 1/2/3 切换站立/行走/奔跑", animator.clips().len());
+        klog::info!(
+            "士兵已载入：{} 个动画，按 1/2/3 切换站立/行走/奔跑",
+            animator.clips().len()
+        );
     }
 
     /// 每帧把状态机算出的权重交给播放器。
@@ -333,8 +336,6 @@ impl Game {
         }
     }
 
-    /// 打印一帧的渲染统计。
-
     // ───────────────────────── 物理演示 ─────────────────────────
 
     /// 搭一片物理场地：地面、一摞箱子、一个单摆、一部电梯、一个触发区。
@@ -373,11 +374,12 @@ impl Game {
                 ))
                 .with_collider(Collider::ball(0.5)),
         );
-        ctx.scene.add_node(Node::new("PendulumJoint").with_joint(Joint::new(
-            anchor,
-            bob,
-            JointDesc::revolute(Vec3::ZERO, Vec3::new(-2.5, 0.0, 0.0), Vec3::Z, None),
-        )));
+        ctx.scene
+            .add_node(Node::new("PendulumJoint").with_joint(Joint::new(
+                anchor,
+                bob,
+                JointDesc::revolute(Vec3::ZERO, Vec3::new(-2.5, 0.0, 0.0), Vec3::Z, None),
+            )));
 
         // 电梯：运动学刚体，位置每帧由 `drive_physics` 写死，不受碰撞影响。
         self.elevator = ctx.scene.add_node(
@@ -487,7 +489,9 @@ impl Game {
                         .with_ccd(true),
                 ))
                 .with_collider(Collider::new(
-                    ColliderDesc::ball(0.2).with_material(0.4, 0.4).with_density(6.0),
+                    ColliderDesc::ball(0.2)
+                        .with_material(0.4, 0.4)
+                        .with_density(6.0),
                 )),
         );
     }
@@ -573,13 +577,16 @@ impl Game {
             .with_name("SoldierRagdoll")
             .build(ctx.scene, root);
 
-        klog::info!("士兵布娃娃已就绪（{} 节肢体），按 K 切换", {
-            ctx.scene
-                .try_get(self.ragdoll)
-                .and_then(Node::ragdoll)
-                .map(Ragdoll::limb_count)
-                .unwrap_or(0)
-        });
+        klog::info!(
+            "士兵布娃娃已就绪（{} 节肢体），按 K 切换",
+            {
+                ctx.scene
+                    .try_get(self.ragdoll)
+                    .and_then(Node::ragdoll)
+                    .map(Ragdoll::limb_count)
+                    .unwrap_or(0)
+            }
+        );
     }
 
     /// 每帧的物理相关逻辑：电梯、按键、触发区日志。
@@ -588,8 +595,7 @@ impl Game {
         // 它会推开挡路的箱子，自己却纹丝不动。
         if self.elevator.is_some() {
             let height = -0.75 + (ctx.elapsed * 0.8).sin() * 1.2 + 1.2;
-            ctx.scene[self.elevator].transform.position =
-                PLAYGROUND + Vec3::new(-3.0, height, 2.0);
+            ctx.scene[self.elevator].transform.position = PLAYGROUND + Vec3::new(-3.0, height, 2.0);
         }
 
         if ctx.input.action_just_pressed("shoot") {
@@ -617,7 +623,14 @@ impl Game {
             };
             ctx.scene.physics_mut().set_gravity(gravity);
             // 失重时所有刚体都得叫醒，睡着的不会自己浮起来。
-            klog::info!("重力{}", if self.gravity_on { "已恢复" } else { "已关闭" });
+            klog::info!(
+                "重力{}",
+                if self.gravity_on {
+                    "已恢复"
+                } else {
+                    "已关闭"
+                }
+            );
         }
 
         if ctx.input.action_just_pressed("ragdoll") {
@@ -631,7 +644,14 @@ impl Game {
             {
                 let on = !ragdoll.is_active();
                 ragdoll.set_active(on);
-                klog::info!("布娃娃{}", if on { "已激活（物理接管）" } else { "已关闭（动画接管）" });
+                klog::info!(
+                    "布娃娃{}",
+                    if on {
+                        "已激活（物理接管）"
+                    } else {
+                        "已关闭（动画接管）"
+                    }
+                );
             }
         }
 
@@ -656,7 +676,6 @@ impl Game {
             klog::info!("触发区：「{name}」进来了");
         }
     }
-
 
     // ───────────────────────── 场景存读 ─────────────────────────
 
@@ -763,7 +782,6 @@ impl Game {
         }
     }
 
-
     // ───────────────────────── 2D 精灵 ─────────────────────────
 
     /// 程序化生成一张 4×2 格的精灵表，每格一个纯色。
@@ -775,14 +793,14 @@ impl Game {
         const ROWS: u32 = 2;
         const CELL: u32 = 32;
         const COLORS: [[u8; 4]; 8] = [
-            [235, 64, 52, 255],   // 红
-            [235, 158, 52, 255],  // 橙
-            [235, 232, 52, 255],  // 黄
-            [106, 235, 52, 255],  // 绿
-            [52, 235, 213, 255],  // 青
-            [52, 116, 235, 255],  // 蓝
-            [147, 52, 235, 255],  // 紫
-            [235, 52, 177, 255],  // 品红
+            [235, 64, 52, 255],  // 红
+            [235, 158, 52, 255], // 橙
+            [235, 232, 52, 255], // 黄
+            [106, 235, 52, 255], // 绿
+            [52, 235, 213, 255], // 青
+            [52, 116, 235, 255], // 蓝
+            [147, 52, 235, 255], // 紫
+            [235, 52, 177, 255], // 品红
         ];
 
         let (width, height) = (COLUMNS * CELL, ROWS * CELL);
@@ -806,14 +824,22 @@ impl Game {
 
     /// 放一排精灵：静止的一格、一条循环动画、一条来回播的动画。
     fn spawn_sprites(&mut self, ctx: &mut Context) {
-        let sheet = ctx.resources.register("builtin/sprite_sheet", Self::sprite_sheet());
+        let sheet = ctx
+            .resources
+            .register("builtin/sprite_sheet", Self::sprite_sheet());
         let atlas = Atlas::grid(4, 2);
 
         // 静止：直接取第 0 行第 2 格。
         let still = Sprite::from_region(atlas.region(2).unwrap())
             .with_size(Vec2::splat(0.8))
             .with_anchor(Anchor::BottomCenter);
-        self.spawn_sprite(ctx, "SpriteStill", &still, &sheet, Vec3::new(-2.0, -1.0, 3.0));
+        self.spawn_sprite(
+            ctx,
+            "SpriteStill",
+            &still,
+            &sheet,
+            Vec3::new(-2.0, -1.0, 3.0),
+        );
 
         // 循环：第 0 行的四格。
         self.sprite_loop = SpriteAnimation::new(atlas.row(0), 6.0);
@@ -880,18 +906,13 @@ impl Game {
             (self.sprite_loop_node, self.sprite_loop.frame()),
             (self.sprite_ping_node, self.sprite_ping.frame()),
         ] {
-            let Some(material) = ctx
-                .scene
-                .try_get_mut(handle)
-                .and_then(Node::material_mut)
-            else {
+            let Some(material) = ctx.scene.try_get_mut(handle).and_then(Node::material_mut) else {
                 continue;
             };
             material.set(kengine::kpbr::standard::UV_SCALE, region.uv_scale());
             material.set(kengine::kpbr::standard::UV_OFFSET, region.uv_offset());
         }
     }
-
 
     // ───────────────────────── 音频 ─────────────────────────
 
@@ -937,7 +958,10 @@ impl Game {
 
         // 程序化生成的音频直接登记为资源，不需要外部文件。
         let hum = ctx.resources.register("builtin/hum", Self::hum(110.0));
-        self.beep_sound = Some(ctx.resources.register("builtin/beep", Self::beep(660.0, 0.35)));
+        self.beep_sound = Some(
+            ctx.resources
+                .register("builtin/beep", Self::beep(660.0, 0.35)),
+        );
 
         // 绕圈的 3D 声源：挂个小球好看出它在哪。
         self.audio_orbit = ctx.scene.add_node(
@@ -1014,7 +1038,6 @@ impl Game {
         }
     }
 
-
     // ───────────────────────── 脚本 ─────────────────────────
 
     /// 放两个被脚本驱动的方块。
@@ -1045,9 +1068,7 @@ impl Game {
                 .with_script("assets/scripts/follower.js"),
         );
 
-        klog::info!(
-            "脚本：assets/scripts/*.js 驱动两个方块；改完存盘即热重载，J 键开关"
-        );
+        klog::info!("脚本：assets/scripts/*.js 驱动两个方块；改完存盘即热重载，J 键开关");
     }
 
     /// 处理脚本信号，并响应按键。
@@ -1086,7 +1107,11 @@ impl Game {
                 mixer.playing_count(),
                 mixer.rendered_frames(),
                 mixer.last_peak(),
-                if ctx.audio.is_silent() { "（静默模式）" } else { "" },
+                if ctx.audio.is_silent() {
+                    "（静默模式）"
+                } else {
+                    ""
+                },
             );
         }
         let (last_frames, last_steps, last_time) = self.last_report;
@@ -1214,23 +1239,20 @@ impl Plugin for Game {
         );
 
         // 程序化法线贴图，用来验证切线空间是否正确。
-        let bumps = ctx.resources.register(
-            "builtin/bumps",
-            Texture::bumpy_normal(128, 4),
-        );
+        let bumps = ctx
+            .resources
+            .register("builtin/bumps", Texture::bumpy_normal(128, 4));
 
         // 贴了棋盘格的立方体，金属度高、粗糙度低 → 高光锐利。
         // 挂上法线贴图后表面会呈现凹凸感，而几何体本身仍是平的。
         self.cube = ctx.scene.add_node(
-            Node::new("Cube")
-                .with_mesh(Mesh::cube())
-                .with_material(
-                    Material::standard()
-                        .with_base_color_texture(checker.clone())
-                        .with(kengine::kpbr::standard::NORMAL_TEXTURE, bumps)
-                        .with_metallic(0.9)
-                        .with_roughness(0.25),
-                ),
+            Node::new("Cube").with_mesh(Mesh::cube()).with_material(
+                Material::standard()
+                    .with_base_color_texture(checker.clone())
+                    .with(kengine::kpbr::standard::NORMAL_TEXTURE, bumps)
+                    .with_metallic(0.9)
+                    .with_roughness(0.25),
+            ),
         );
 
         // 子节点跟随父节点一起转，体现场景图层级。橙色、无贴图。
@@ -1239,10 +1261,7 @@ impl Plugin for Game {
                 .with_mesh(Mesh::cube())
                 .with_material(
                     // 自发光：不受光照影响，会成为 Bloom 的来源。
-                    PbrMaterial::emissive(
-                        Vec3::new(1.0, 0.45, 0.1),
-                        Vec3::new(3.0, 1.2, 0.2),
-                    ),
+                    PbrMaterial::emissive(Vec3::new(1.0, 0.45, 0.1), Vec3::new(3.0, 1.2, 0.2)),
                 )
                 .with_position(Vec3::new(1.5, 0.0, 0.0))
                 .with_scale(Vec3::splat(0.3)),
@@ -1300,11 +1319,7 @@ impl Plugin for Game {
                 Node::new(format!("Ring{index}"))
                     .with_mesh(ring_mesh.clone())
                     .with_material(PbrMaterial::dielectric(Vec3::new(0.4, 0.9, 0.5), 0.4))
-                    .with_position(Vec3::new(
-                        angle.cos() * radius,
-                        -0.4,
-                        angle.sin() * radius,
-                    )),
+                    .with_position(Vec3::new(angle.cos() * radius, -0.4, angle.sin() * radius)),
             );
         }
 
@@ -1426,7 +1441,14 @@ impl Plugin for Game {
 
         if ctx.input.action_just_pressed("morph") {
             self.lion_talking = !self.lion_talking;
-            klog::info!("狮子形变{}", if self.lion_talking { "已开启" } else { "已停止" });
+            klog::info!(
+                "狮子形变{}",
+                if self.lion_talking {
+                    "已开启"
+                } else {
+                    "已停止"
+                }
+            );
         }
 
         if ctx.input.action_just_pressed("stand") {
@@ -1477,7 +1499,14 @@ impl Plugin for Game {
 
         if ctx.input.action_just_pressed("pause") {
             self.paused = !self.paused;
-            klog::info!("旋转{}", if self.paused { "已暂停" } else { "已恢复" });
+            klog::info!(
+                "旋转{}",
+                if self.paused {
+                    "已暂停"
+                } else {
+                    "已恢复"
+                }
+            );
         }
 
         if ctx.input.action_just_pressed("stats") {
@@ -1511,7 +1540,9 @@ impl Plugin for Game {
 
         if !self.paused {
             ctx.scene[self.cube].transform.rotate_y(spin_speed * ctx.dt);
-            ctx.scene[self.orbit].transform.rotate_x(spin_speed * 2.0 * ctx.dt);
+            ctx.scene[self.orbit]
+                .transform
+                .rotate_x(spin_speed * 2.0 * ctx.dt);
         }
     }
 }
@@ -1578,32 +1609,31 @@ fn main() {
         app = app.with_resource_io(io);
     }
 
-    app
-        .add_plugin(Game {
-            stress: stress_count(),
-            roundtrip: std::env::args().any(|arg| arg == "--roundtrip"),
-            // 重力默认开着，`Default` 给的 false 与实际状态相反。
-            gravity_on: true,
-            ..Game::default()
-        })
-        .add_system(Stage::FrameEnd, move |ctx| {
-            frames += 1;
-            window_frames += 1;
-            cull_micros += ctx.stats.cull_micros as u64;
-            prepare_micros += ctx.stats.prepare_micros as u64;
+    app.add_plugin(Game {
+        stress: stress_count(),
+        roundtrip: std::env::args().any(|arg| arg == "--roundtrip"),
+        // 重力默认开着，`Default` 给的 false 与实际状态相反。
+        gravity_on: true,
+        ..Game::default()
+    })
+    .add_system(Stage::FrameEnd, move |ctx| {
+        frames += 1;
+        window_frames += 1;
+        cull_micros += ctx.stats.cull_micros as u64;
+        prepare_micros += ctx.stats.prepare_micros as u64;
 
-            if ctx.elapsed >= next_report {
-                klog::info!(
-                    "平均帧率：{:.0} FPS；剔除 {:.0} µs/帧，CPU 准备 {:.0} µs/帧",
-                    frames as f32 / ctx.elapsed,
-                    cull_micros as f64 / window_frames as f64,
-                    prepare_micros as f64 / window_frames as f64,
-                );
-                window_frames = 0;
-                cull_micros = 0;
-                prepare_micros = 0;
-                next_report += 5.0;
-            }
-        })
-        .run();
+        if ctx.elapsed >= next_report {
+            klog::info!(
+                "平均帧率：{:.0} FPS；剔除 {:.0} µs/帧，CPU 准备 {:.0} µs/帧",
+                frames as f32 / ctx.elapsed,
+                cull_micros as f64 / window_frames as f64,
+                prepare_micros as f64 / window_frames as f64,
+            );
+            window_frames = 0;
+            cull_micros = 0;
+            prepare_micros = 0;
+            next_report += 5.0;
+        }
+    })
+    .run();
 }

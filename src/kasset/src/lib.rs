@@ -67,7 +67,9 @@ pub use error::LoadError;
 pub use io::{FsResourceIo, MemoryResourceIo, ResourceIo};
 pub use loader::{BoxedLoaderFuture, LoaderContainer, LoaderResult, ResourceLoader};
 pub use manager::ResourceManager;
-pub use pack::{LayeredResourceIo, PACK_MAGIC, PACK_VERSION, PackError, PackResourceIo, PackWriter};
+pub use pack::{
+    LayeredResourceIo, PACK_MAGIC, PACK_VERSION, PackError, PackResourceIo, PackWriter,
+};
 pub use reload::HotReload;
 pub use resource::{Resource, ResourceData, ResourceDataRef};
 pub use serialize::{manager_from, visit_resource, visit_resource_option};
@@ -158,10 +160,7 @@ mod test {
         let resource = manager.request::<Text>("a.bin");
 
         assert!(resource.is_failed());
-        assert!(matches!(
-            resource.error(),
-            Some(LoadError::NoLoader { .. })
-        ));
+        assert!(matches!(resource.error(), Some(LoadError::NoLoader { .. })));
     }
 
     #[test]
@@ -221,14 +220,14 @@ mod test {
 
         manager.request_blocking::<Text>("a.txt").unwrap();
         manager.request_blocking::<Text>("b.txt").unwrap();
-        let _ = manager.request::<Text>("c.bin"); // 无加载器，立即失败
+        // 无加载器，请求立刻转为失败态；这里只看计数，不 await 这个句柄。
+        let _failed = manager.request::<Text>("c.bin");
 
         assert_eq!(manager.total_count(), 3);
         assert_eq!(manager.loaded_count(), 2);
         assert_eq!(manager.failed_count(), 1);
         assert!(manager.is_idle());
     }
-
 
     #[test]
     fn a_freshly_loaded_resource_is_collectable_even_under_io_pressure() {

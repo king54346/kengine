@@ -243,9 +243,7 @@ impl Bvh {
                         let range =
                             node.offset as usize..node.offset as usize + node.count as usize;
                         for &primitive in &self.primitives[range] {
-                            if classify(&self.bounds[primitive as usize])
-                                != Intersection::Outside
-                            {
+                            if classify(&self.bounds[primitive as usize]) != Intersection::Outside {
                                 out.push(primitive);
                             }
                         }
@@ -310,12 +308,7 @@ impl Bvh {
 /// 为一段图元找分割点，返回左半部分的长度（相对 `slice` 起点）。
 ///
 /// 返回 [`None`] 表示「不如就留作叶子」。函数会就地重排 `slice`。
-fn find_split(
-    slice: &mut [u32],
-    centroids: &[Vec3],
-    aabb: &Aabb,
-    count: usize,
-) -> Option<usize> {
+fn find_split(slice: &mut [u32], centroids: &[Vec3], aabb: &Aabb, count: usize) -> Option<usize> {
     // 按质心分布而非包围盒分布来切：包围盒会互相重叠，质心不会。
     let mut centroid_bounds = Aabb::EMPTY;
     for &p in slice.iter() {
@@ -326,6 +319,8 @@ fn find_split(
     let lo = axis_value(centroid_bounds.min, axis);
     let hi = axis_value(centroid_bounds.max, axis);
     // 所有质心重合，怎么切都没意义。
+    // 写成否定式而不是 `<=`：这样 NaN 也会落进这一支，而不是带着 NaN 继续分箱。
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     if !(hi - lo > 1e-6) {
         return None;
     }
@@ -490,7 +485,10 @@ mod test {
 
         assert_eq!(bvh.len(), 1);
         assert_eq!(bvh.node_count(), 1);
-        assert_eq!(query_sorted(&bvh, &Aabb::new(-Vec3::ONE, Vec3::ONE)), vec![0]);
+        assert_eq!(
+            query_sorted(&bvh, &Aabb::new(-Vec3::ONE, Vec3::ONE)),
+            vec![0]
+        );
     }
 
     #[test]
@@ -500,10 +498,8 @@ mod test {
 
         // 几个尺度不同的查询体：小盒、半场、包住一切。
         for half in [2.0f32, 30.0, 500.0] {
-            let query = Aabb::from_center_half_extents(
-                Vec3::new(10.0, 0.0, -20.0),
-                Vec3::splat(half),
-            );
+            let query =
+                Aabb::from_center_half_extents(Vec3::new(10.0, 0.0, -20.0), Vec3::splat(half));
             assert_eq!(
                 query_sorted(&bvh, &query),
                 brute_force(&bounds, &query),
@@ -537,7 +533,10 @@ mod test {
                     assert!(node.aabb.contains_aabb(&bounds[p as usize]));
                 }
             } else {
-                assert!(node.aabb.contains_aabb(&bvh.nodes[node.offset as usize].aabb));
+                assert!(
+                    node.aabb
+                        .contains_aabb(&bvh.nodes[node.offset as usize].aabb)
+                );
                 assert!(
                     node.aabb
                         .contains_aabb(&bvh.nodes[node.offset as usize + 1].aabb)
@@ -553,7 +552,10 @@ mod test {
         let bvh = Bvh::build(&bounds);
 
         assert_eq!(bvh.len(), 64);
-        assert_eq!(query_sorted(&bvh, &Aabb::new(-Vec3::ONE, Vec3::ONE)).len(), 64);
+        assert_eq!(
+            query_sorted(&bvh, &Aabb::new(-Vec3::ONE, Vec3::ONE)).len(),
+            64
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ use crate::{GpuTexture, upload_texture};
 use bytemuck::{Pod, Zeroable};
 use fxhash::FxHashMap;
 use kcore::uuid::Uuid;
-use kmath::{Mat4, Vec3};
+use kmath::Mat4;
 use kparticle::{BlendMode, GpuParticle};
 use kscene::ParticleItem;
 use ktexture::Texture;
@@ -246,7 +246,8 @@ impl ParticleResources {
         let mut batches = Vec::with_capacity(items.len());
         for item in items.iter() {
             let first = scratch.len() as u32;
-            item.system.collect(item.transform, camera_position, scratch);
+            item.system
+                .collect(item.transform, camera_position, scratch);
             let count = scratch.len() as u32 - first;
             if count == 0 {
                 continue;
@@ -279,11 +280,15 @@ impl ParticleResources {
             0,
             bytemuck::cast_slice(&[ParticleGlobals {
                 view_proj: view_proj.to_cols_array_2d(),
-                camera_right: Vec3::from(camera_to_world.x_axis.truncate())
+                camera_right: camera_to_world
+                    .x_axis
+                    .truncate()
                     .normalize_or_zero()
                     .extend(0.0)
                     .to_array(),
-                camera_up: Vec3::from(camera_to_world.y_axis.truncate())
+                camera_up: camera_to_world
+                    .y_axis
+                    .truncate()
                     .normalize_or_zero()
                     .extend(0.0)
                     .to_array(),
@@ -326,10 +331,9 @@ impl ParticleResources {
         };
 
         let id = texture.id();
-        if !self.textures.contains_key(&id) {
-            let uploaded = upload_texture(device, queue, &texture);
-            self.textures.insert(id, uploaded);
-        }
+        self.textures
+            .entry(id)
+            .or_insert_with(|| upload_texture(device, queue, &texture));
         self.ensure_bind_group(device, id);
         id
     }

@@ -8,9 +8,10 @@ use crate::rng::{Rng, Span};
 use kmath::Vec3;
 
 /// 粒子出生位置的分布形状，以发射器自身的局部坐标为准。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum EmitterShape {
     /// 一个点，全部粒子从同一处出生。
+    #[default]
     Point,
     /// 球体内部均匀分布。
     Sphere {
@@ -27,12 +28,6 @@ pub enum EmitterShape {
         /// 半径。
         radius: f32,
     },
-}
-
-impl Default for EmitterShape {
-    fn default() -> Self {
-        Self::Point
-    }
 }
 
 impl EmitterShape {
@@ -352,7 +347,10 @@ mod test {
 
         for _ in 0..500 {
             let speed = emitter.spawn(&mut rng).velocity.length();
-            assert!((2.0 - 1e-4..=5.0 + 1e-4).contains(&speed), "初速 {speed} 越界");
+            assert!(
+                (2.0 - 1e-4..=5.0 + 1e-4).contains(&speed),
+                "初速 {speed} 越界"
+            );
         }
     }
 

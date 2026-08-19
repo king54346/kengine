@@ -22,7 +22,7 @@
 
 #![warn(missing_docs)]
 
-use kmath::{Aabb, Intersection, Mat4, Plane, Vec3, Vec4};
+use kmath::{Aabb, Intersection, Mat4, Plane, Vec3};
 
 /// 常用类型的集中导出。
 pub mod prelude {
@@ -217,10 +217,10 @@ impl Frustum {
     pub fn from_view_projection(view_projection: Mat4) -> Self {
         // glam 的矩阵按列存储，转置后各轴即为原矩阵的行。
         let m = view_projection.transpose();
-        let row_x = Vec4::from(m.x_axis);
-        let row_y = Vec4::from(m.y_axis);
-        let row_z = Vec4::from(m.z_axis);
-        let row_w = Vec4::from(m.w_axis);
+        let row_x = m.x_axis;
+        let row_y = m.y_axis;
+        let row_z = m.z_axis;
+        let row_w = m.w_axis;
 
         Self {
             planes: [
@@ -350,7 +350,10 @@ mod test {
     #[test]
     fn empty_aabb_is_never_visible() {
         assert!(!default_frustum().intersects(&Aabb::EMPTY));
-        assert_eq!(default_frustum().classify(&Aabb::EMPTY), Intersection::Outside);
+        assert_eq!(
+            default_frustum().classify(&Aabb::EMPTY),
+            Intersection::Outside
+        );
     }
 
     #[test]

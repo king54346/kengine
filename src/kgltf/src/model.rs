@@ -81,7 +81,7 @@ impl ModelSkin {
 }
 
 /// 模型里的一个节点。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ModelNode {
     /// 节点名，来自 glTF；没有名字时为空串。
     pub name: String,
@@ -93,18 +93,6 @@ pub struct ModelNode {
     pub parts: Vec<MeshPart>,
     /// 该节点使用的骨架，索引到 [`Model::skins`]。
     pub skin: Option<usize>,
-}
-
-impl Default for ModelNode {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            transform: NodeTransform::default(),
-            children: Vec::new(),
-            parts: Vec::new(),
-            skin: None,
-        }
-    }
 }
 
 /// 一个导入完成的模型。

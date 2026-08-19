@@ -194,7 +194,7 @@ impl Texture {
         let mut data = Vec::with_capacity(size as usize * size as usize * 4);
         for y in 0..size {
             for x in 0..size {
-                let on = ((x / cell) + (y / cell)) % 2 == 0;
+                let on = ((x / cell) + (y / cell)).is_multiple_of(2);
                 data.extend_from_slice(if on { &a } else { &b });
             }
         }
@@ -371,8 +371,7 @@ mod test {
 
         for pixel in texture.data().chunks(4) {
             let decode = |value: u8| value as f32 / 255.0 * 2.0 - 1.0;
-            let normal =
-                kmath::Vec3::new(decode(pixel[0]), decode(pixel[1]), decode(pixel[2]));
+            let normal = kmath::Vec3::new(decode(pixel[0]), decode(pixel[1]), decode(pixel[2]));
 
             // 量化到 8 位会有误差，放宽到 0.02。
             assert!(

@@ -19,9 +19,11 @@ mod skin;
 mod streaming;
 mod transform;
 
+pub use audio::SoundSource;
+pub use kaudio::{Attenuation, AudioBuffer, AudioDevice, Listener, Spatial};
 pub use kcamera::{Camera, Frustum, Projection};
-pub use kmesh::{Mesh, Vertex};
 pub use kmath::{Aabb, Intersection};
+pub use kmesh::{Mesh, Vertex};
 pub use kparticle::ParticleSystem;
 pub use kphysics::{
     BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, CollisionEvent, InteractionGroups,
@@ -31,22 +33,20 @@ pub use kphysics::{
 pub use node::Node;
 pub use physics::{Collider, Joint, RigidBody};
 pub use ragdoll::{LimbDesc, Ragdoll, RagdollBuilder, RagdollLimb, hinge_limits};
-pub use serialize::SCENE_FORMAT_VERSION;
-pub use audio::SoundSource;
 pub use script::ScriptSlot;
-pub use kaudio::{AudioBuffer, AudioDevice, Attenuation, Listener, Spatial};
+pub use serialize::SCENE_FORMAT_VERSION;
 pub use skin::{AnimationPlayer, Skin};
 pub use streaming::{Cell, CellState, Streaming, StreamingReport};
 pub use transform::Transform;
 
 use cull::SceneCulling;
 use fxhash::FxHashMap;
-use kcore::pool::{Handle, Pool};
 use kanim::Animator;
+use kcore::pool::{Handle, Pool};
 use kgltf::Model;
+use klight::Light;
 use kmaterial::Material;
 use kmath::{Mat4, Quat, Vec3};
-use klight::Light;
 use kpbr::Environment;
 use std::ops::{Index, IndexMut};
 
@@ -503,7 +503,6 @@ impl Scene {
     pub fn try_get_mut(&mut self, handle: Handle<Node>) -> Option<&mut Node> {
         self.nodes.try_borrow_mut(handle).ok()
     }
-
 
     /// 把另一个场景的全部节点并进本场景，挂在 `parent` 下，返回并入子树的根。
     ///
@@ -1063,8 +1062,7 @@ impl Scene {
 
     /// 场景中第一盏投射阴影的光源，返回（光源, 世界变换）。
     pub fn shadow_caster(&self) -> Option<(&Light, Mat4)> {
-        self.visible_lights()
-            .find(|(light, _)| light.cast_shadows)
+        self.visible_lights().find(|(light, _)| light.cast_shadows)
     }
 
     /// 遍历场景中所有启用且可见的光源，返回（光源, 世界变换）。
@@ -1423,7 +1421,11 @@ impl Scene {
                     dirty,
                     joint.native().is_some(),
                     joint.desc_ref().clone(),
-                    if dirty { joint.native_mut().take() } else { None },
+                    if dirty {
+                        joint.native_mut().take()
+                    } else {
+                        None
+                    },
                 )
             };
 
@@ -1440,10 +1442,10 @@ impl Scene {
                 self.physics.remove_joint(old);
             }
             let new_native = self.physics.add_joint(native1, native2, &desc);
-            if let Ok(node) = self.nodes.try_borrow_mut(handle) {
-                if let Some(joint) = node.joint.as_deref_mut() {
-                    *joint.native_mut() = Some(new_native);
-                }
+            if let Ok(node) = self.nodes.try_borrow_mut(handle)
+                && let Some(joint) = node.joint.as_deref_mut()
+            {
+                *joint.native_mut() = Some(new_native);
             }
         }
     }
@@ -2077,9 +2079,7 @@ mod test {
     fn shadow_caster_picks_the_flagged_light() {
         let mut scene = Scene::new();
         scene.add_node(Node::new("Fill").with_light(Light::point(5.0)));
-        scene.add_node(
-            Node::new("Sun").with_light(Light::directional().with_shadows()),
-        );
+        scene.add_node(Node::new("Sun").with_light(Light::directional().with_shadows()));
 
         scene.update();
 
@@ -2141,7 +2141,10 @@ mod test {
         let gpu = light.to_gpu(transform);
 
         // 世界坐标 = 父节点位移 + 自身位移。
-        assert_eq!([gpu.position[0], gpu.position[1], gpu.position[2]], [10.0, 4.0, 0.0]);
+        assert_eq!(
+            [gpu.position[0], gpu.position[1], gpu.position[2]],
+            [10.0, 4.0, 0.0]
+        );
     }
 
     #[test]

@@ -36,14 +36,14 @@ impl Default for SphericalHarmonics {
 /// L2 球谐基函数在给定方向上的取值。
 fn sh_basis(d: Vec3) -> [f32; SH_COEFFICIENT_COUNT] {
     [
-        0.282_095,             // Y00
-        0.488_603 * d.y,       // Y1-1
-        0.488_603 * d.z,       // Y10
-        0.488_603 * d.x,       // Y11
-        1.092_548 * d.x * d.y, // Y2-2
-        1.092_548 * d.y * d.z, // Y2-1
+        0.282_095,                           // Y00
+        0.488_603 * d.y,                     // Y1-1
+        0.488_603 * d.z,                     // Y10
+        0.488_603 * d.x,                     // Y11
+        1.092_548 * d.x * d.y,               // Y2-2
+        1.092_548 * d.y * d.z,               // Y2-1
         0.315_392 * (3.0 * d.z * d.z - 1.0), // Y20
-        1.092_548 * d.x * d.z, // Y21
+        1.092_548 * d.x * d.z,               // Y21
         0.546_274 * (d.x * d.x - d.y * d.y), // Y22
     ]
 }
@@ -82,8 +82,7 @@ impl SphericalHarmonics {
                 let phi = (j as f32 + 0.5) / samples as f32 * TAU;
                 let (sin_phi, cos_phi) = phi.sin_cos();
 
-                let direction =
-                    Vec3::new(sin_theta * cos_phi, cos_theta, sin_theta * sin_phi);
+                let direction = Vec3::new(sin_theta * cos_phi, cos_theta, sin_theta * sin_phi);
                 let radiance = sky.sample_without_sun(direction);
                 let basis = sh_basis(direction);
 
@@ -108,11 +107,8 @@ impl SphericalHarmonics {
         let basis = sh_basis(normal);
         let mut result = Vec3::ZERO;
 
-        for ((coefficient, basis_value), convolution) in self
-            .coefficients
-            .iter()
-            .zip(basis)
-            .zip(COSINE_CONVOLUTION)
+        for ((coefficient, basis_value), convolution) in
+            self.coefficients.iter().zip(basis).zip(COSINE_CONVOLUTION)
         {
             result += *coefficient * basis_value * convolution;
         }
@@ -131,7 +127,7 @@ impl SphericalHarmonics {
 fn hammersley(index: u32, count: u32) -> Vec2 {
     // 二进制反转得到 Van der Corput 序列。
     let mut bits = index;
-    bits = (bits << 16) | (bits >> 16);
+    bits = bits.rotate_right(16);
     bits = ((bits & 0x5555_5555) << 1) | ((bits & 0xAAAA_AAAA) >> 1);
     bits = ((bits & 0x3333_3333) << 2) | ((bits & 0xCCCC_CCCC) >> 2);
     bits = ((bits & 0x0F0F_0F0F) << 4) | ((bits & 0xF0F0_F0F0) >> 4);
@@ -360,7 +356,11 @@ mod test {
         // 即反射率就等于 F0。这是 split-sum 近似的边界条件。
         let value = integrate_brdf(1.0, 0.0);
 
-        assert!((value.x - 1.0).abs() < 0.05, "scale 应接近 1，实得 {}", value.x);
+        assert!(
+            (value.x - 1.0).abs() < 0.05,
+            "scale 应接近 1，实得 {}",
+            value.x
+        );
         assert!(value.y < 0.05, "bias 应接近 0，实得 {}", value.y);
     }
 

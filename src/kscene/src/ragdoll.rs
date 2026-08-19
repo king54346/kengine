@@ -245,19 +245,19 @@ impl RagdollBuilder {
             container,
         );
 
-        if parent_body.is_some() {
-            if let Some(mut joint_desc) = desc.joint.clone() {
-                // 关节点就是这根骨骼的原点：在子刚体的局部空间里是原点本身，
-                // 在父刚体的局部空间里要换算一次。
-                let parent_world = scene.world_matrix(parent_body);
-                joint_desc.local_anchor1 = parent_world.inverse().transform_point3(position);
-                joint_desc.local_anchor2 = Vec3::ZERO;
+        if parent_body.is_some()
+            && let Some(mut joint_desc) = desc.joint.clone()
+        {
+            // 关节点就是这根骨骼的原点：在子刚体的局部空间里是原点本身，
+            // 在父刚体的局部空间里要换算一次。
+            let parent_world = scene.world_matrix(parent_body);
+            joint_desc.local_anchor1 = parent_world.inverse().transform_point3(position);
+            joint_desc.local_anchor2 = Vec3::ZERO;
 
-                scene.add_node_with_parent(
-                    Node::new("Joint").with_joint(Joint::new(parent_body, body_node, joint_desc)),
-                    container,
-                );
-            }
+            scene.add_node_with_parent(
+                Node::new("Joint").with_joint(Joint::new(parent_body, body_node, joint_desc)),
+                container,
+            );
         }
 
         RagdollLimb {
@@ -286,7 +286,9 @@ impl Scene {
                 let inverse = container_world.inverse();
 
                 let mut limbs = Vec::new();
-                ragdoll.root.for_each(&mut |limb| limbs.push((limb.bone, limb.body)));
+                ragdoll
+                    .root
+                    .for_each(&mut |limb| limbs.push((limb.bone, limb.body)));
 
                 for (bone, body) in limbs {
                     let bone_world = self.world_matrix(bone);
@@ -330,7 +332,9 @@ impl Scene {
                     .flatten();
 
                 let mut limbs = Vec::new();
-                ragdoll.root.for_each(&mut |limb| limbs.push((limb.bone, limb.body)));
+                ragdoll
+                    .root
+                    .for_each(&mut |limb| limbs.push((limb.bone, limb.body)));
 
                 for (bone, body) in limbs {
                     if let Some(node) = self.try_get_mut(body)
@@ -346,7 +350,10 @@ impl Scene {
                     // 骨骼的局部变换 = 父骨骼世界变换的逆 × 刚体的世界位姿。
                     // 父先于子处理，`world_matrix` 读到的父骨骼已经是新的了。
                     let body_world = self.world_matrix(body);
-                    let bone_parent = self.try_get(bone).map(|n| n.parent()).unwrap_or(Handle::NONE);
+                    let bone_parent = self
+                        .try_get(bone)
+                        .map(|n| n.parent())
+                        .unwrap_or(Handle::NONE);
                     let local = if bone_parent.is_none() {
                         body_world
                     } else {
@@ -424,16 +431,16 @@ mod test {
         );
         scene.update();
 
-        let desc = LimbDesc::new(hip, ColliderShape::capsule_y(0.15, 0.12))
-            .with_child(
-                LimbDesc::new(thigh, ColliderShape::capsule_y(0.15, 0.1))
-                    .with_joint(JointDesc {
-                        kind: JointKind::Spherical {
-                            limits: SphericalLimits::symmetric(0.6),
-                        },
-                        ..Default::default()
-                    })
-                    .with_child(LimbDesc::new(shin, ColliderShape::capsule_y(0.15, 0.09)).with_joint(
+        let desc = LimbDesc::new(hip, ColliderShape::capsule_y(0.15, 0.12)).with_child(
+            LimbDesc::new(thigh, ColliderShape::capsule_y(0.15, 0.1))
+                .with_joint(JointDesc {
+                    kind: JointKind::Spherical {
+                        limits: SphericalLimits::symmetric(0.6),
+                    },
+                    ..Default::default()
+                })
+                .with_child(
+                    LimbDesc::new(shin, ColliderShape::capsule_y(0.15, 0.09)).with_joint(
                         JointDesc {
                             kind: JointKind::Revolute {
                                 axis: Vec3::X,
@@ -441,8 +448,9 @@ mod test {
                             },
                             ..Default::default()
                         },
-                    )),
-            );
+                    ),
+                ),
+        );
 
         let ragdoll = RagdollBuilder::new(desc).build(scene, scene.root());
         (ragdoll, [hip, thigh, shin])
@@ -454,7 +462,12 @@ mod test {
         let (ragdoll, _) = build_leg(&mut scene);
         scene.update();
 
-        let limbs = scene.try_get(ragdoll).unwrap().ragdoll().unwrap().limb_count();
+        let limbs = scene
+            .try_get(ragdoll)
+            .unwrap()
+            .ragdoll()
+            .unwrap()
+            .limb_count();
         assert_eq!(limbs, 3);
 
         // 三节肢体 → 三个刚体、三个碰撞体、两个关节（根肢体没有父）。
@@ -469,7 +482,13 @@ mod test {
         let mut scene = Scene::new();
         let (ragdoll, bones) = build_leg(&mut scene);
 
-        let root = scene.try_get(ragdoll).unwrap().ragdoll().unwrap().root().clone();
+        let root = scene
+            .try_get(ragdoll)
+            .unwrap()
+            .ragdoll()
+            .unwrap()
+            .root()
+            .clone();
         let mut pairs = Vec::new();
         root.for_each(&mut |limb| pairs.push((limb.bone, limb.body)));
 
@@ -496,7 +515,10 @@ mod test {
 
         // 骨骼没动过，未激活的布娃娃也就不该动。
         let hip = scene.try_get(bones[0]).unwrap().transform.position;
-        assert!((hip - Vec3::new(0.0, 3.0, 0.0)).length() < 1e-4, "骨骼被物理拽跑了：{hip:?}");
+        assert!(
+            (hip - Vec3::new(0.0, 3.0, 0.0)).length() < 1e-4,
+            "骨骼被物理拽跑了：{hip:?}"
+        );
 
         let _ = ragdoll;
     }
@@ -514,7 +536,13 @@ mod test {
             scene.update();
         }
 
-        let root = scene.try_get(ragdoll).unwrap().ragdoll().unwrap().root().clone();
+        let root = scene
+            .try_get(ragdoll)
+            .unwrap()
+            .ragdoll()
+            .unwrap()
+            .root()
+            .clone();
         let bone_world = scene.world_matrix(root.bone).w_axis.truncate();
         let body_world = scene.world_matrix(root.body).w_axis.truncate();
 
@@ -561,7 +589,13 @@ mod test {
             scene.update();
         }
 
-        let root = scene.try_get(ragdoll).unwrap().ragdoll().unwrap().root().clone();
+        let root = scene
+            .try_get(ragdoll)
+            .unwrap()
+            .ragdoll()
+            .unwrap()
+            .root()
+            .clone();
         let hip = scene.world_matrix(root.body).w_axis.truncate();
         let thigh = scene.world_matrix(root.children[0].body).w_axis.truncate();
 
@@ -575,7 +609,12 @@ mod test {
         let mut scene = Scene::new();
         let (ragdoll, bones) = build_leg(&mut scene);
 
-        scene.try_get_mut(ragdoll).unwrap().ragdoll_mut().unwrap().set_active(true);
+        scene
+            .try_get_mut(ragdoll)
+            .unwrap()
+            .ragdoll_mut()
+            .unwrap()
+            .set_active(true);
         for _ in 0..60 {
             scene.step_physics(1.0 / 60.0);
             scene.update();
@@ -584,14 +623,25 @@ mod test {
         // 把骨骼摆回原处，再关掉布娃娃。
         scene.try_get_mut(bones[0]).unwrap().transform =
             Transform::from_position(Vec3::new(0.0, 3.0, 0.0));
-        scene.try_get_mut(ragdoll).unwrap().ragdoll_mut().unwrap().set_active(false);
+        scene
+            .try_get_mut(ragdoll)
+            .unwrap()
+            .ragdoll_mut()
+            .unwrap()
+            .set_active(false);
 
         for _ in 0..5 {
             scene.step_physics(1.0 / 60.0);
             scene.update();
         }
 
-        let root = scene.try_get(ragdoll).unwrap().ragdoll().unwrap().root().clone();
+        let root = scene
+            .try_get(ragdoll)
+            .unwrap()
+            .ragdoll()
+            .unwrap()
+            .root()
+            .clone();
         let bone_world = scene.world_matrix(root.bone).w_axis.truncate();
         let body_world = scene.world_matrix(root.body).w_axis.truncate();
 
@@ -686,8 +736,7 @@ mod soldier_test {
             limb(bone(scene, &format!("{side}UpLeg")), 0.2, 0.08)
                 .with_joint(ball(0.8))
                 .with_child(
-                    limb(bone(scene, &format!("{side}Leg")), 0.2, 0.07)
-                        .with_joint(hinge(0.0, 2.2)),
+                    limb(bone(scene, &format!("{side}Leg")), 0.2, 0.07).with_joint(hinge(0.0, 2.2)),
                 )
         };
 
@@ -750,7 +799,13 @@ mod soldier_test {
     #[test]
     fn limb_bodies_line_up_with_the_real_bones() {
         let (scene, _, ragdoll) = staged_soldier();
-        let root = scene.try_get(ragdoll).unwrap().ragdoll().unwrap().root().clone();
+        let root = scene
+            .try_get(ragdoll)
+            .unwrap()
+            .ragdoll()
+            .unwrap()
+            .root()
+            .clone();
 
         let mut pairs = Vec::new();
         root.for_each(&mut |limb| pairs.push((limb.bone, limb.body)));
@@ -822,7 +877,13 @@ mod soldier_test {
             .unwrap()
             .set_active(true);
 
-        let root = scene.try_get(ragdoll).unwrap().ragdoll().unwrap().root().clone();
+        let root = scene
+            .try_get(ragdoll)
+            .unwrap()
+            .ragdoll()
+            .unwrap()
+            .root()
+            .clone();
         let mut bones = Vec::new();
         root.for_each(&mut |limb| bones.push(limb.bone));
 
@@ -848,7 +909,13 @@ mod soldier_test {
             .set_active(true);
 
         // 记下初始的父子间距，倒下后不该差太多——关节就是干这个的。
-        let root = scene.try_get(ragdoll).unwrap().ragdoll().unwrap().root().clone();
+        let root = scene
+            .try_get(ragdoll)
+            .unwrap()
+            .ragdoll()
+            .unwrap()
+            .root()
+            .clone();
         let mut links = Vec::new();
         fn collect(limb: &RagdollLimb, out: &mut Vec<(Handle<Node>, Handle<Node>)>) {
             for child in &limb.children {
@@ -889,7 +956,13 @@ mod soldier_test {
         let (mut scene, _, ragdoll) = staged_soldier();
         scene.step_physics(1.0 / 60.0);
 
-        let hips_body = scene.try_get(ragdoll).unwrap().ragdoll().unwrap().root().body;
+        let hips_body = scene
+            .try_get(ragdoll)
+            .unwrap()
+            .ragdoll()
+            .unwrap()
+            .root()
+            .body;
         let origin = scene.world_matrix(hips_body).w_axis.truncate() + Vec3::Z * 5.0;
 
         let hit = scene
@@ -933,7 +1006,13 @@ mod soldier_test {
             .set_active(true);
         scene.step_physics(1.0 / 60.0);
 
-        let hips_body = scene.try_get(ragdoll).unwrap().ragdoll().unwrap().root().body;
+        let hips_body = scene
+            .try_get(ragdoll)
+            .unwrap()
+            .ragdoll()
+            .unwrap()
+            .root()
+            .body;
         scene
             .try_get_mut(hips_body)
             .unwrap()
@@ -957,7 +1036,13 @@ mod soldier_test {
         let (mut scene, _, ragdoll) = staged_soldier();
         scene.step_physics(1.0 / 60.0);
 
-        let root = scene.try_get(ragdoll).unwrap().ragdoll().unwrap().root().clone();
+        let root = scene
+            .try_get(ragdoll)
+            .unwrap()
+            .ragdoll()
+            .unwrap()
+            .root()
+            .clone();
         let mut bodies = Vec::new();
         root.for_each(&mut |limb| bodies.push(limb.body));
 

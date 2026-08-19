@@ -131,17 +131,21 @@ unsafe impl Sync for RefCounter {}
 unsafe impl Send for RefCounter {}
 
 impl RefCounter {
-    unsafe fn get(&self) -> isize { unsafe {
-        *self.0.get()
-    }}
+    unsafe fn get(&self) -> isize {
+        unsafe { *self.0.get() }
+    }
 
-    unsafe fn increment(&self) { unsafe {
-        *self.0.get() += 1;
-    }}
+    unsafe fn increment(&self) {
+        unsafe {
+            *self.0.get() += 1;
+        }
+    }
 
-    unsafe fn decrement(&self) { unsafe {
-        *self.0.get() -= 1;
-    }}
+    unsafe fn decrement(&self) {
+        unsafe {
+            *self.0.get() -= 1;
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -518,9 +522,7 @@ where
                 .expect("free stack contained invalid index");
 
             if record.payload.is_some() {
-                panic!(
-                    "尝试在已有载荷的池记录位置 spawn 对象！记录索引为 {free_index}"
-                );
+                panic!("尝试在已有载荷的池记录位置 spawn 对象！记录索引为 {free_index}");
             }
 
             let generation = record.generation + 1;
@@ -573,9 +575,7 @@ where
                 .expect("free stack contained invalid index");
 
             if record.payload.is_some() {
-                panic!(
-                    "尝试在已有载荷的池记录位置 spawn 对象（async）！记录索引为 {free_index}"
-                );
+                panic!("尝试在已有载荷的池记录位置 spawn 对象（async）！记录索引为 {free_index}");
             }
 
             let generation = record.generation + 1;
@@ -995,10 +995,10 @@ where
     #[inline]
     #[must_use]
     pub fn handle_from_index(&self, n: u32) -> Handle<T> {
-        if let Ok(record) = self.records_get(n) {
-            if record.generation != INVALID_GENERATION {
-                return Handle::new(n, record.generation);
-            }
+        if let Ok(record) = self.records_get(n)
+            && record.generation != INVALID_GENERATION
+        {
+            return Handle::new(n, record.generation);
         }
         Handle::NONE
     }
@@ -1053,7 +1053,10 @@ where
 
                 record.payload.replace(payload)
             } else {
-                panic!("尝试使用悬空句柄替换对象池中的对象！句柄为 {:?}，但池记录的代次为 {}", handle, record.generation);
+                panic!(
+                    "尝试使用悬空句柄替换对象池中的对象！句柄为 {:?}，但池记录的代次为 {}",
+                    handle, record.generation
+                );
             }
         } else {
             None
@@ -1428,7 +1431,7 @@ where
 mod test {
     use crate::pool::PoolError;
     use crate::{
-        pool::{AtomicHandle, Handle, Pool, PoolRecord, INVALID_GENERATION},
+        pool::{AtomicHandle, Handle, INVALID_GENERATION, Pool, PoolRecord},
         visitor::{Visit, Visitor},
     };
 

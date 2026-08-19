@@ -235,7 +235,10 @@ impl Visit for MorphTarget {
         // 增量范围完全由增量决定，读回来时重算而不是存下来——
         // 存一份派生数据就多一处可能和本体对不上的「真相」。
         if region.is_reading() {
-            *self = Self::new(std::mem::take(&mut self.name), std::mem::take(&mut self.deltas));
+            *self = Self::new(
+                std::mem::take(&mut self.name),
+                std::mem::take(&mut self.deltas),
+            );
         }
 
         Ok(())
@@ -476,8 +479,12 @@ impl Mesh {
                 continue;
             }
             // 权重可以是负的，两个方向都要放开。
-            let extent =
-                target.delta_bounds.min.abs().max(target.delta_bounds.max.abs()) * weight.abs();
+            let extent = target
+                .delta_bounds
+                .min
+                .abs()
+                .max(target.delta_bounds.max.abs())
+                * weight.abs();
             bounds = Aabb::new(bounds.min - extent, bounds.max + extent);
         }
         bounds
@@ -647,7 +654,11 @@ impl Mesh {
                 .try_normalize()
                 // 完全无法求出切线时，取一个与法线垂直的任意方向兜底。
                 .unwrap_or_else(|| {
-                    let axis = if normal.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+                    let axis = if normal.x.abs() < 0.9 {
+                        Vec3::X
+                    } else {
+                        Vec3::Y
+                    };
                     normal.cross(axis).normalize_or(Vec3::X)
                 });
 
@@ -673,7 +684,7 @@ impl Mesh {
 
     /// 索引是否都在顶点范围内。
     pub fn is_valid(&self) -> bool {
-        self.data.indices.len() % 3 == 0
+        self.data.indices.len().is_multiple_of(3)
             && self
                 .data
                 .indices
@@ -963,7 +974,6 @@ mod test {
         assert_eq!(aabb.size(), Vec3::ONE);
     }
 
-
     #[test]
     fn recomputed_normals_match_flat_face() {
         // 一个位于 XZ 平面、朝上的三角形。
@@ -1043,7 +1053,10 @@ mod test {
         for vertex in mesh.vertices() {
             let dot = vertex.normal().dot(vertex.tangent());
             assert!(dot.abs() < 1e-4, "切线与法线不正交：dot = {dot}");
-            assert!((vertex.tangent().length() - 1.0).abs() < 1e-4, "切线未归一化");
+            assert!(
+                (vertex.tangent().length() - 1.0).abs() < 1e-4,
+                "切线未归一化"
+            );
         }
     }
 
@@ -1114,7 +1127,6 @@ mod test {
 
         assert_eq!(mesh.vertices().len(), 1);
     }
-
 
     // ── 共享几何与序列化 ──
 
@@ -1221,7 +1233,11 @@ mod test {
         assert_eq!(restored.id(), mesh.id(), "id 必须留住，否则显存缓存会失配");
         assert_eq!(restored.vertices(), mesh.vertices());
         assert_eq!(restored.indices(), mesh.indices());
-        assert_eq!(restored.aabb(), mesh.aabb(), "包围盒是读回后重算的，该与原来一致");
+        assert_eq!(
+            restored.aabb(),
+            mesh.aabb(),
+            "包围盒是读回后重算的，该与原来一致"
+        );
     }
 
     #[test]
@@ -1264,7 +1280,10 @@ mod test {
         assert_eq!(restored.morph_target_count(), 2);
         assert_eq!(restored.morph_weights(), mesh.morph_weights());
         assert_eq!(restored.find_morph_target("mouth"), Some(0));
-        assert_eq!(restored.morph_targets()[0].deltas(), mesh.morph_targets()[0].deltas());
+        assert_eq!(
+            restored.morph_targets()[0].deltas(),
+            mesh.morph_targets()[0].deltas()
+        );
         // 增量范围是读回后重算的，与原来必须一致——剔除靠它。
         assert_eq!(
             restored.morph_targets()[0].delta_bounds(),
