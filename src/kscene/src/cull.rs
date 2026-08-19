@@ -90,6 +90,11 @@ impl SceneCulling {
         self.bvh.root_bounds()
     }
 
+    /// 剔除用的 BVH 本身。只给调试可视化用，查询走 [`cull`](Self::cull)。
+    pub(crate) fn bvh(&self) -> &Bvh {
+        &self.bvh
+    }
+
     /// 下标转节点句柄。
     pub(crate) fn handle(&self, index: u32) -> Handle<Node> {
         self.handles[index as usize]

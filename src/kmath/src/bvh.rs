@@ -180,6 +180,25 @@ impl Bvh {
         deepest
     }
 
+    /// 遍历树上每个节点，回调收到 `(包围盒, 深度, 是否叶节点)`，根的深度为 0。
+    ///
+    /// 存在的唯一理由是**可视化**：把 BVH 画出来是判断空间划分好不好的
+    /// 直接手段——分支互相重叠得厉害，说明该重建了。查询路径不走这里。
+    pub fn visit_nodes(&self, mut f: impl FnMut(Aabb, usize, bool)) {
+        if self.nodes.is_empty() {
+            return;
+        }
+        let mut stack = vec![(0u32, 0usize)];
+        while let Some((index, depth)) = stack.pop() {
+            let node = &self.nodes[index as usize];
+            f(node.aabb, depth, node.is_leaf());
+            if !node.is_leaf() {
+                stack.push((node.offset, depth + 1));
+                stack.push((node.offset + 1, depth + 1));
+            }
+        }
+    }
+
     /// 只更新各节点的包围盒，不改变树的形状。
     ///
     /// 物体只是动了、增删没发生时，这比重建便宜一个数量级（O(n) vs O(n log n)），
@@ -642,5 +661,55 @@ mod test {
         without_shortcut.sort_unstable();
 
         assert_eq!(without_shortcut, query_sorted(&bvh, &query));
+    }
+
+    #[test]
+    fn visit_nodes_reaches_every_node_exactly_once() {
+        let bounds: Vec<_> = (0..40)
+            .map(|i| {
+                let x = i as f32;
+                Aabb::new(Vec3::new(x, 0.0, 0.0), Vec3::new(x + 0.8, 1.0, 1.0))
+            })
+            .collect();
+        let bvh = Bvh::build(&bounds);
+
+        let mut visited = 0;
+        let mut deepest = 0;
+        let mut leaves = 0;
+        bvh.visit_nodes(|_, depth, is_leaf| {
+            visited += 1;
+            deepest = deepest.max(depth + 1);
+            leaves += usize::from(is_leaf);
+        });
+
+        assert_eq!(visited, bvh.node_count());
+        assert_eq!(deepest, bvh.depth(), "深度口径必须与 `depth` 一致");
+        assert!(leaves > 0);
+    }
+
+    #[test]
+    fn visit_nodes_children_are_contained_in_their_parent() {
+        // 子节点的盒子必须落在父节点里，不然树是坏的——这正是把 BVH
+        // 画出来要看的东西，先在这里断言一遍。
+        let bounds: Vec<_> = (0..32)
+            .map(|i| {
+                let p = Vec3::new((i % 8) as f32, (i / 8) as f32, 0.0);
+                Aabb::from_center_half_extents(p, Vec3::splat(0.4))
+            })
+            .collect();
+        let bvh = Bvh::build(&bounds);
+        let root = bvh.root_bounds();
+
+        bvh.visit_nodes(|aabb, _, _| {
+            assert!(root.union(&aabb) == root, "有节点跑到了根包围盒外面");
+        });
+    }
+
+    #[test]
+    fn an_empty_tree_visits_nothing() {
+        let bvh = Bvh::build(&[]);
+        let mut visited = 0;
+        bvh.visit_nodes(|_, _, _| visited += 1);
+        assert_eq!(visited, 0);
     }
 }

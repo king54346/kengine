@@ -4,9 +4,43 @@ use kasset::ResourceManager;
 use kaudio::AudioDevice;
 use kinput::Input;
 use krender::RenderStats;
-use kscene::Scene;
+use kscene::{PhysicsDebugOptions, Scene, SceneDebugOptions};
 use kscript::Signal;
 use winit::window::Window;
+
+/// 引擎每帧自动画哪些调试信息。
+///
+/// 这些开关只管**内置的**那几套叠加层。想画自己的东西直接用
+/// [`Scene::gizmos_mut`]，不必经过这里。
+///
+/// 总开关是 [`Gizmos::set_enabled`](kscene::Gizmos::set_enabled)：它关着的时候
+/// 这里的开关一个都不生效，连数据都不会去收集。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DebugDraw {
+    /// 场景结构：包围盒、BVH、骨架、坐标轴、光源、相机。
+    pub scene: SceneDebugOptions,
+    /// 物理：碰撞体线框、刚体坐标轴、关节、接触点。
+    pub physics: PhysicsDebugOptions,
+}
+
+impl DebugDraw {
+    /// 什么都不自动画。这是默认值。
+    ///
+    /// `PhysicsDebugOptions::default()` 本身是「画碰撞体和关节」，所以
+    /// 不能直接 `derive(Default)` 就完事——那样一打开总开关就会莫名
+    /// 冒出一堆物理线框。
+    pub fn none() -> Self {
+        Self {
+            scene: SceneDebugOptions::default(),
+            physics: PhysicsDebugOptions::none(),
+        }
+    }
+
+    /// 一项都没开。
+    pub fn is_empty(&self) -> bool {
+        self.scene.is_empty() && self.physics.is_empty()
+    }
+}
 
 /// 引擎在回调中交给用户的一组引用。
 pub struct Context<'a> {
@@ -33,6 +67,8 @@ pub struct Context<'a> {
     ///
     /// 脚本排在插件的 `update` 之前跑，所以这里拿到的是**本帧**的信号。
     pub script_events: &'a [Signal],
+    /// 内置调试叠加层的开关，改了下一帧生效。
+    pub debug: &'a mut DebugDraw,
     pub(crate) exit_requested: &'a mut bool,
 }
 

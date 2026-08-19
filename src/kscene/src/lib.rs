@@ -10,6 +10,7 @@
 
 mod audio;
 mod cull;
+mod debug;
 mod node;
 mod physics;
 mod ragdoll;
@@ -34,6 +35,8 @@ pub use kphysics::{
 pub use node::Node;
 pub use physics::{Collider, Joint, RigidBody};
 pub use ragdoll::{LimbDesc, Ragdoll, RagdollBuilder, RagdollLimb, hinge_limits};
+pub use debug::SceneDebugOptions;
+pub use kphysics::PhysicsDebugOptions;
 pub use script::ScriptSlot;
 pub use serialize::SCENE_FORMAT_VERSION;
 pub use skin::{AnimationPlayer, Skin};
@@ -1130,6 +1133,38 @@ impl Scene {
     /// `kscript` 每帧靠它找到该跑的脚本，不必扫整个节点池。
     pub fn script_nodes(&self) -> &[Handle<Node>] {
         &self.index.scripts
+    }
+
+    /// 可绘制节点（可见且带网格），按树的深度优先顺序排列。
+    pub fn drawable_nodes(&self) -> &[Handle<Node>] {
+        &self.index.drawables
+    }
+
+    /// 带光源的节点。
+    pub fn light_nodes(&self) -> &[Handle<Node>] {
+        &self.index.lights
+    }
+
+    /// 带相机的节点。
+    pub fn camera_nodes(&self) -> &[Handle<Node>] {
+        &self.index.cameras
+    }
+
+    /// 带蒙皮的节点。
+    pub fn skinned_nodes(&self) -> &[Handle<Node>] {
+        &self.index.skinned
+    }
+
+    /// 当前活动相机所在的节点，没有则为 `None`。
+    ///
+    /// 判定口径与 [`active_camera`](Self::active_camera) 完全一致，
+    /// 两者必须同进同出，否则调试绘制会把正在用的相机也画出来。
+    pub fn active_camera_node(&self) -> Option<Handle<Node>> {
+        self.index.cameras.iter().copied().find(|&handle| {
+            self.try_get(handle).is_some_and(|node| {
+                node.camera().is_some_and(|c| c.enabled) && node.global_visible
+            })
+        })
     }
 
     /// 物理世界的只读引用。射线检测等查询走这里。

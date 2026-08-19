@@ -34,7 +34,7 @@ mod context;
 mod physics_clock;
 mod stage;
 
-pub use context::Context;
+pub use context::{Context, DebugDraw};
 pub use physics_clock::PhysicsClock;
 pub use stage::Stage;
 
@@ -53,7 +53,7 @@ use winit::{
 
 /// 常用类型的集中导出。
 pub mod prelude {
-    pub use crate::{App, Context, PhysicsClock, Plugin, Stage};
+    pub use crate::{App, Context, DebugDraw, PhysicsClock, Plugin, Stage};
 }
 
 /// 挂在某个阶段上的一段逻辑。
@@ -114,6 +114,8 @@ struct Runtime {
     scripts: ScriptRuntime,
     /// 本帧脚本抛出的信号，供插件在 `update` 里读。
     script_events: Vec<Signal>,
+    /// 内置调试叠加层的开关。
+    debug: DebugDraw,
 }
 
 /// 应用。装载插件、注册系统，然后接管主循环。
@@ -258,6 +260,7 @@ impl App {
                 stats,
                 audio: &runtime.audio,
                 script_events: &runtime.script_events,
+                debug: &mut runtime.debug,
                 exit_requested: &mut exit_requested,
             };
             system(&mut context);
@@ -299,6 +302,7 @@ impl App {
                 stats,
                 audio: &runtime.audio,
                 script_events: &runtime.script_events,
+                debug: &mut runtime.debug,
                 exit_requested: &mut exit_requested,
             };
             callback(plugin, &mut context);
@@ -458,6 +462,13 @@ impl AppHandler for App {
 
         exit |= self.run_systems(Stage::Transform);
 
+        // ── 调试叠加层 ──
+        // 排在这里有两个理由：`update` 刚跑完，BVH 与包围盒是本帧的；
+        // 而渲染还没开始，线段还来得及上传。
+        let debug = runtime.debug;
+        runtime.scene.debug_draw(debug.scene);
+        runtime.scene.debug_draw_physics(debug.physics);
+
         // ── Culling + Render：剔除在渲染器内部完成 ──
         exit |= self.run_systems(Stage::Culling);
         let Some(runtime) = self.runtime.as_mut() else {
@@ -477,6 +488,9 @@ impl AppHandler for App {
         exit |= self.run_systems(Stage::FrameEnd);
         if let Some(runtime) = self.runtime.as_mut() {
             runtime.input.end_frame();
+            // 调试线是即时模式的：渲染器已经读走，这一帧的到此为止。
+            // 不清的话线段会一帧帧累积，几秒钟就把顶点缓冲撑爆。
+            runtime.scene.gizmos_mut().clear();
 
             // 热重载排在帧末：这一帧的逻辑与渲染已经用完了旧数据，
             // 换在这里最不容易撞上「用到一半资源被换掉」。
