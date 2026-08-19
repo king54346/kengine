@@ -1017,85 +1017,79 @@ impl Game {
 
     // ───────────────────────── 脚本 ─────────────────────────
 
-    /// 一个自转 + 上下浮动的方块。
-    ///
-    /// 演示闭包状态（`elapsed` 每实例一份）、`engine.self()`、按 dt 积分、
-    /// 以及往 Rust 侧抛事件。
+    /// 自转 + 上下浮动的方块。写法照 GDScript：属性直接读写，写下去立刻生效。
     const SPINNER_JS: &str = r#"
 let elapsed = 0;
 let direction = 1;
 let reports = 0;
 
 return {
-    init() {
-        engine.log("spinner 启动，挂在「" + engine.name(engine.self()) + "」上");
+    _ready() {
+        print("spinner 醒了，挂在", self.name, "上");
     },
 
-    update(dt) {
-        elapsed += dt;
-        const me = engine.self();
-        engine.rotateY(me, dt * 1.5);
+    _process(delta) {
+        elapsed += delta;
 
-        // 读自己的位置，算出新的，写回去。
-        const p = engine.position(me);
-        if (p.y > 1.6) direction = -1;
-        if (p.y < 0.4) direction = 1;
-        engine.setPosition(me, p.x, p.y + direction * dt * 0.8, p.z);
+        // 这一行就是 GDScript 的手感：读一个分量、加一点、写回去。
+        self.rotateY(delta * 1.5);
+        self.position.y += direction * delta * 0.8;
 
-        // 每两秒给 Rust 侧抛一次事件。
+        if (self.position.y > 1.6) direction = -1;
+        if (self.position.y < 0.4) direction = 1;
+
         if (elapsed > 2 * (reports + 1)) {
             reports += 1;
-            engine.emit("spinner.tick", reports);
+            emit("spinner.tick", reports);
         }
-    },
-
-    destroy() {
-        engine.log("spinner 收工，共跑了 " + elapsed.toFixed(1) + " 秒");
     },
 };
 "#;
 
-    /// 绕着 spinner 转圈的小方块，演示跨节点访问。
+    /// 绕着 spinner 转圈，并**当场**朝脚下打一条射线。
     ///
-    /// 它自己不记位置——每帧读目标的**世界**坐标再算偏移，
-    /// 所以目标怎么动它都跟得上。
+    /// 射线是这次重写的关键证据：旧的「快照进、命令出」架构里，脚本没法在
+    /// 中途查询、再根据结果决定下一步——只能把查询排到下一帧。
     const FOLLOWER_JS: &str = r#"
 let angle = 0;
+let reported = false;
 
 return {
-    update(dt) {
-        angle += dt * 2.0;
+    _process(delta) {
+        angle += delta * 2.0;
 
-        const target = engine.find("ScriptSpinner");
-        if (target === 4294967295) {
-            // 目标没了（被删了），安静待着就行。
-            return;
-        }
+        const target = getNode("ScriptSpinner");
+        if (target === null) return;   // 目标没了就安静待着，GDScript 也是给 null
 
-        const t = engine.worldPosition(target);
-        engine.setPosition(
-            engine.self(),
-            t.x + Math.cos(angle) * 1.2,
-            t.y,
-            t.z + Math.sin(angle) * 1.2,
+        // 跨节点读世界坐标，算出一个绕圈的偏移。
+        const center = target.globalPosition;
+        self.position = new Vector3(
+            center.x + Math.cos(angle) * 1.2,
+            center.y,
+            center.z + Math.sin(angle) * 1.2,
         );
+
+        // 即时射线：当场拿到结果，当场据此行动。
+        const hit = raycast(self.globalPosition, Vector3.DOWN(), 10.0);
+        if (hit !== null && !reported) {
+            reported = true;
+            print("脚下", hit.distance.toFixed(2), "米是", hit.node ? hit.node.name : "?");
+            emit("follower.ground", hit.distance);
+        }
     },
 };
 "#;
 
     /// 放两个被脚本驱动的方块。
     ///
-    /// 源码直接内嵌并登记为资源，与内置贴图、程序化音频同一个路子——
+    /// 源码内嵌并登记为资源，与内置贴图、程序化音频同一个路子——
     /// demo 不该往仓库里塞外部文件。真实项目里 `.js` 走 [`ScriptLoader`]
-    /// 从磁盘加载，那条路径由 kscript / kscene 的测试覆盖。
+    /// 从磁盘加载，那条路径由 kscript 的测试覆盖。
     fn spawn_scripts(&mut self, ctx: &mut Context) {
         ctx.resources.add_loader(ScriptLoader);
-
-        let spinner = ctx
-            .resources
+        ctx.resources
             .register("builtin/spinner.js", Script::new(Self::SPINNER_JS, "spinner.js"));
-        let follower = ctx
-            .resources
+        ctx.resources
             .register("builtin/follower.js", Script::new(Self::FOLLOWER_JS, "follower.js"));
 
         self.script_spinner = ctx.scene.add_node(
@@ -1104,7 +1098,7 @@ return {
                 .with_material(PbrMaterial::metal(Vec3::new(0.9, 0.6, 0.2), 0.3))
                 .with_position(Vec3::new(-6.0, 1.0, 0.0))
                 .with_scale(Vec3::splat(0.6))
-                .with_script(ScriptComponent::new(spinner)),
+                .with_script("builtin/spinner.js"),
         );
 
         ctx.scene.add_node(
@@ -1115,34 +1109,34 @@ return {
                     Vec3::new(0.4, 0.8, 2.5),
                 ))
                 .with_scale(Vec3::splat(0.25))
-                .with_script(ScriptComponent::new(follower)),
+                .with_script("builtin/follower.js"),
         );
 
-        klog::info!("脚本：橙色方块由 JS 驱动自转+浮动，蓝色小块绕着它转；J 键停掉脚本");
+        klog::info!("脚本：橙色方块由 JS 驱动，蓝色小块绕着它转并朝脚下打射线；J 键开关");
     }
 
-    /// 处理脚本事件，并响应按键。
+    /// 处理脚本信号，并响应按键。
     fn drive_scripts(&mut self, ctx: &mut Context) {
-        // 脚本排在插件 update 之前跑，所以这里读到的是**本帧**的事件。
-        for event in ctx.script_events {
+        // 脚本排在插件 update 之前跑，所以这里读到的是**本帧**的信号。
+        for signal in ctx.script_events {
             klog::info!(
-                "收到脚本事件：{} = {}（来自节点 {:?}）",
-                event.name,
-                event.value,
-                event.source
+                "收到脚本信号：{} = {:.2}（来自节点 {:?}）",
+                signal.name,
+                signal.value,
+                signal.source
             );
         }
 
         if ctx.input.action_just_pressed("script") {
-            let Some(component) = ctx
+            let Some(slot) = ctx
                 .scene
                 .try_get_mut(self.script_spinner)
                 .and_then(Node::script_mut)
             else {
                 return;
             };
-            component.enabled = !component.enabled;
-            let enabled = component.enabled;
+            slot.enabled = !slot.enabled;
+            let enabled = slot.enabled;
             klog::info!("脚本{}", if enabled { "已恢复" } else { "已停用" });
         }
     }

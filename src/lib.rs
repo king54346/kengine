@@ -116,15 +116,13 @@ pub mod prelude {
     };
     pub use kscene::{
         AnimationPlayer, Cell, Collider, Joint, LimbDesc, Node, Ragdoll, RagdollBuilder,
-        RagdollLimb, RigidBody, Scene, SceneRayHit, ScriptComponent, ScriptEvent, Skin,
-        SoundSource, Streaming, Transform, hinge_limits,
+        RagdollLimb, RigidBody, Scene, SceneRayHit, ScriptSlot, Skin, SoundSource, Streaming,
+        Transform, hinge_limits,
     };
     pub use kaudio::{
         Attenuation, AudioBuffer, AudioDevice, AudioLoader, Listener, Mixer, Sound, Spatial, Status,
     };
-    pub use kscript::{
-        Command as ScriptCommand, NodeRef, Script, ScriptLoader, ScriptRuntime, ScriptStats,
-    };
+    pub use kscript::{Script, ScriptLoader, ScriptRuntime, ScriptStats, Signal};
     pub use kshader::{Shader, ShaderLoader};
     pub use ksprite::{Anchor, Atlas, PlayMode, Sprite, SpriteAnimation, SpriteRegion};
     pub use ktexture::{Sampler, Texture, TextureLoader};
