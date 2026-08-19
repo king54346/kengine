@@ -36,7 +36,7 @@ fn particles(c: &mut Criterion) {
                 let mut system = warm(capacity);
                 b.iter(|| {
                     system.tick(black_box(1.0 / 60.0), black_box(Mat4::IDENTITY));
-                    black_box(system.len())
+                    black_box(system.alive())
                 });
             },
         );

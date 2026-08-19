@@ -59,7 +59,9 @@ fn load(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("binary", nodes), &nodes, |b, _| {
             b.iter(|| {
-                let scene = Scene::load_from_slice(black_box(&bytes));
+                // 第二个参数是资源管理器，用来解析外部网格引用；
+                // 样例场景的网格全是内联的，给 None 就够。
+                let scene = Scene::load_from_slice(black_box(&bytes), None);
                 black_box(scene.map(|s| s.drawable_count()))
             });
         });
