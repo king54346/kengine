@@ -60,3 +60,26 @@ ktask = { path = "src/ktask" }
 ktexture = { path = "src/ktexture" }
 kwinit = { path = "src/kwinit" }
 winit = "0.30.13"
+
+[dev-dependencies]
+# benches 用。criterion 做的两件事是手工掐表做不到的：跑到置信区间收窄，
+# 以及把上一次的结果存下来做对比。
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# ── benches ──
+# `harness = false` 是 criterion 的要求：它自带 main，不走 libtest。
+[[bench]]
+name = "scene"
+harness = false
+
+[[bench]]
+name = "physics"
+harness = false
+
+[[bench]]
+name = "rendering_paths"
+harness = false
+
+[[bench]]
+name = "serialization"
+harness = false
