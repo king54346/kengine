@@ -367,7 +367,8 @@ impl BodyMut<'_> {
     /// 引擎会由「当前 → 目标」反推出速度，于是路上的动态物体会被正确推开。
     /// 对非运动学刚体无效。
     pub fn set_next_kinematic_position(&mut self, position: Vec3, rotation: Quat) {
-        self.0.set_next_kinematic_position(to_rp(position, rotation));
+        self.0
+            .set_next_kinematic_position(to_rp(position, rotation));
     }
 
     /// 设置线速度。
@@ -407,7 +408,8 @@ impl BodyMut<'_> {
 
     /// 在世界空间某点施加持续力，会同时产生力矩。
     pub fn add_force_at_point(&mut self, force: Vec3, point: Vec3, wake_up: bool) {
-        self.0.add_force_at_point(to_rv(force), to_rv(point), wake_up);
+        self.0
+            .add_force_at_point(to_rv(force), to_rv(point), wake_up);
     }
 
     /// 施加瞬时冲量，立即改变速度（Δv = 冲量 / 质量）。爆炸、跳跃、击飞用这个。
@@ -520,9 +522,20 @@ mod test {
         let mut only_y = desc.clone();
         only_y.locked_translations = [false, true, false];
         let body = only_y.build(0);
-        assert!(body.locked_axes().contains(rd::LockedAxes::TRANSLATION_LOCKED_Y));
-        assert!(!body.locked_axes().contains(rd::LockedAxes::TRANSLATION_LOCKED_X));
-        assert!(!body.locked_axes().contains(rd::LockedAxes::ROTATION_LOCKED_Y));
+        assert!(
+            body.locked_axes()
+                .contains(rd::LockedAxes::TRANSLATION_LOCKED_Y)
+        );
+        assert!(
+            !body
+                .locked_axes()
+                .contains(rd::LockedAxes::TRANSLATION_LOCKED_X)
+        );
+        assert!(
+            !body
+                .locked_axes()
+                .contains(rd::LockedAxes::ROTATION_LOCKED_Y)
+        );
 
         let all_rotations = desc.with_locked_rotations().build(0);
         assert!(all_rotations.is_rotation_locked().iter().all(|l| *l));

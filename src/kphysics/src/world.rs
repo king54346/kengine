@@ -383,9 +383,7 @@ impl PhysicsWorld {
 
     /// 关节是否还存在。
     pub fn has_joint(&self, handle: JointHandle) -> bool {
-        self.inner
-            .impulse_joints()
-            .any(|(h, _)| h == handle.0)
+        self.inner.impulse_joints().any(|(h, _)| h == handle.0)
     }
 
     /// 世界里的关节数量。
@@ -411,7 +409,10 @@ impl PhysicsWorld {
         filter
     }
 
-    fn user_data_of(&self, collider: rapier3d::geometry::ColliderHandle) -> (u128, Option<BodyHandle>, u128) {
+    fn user_data_of(
+        &self,
+        collider: rapier3d::geometry::ColliderHandle,
+    ) -> (u128, Option<BodyHandle>, u128) {
         let Some(c) = self.inner.colliders.get(collider) else {
             return (0, None, 0);
         };
@@ -645,7 +646,10 @@ mod test {
 
         let drop = 100.0 - world.body(ball).unwrap().position().y;
         let expected = 0.5 * 9.81 * 0.5 * 0.5;
-        assert!((drop - expected).abs() < 0.15, "落了 {drop}，理论值 {expected}");
+        assert!(
+            (drop - expected).abs() < 0.15,
+            "落了 {drop}，理论值 {expected}"
+        );
     }
 
     #[test]
@@ -684,7 +688,9 @@ mod test {
     fn an_impulse_changes_velocity_by_impulse_over_mass() {
         let mut world = PhysicsWorld::new();
         let body = world.add_body(
-            &RigidBodyDesc::dynamic().with_gravity_scale(0.0).with_can_sleep(false),
+            &RigidBodyDesc::dynamic()
+                .with_gravity_scale(0.0)
+                .with_can_sleep(false),
             0,
         );
         // 密度 1、半径 0.5 的球，质量 = 4/3·π·r³ ≈ 0.5236。
@@ -730,7 +736,11 @@ mod test {
 
         assert_eq!(hit.body_user_data, 1, "打到的不是球");
         assert!((hit.point.y - 10.5).abs() < 0.01, "命中点 {:?}", hit.point);
-        assert!(hit.normal.y > 0.9, "球顶的法线该朝上，实际 {:?}", hit.normal);
+        assert!(
+            hit.normal.y > 0.9,
+            "球顶的法线该朝上，实际 {:?}",
+            hit.normal
+        );
     }
 
     #[test]
@@ -801,7 +811,11 @@ mod test {
             .expect("向下扫掠该撞到地面");
 
         // 地面上表面 y = 0.5，球半径 0.5，从 y = 5 落下要走 4.0。
-        assert!((hit.distance - 4.0).abs() < 0.05, "扫掠距离 {}", hit.distance);
+        assert!(
+            (hit.distance - 4.0).abs() < 0.05,
+            "扫掠距离 {}",
+            hit.distance
+        );
     }
 
     #[test]
@@ -809,7 +823,12 @@ mod test {
         let (world, _) = ball_over_ground();
 
         let projection = world
-            .project_point(Vec3::new(0.0, 12.0, 0.0), 10.0, true, InteractionGroups::ALL)
+            .project_point(
+                Vec3::new(0.0, 12.0, 0.0),
+                10.0,
+                true,
+                InteractionGroups::ALL,
+            )
             .expect("球就在附近");
 
         assert_eq!(projection.body_user_data, 1);
@@ -933,7 +952,10 @@ mod test {
 
         step_for(&mut world, 1.0);
 
-        assert_eq!(world.body(ball).unwrap().position(), Vec3::new(0.0, 10.0, 0.0));
+        assert_eq!(
+            world.body(ball).unwrap().position(),
+            Vec3::new(0.0, 10.0, 0.0)
+        );
     }
 
     #[test]
@@ -941,7 +963,10 @@ mod test {
         let (mut world, ball) = ball_over_ground();
         world.step(0.0);
 
-        assert_eq!(world.body(ball).unwrap().position(), Vec3::new(0.0, 10.0, 0.0));
+        assert_eq!(
+            world.body(ball).unwrap().position(),
+            Vec3::new(0.0, 10.0, 0.0)
+        );
     }
 
     #[test]
@@ -1013,7 +1038,10 @@ mod test {
         let platform_y = world.body(platform).unwrap().position().y;
         let box_y = world.body(box_body).unwrap().position().y;
 
-        assert!((platform_y - 2.0).abs() < 0.05, "平台没走到位：{platform_y}");
+        assert!(
+            (platform_y - 2.0).abs() < 0.05,
+            "平台没走到位：{platform_y}"
+        );
         assert!(box_y > 2.0, "箱子没被顶起来：{box_y}");
     }
 

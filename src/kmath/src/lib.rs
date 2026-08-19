@@ -20,20 +20,37 @@ pub use geometry::{Aabb, Intersection, Plane};
 // ── Re-exports ────────────────────────────────────────────────────────────────
 pub use glam;
 pub use glam::{
-    // 2-D
-    BVec2, BVec3, BVec4,
-    IVec2, IVec3, IVec4,
-    UVec2, UVec3, UVec4,
-    Vec2, Vec3, Vec3A, Vec4,
     // 矩阵
-    Affine2, Affine3A,
-    Mat2, Mat3, Mat3A, Mat4,
+    Affine2,
+    Affine3A,
+    // 2-D
+    BVec2,
+    BVec3,
+    BVec4,
+    DMat2,
+    DMat3,
+    DMat4,
+    DQuat,
+    // 双精度
+    DVec2,
+    DVec3,
+    DVec4,
+    IVec2,
+    IVec3,
+    IVec4,
+    Mat2,
+    Mat3,
+    Mat3A,
+    Mat4,
     // 旋转
     Quat,
-    // 双精度
-    DVec2, DVec3, DVec4,
-    DMat2, DMat3, DMat4,
-    DQuat,
+    UVec2,
+    UVec3,
+    UVec4,
+    Vec2,
+    Vec3,
+    Vec3A,
+    Vec4,
 };
 
 // ── 常量 ──────────────────────────────────────────────────────────────────────
@@ -181,7 +198,11 @@ pub fn linear_to_srgb(c: f32) -> f32 {
 /// sRGB Vec3 → 线性 Vec3
 #[inline]
 pub fn srgb_vec3_to_linear(c: Vec3) -> Vec3 {
-    Vec3::new(srgb_to_linear(c.x), srgb_to_linear(c.y), srgb_to_linear(c.z))
+    Vec3::new(
+        srgb_to_linear(c.x),
+        srgb_to_linear(c.y),
+        srgb_to_linear(c.z),
+    )
 }
 
 // ── 快速近似 ──────────────────────────────────────────────────────────────────
@@ -201,21 +222,58 @@ pub fn fast_inv_sqrt(x: f32) -> f32 {
 pub mod prelude {
     pub use super::{
         // glam 主要类型
-        Affine2, Affine3A, BVec2, BVec3, BVec4,
-        DVec2, DVec3, DVec4, DMat2, DMat3, DMat4, DQuat,
-        IVec2, IVec3, IVec4, UVec2, UVec3, UVec4,
-        Mat2, Mat3, Mat3A, Mat4, Quat,
-        Vec2, Vec3, Vec3A, Vec4,
+        Affine2,
+        Affine3A,
+        BVec2,
+        BVec3,
+        BVec4,
+        DMat2,
+        DMat3,
+        DMat4,
+        DQuat,
+        DVec2,
+        DVec3,
+        DVec4,
+        FRAC_PI_2,
+        FRAC_PI_4,
+        IVec2,
+        IVec3,
+        IVec4,
+        Mat2,
+        Mat3,
+        Mat3A,
+        Mat4,
         // 常量
-        PI, TAU, FRAC_PI_2, FRAC_PI_4,
+        PI,
+        Quat,
+        TAU,
+        UVec2,
+        UVec3,
+        UVec4,
+        Vec2,
+        Vec3,
+        Vec3A,
+        Vec4,
         // 函数
-        deg_to_rad, rad_to_deg,
-        lerp, lerp_clamped, lerp_vec3, lerp_vec3_clamped, slerp,
-        smoothstep, smootherstep, remap,
-        reflect, refract, project_onto_plane,
-        scale_around_point, rotate_around_point,
-        srgb_to_linear, linear_to_srgb, srgb_vec3_to_linear,
+        deg_to_rad,
         fast_inv_sqrt,
+        lerp,
+        lerp_clamped,
+        lerp_vec3,
+        lerp_vec3_clamped,
+        linear_to_srgb,
+        project_onto_plane,
+        rad_to_deg,
+        reflect,
+        refract,
+        remap,
+        rotate_around_point,
+        scale_around_point,
+        slerp,
+        smootherstep,
+        smoothstep,
+        srgb_to_linear,
+        srgb_vec3_to_linear,
     };
 }
 

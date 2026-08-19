@@ -40,10 +40,10 @@ pub use stage::Stage;
 
 use kasset::{HotReload, ResourceIo, ResourceManager};
 use kaudio::AudioDevice;
-use kscript::{ScriptRuntime, Signal};
 use kinput::Input;
 use krender::{RenderOutcome, Renderer};
 use kscene::Scene;
+use kscript::{ScriptRuntime, Signal};
 use kwinit::{AppHandler, FrameOutcome, WindowConfig};
 use std::{sync::Arc, time::Instant};
 use winit::{
@@ -238,8 +238,8 @@ impl App {
         };
 
         let now = Instant::now();
-        let dt = dt_override
-            .unwrap_or_else(|| now.duration_since(runtime.last_frame).as_secs_f32());
+        let dt =
+            dt_override.unwrap_or_else(|| now.duration_since(runtime.last_frame).as_secs_f32());
         let elapsed = now.duration_since(runtime.start_time).as_secs_f32();
         let stats = runtime.renderer.stats();
 
@@ -267,10 +267,7 @@ impl App {
     }
 
     /// 对每个插件调用 `callback`，返回是否有人请求退出。
-    fn dispatch(
-        &mut self,
-        callback: impl FnMut(&mut Box<dyn Plugin>, &mut Context),
-    ) -> bool {
+    fn dispatch(&mut self, callback: impl FnMut(&mut Box<dyn Plugin>, &mut Context)) -> bool {
         self.dispatch_with_dt(callback, None)
     }
 
@@ -285,8 +282,8 @@ impl App {
         };
 
         let now = Instant::now();
-        let dt = dt_override
-            .unwrap_or_else(|| now.duration_since(runtime.last_frame).as_secs_f32());
+        let dt =
+            dt_override.unwrap_or_else(|| now.duration_since(runtime.last_frame).as_secs_f32());
         let elapsed = now.duration_since(runtime.start_time).as_secs_f32();
         let stats = runtime.renderer.stats();
 
@@ -389,12 +386,10 @@ impl AppHandler for App {
             let now = Instant::now();
             let dt = now.duration_since(runtime.last_frame).as_secs_f32();
             let elapsed = now.duration_since(runtime.start_time).as_secs_f32();
-            runtime.script_events = runtime.scripts.process(
-                &mut runtime.scene,
-                &runtime.resources,
-                dt,
-                elapsed,
-            );
+            runtime.script_events =
+                runtime
+                    .scripts
+                    .process(&mut runtime.scene, &runtime.resources, dt, elapsed);
         }
 
         // ── Input / Update / PostUpdate ──
@@ -434,7 +429,9 @@ impl AppHandler for App {
                 return FrameOutcome::Continue;
             };
             // 脚本的 `_physics_process`：与 `FixedUpdate` 同一条定长节拍。
-            let now = Instant::now().duration_since(runtime.start_time).as_secs_f32();
+            let now = Instant::now()
+                .duration_since(runtime.start_time)
+                .as_secs_f32();
             let signals = runtime
                 .scripts
                 .physics_process(&mut runtime.scene, step, now);

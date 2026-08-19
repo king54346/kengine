@@ -121,7 +121,8 @@ mod test {
             let d_theta = (PI / 2.0) / steps as f32;
             let (sin_theta, cos_theta) = theta.sin_cos();
             // dω = sinθ dθ dφ，绕方位角积分贡献 2π。
-            integral += distribution_ggx(cos_theta, roughness) * cos_theta * sin_theta * d_theta * TAU;
+            integral +=
+                distribution_ggx(cos_theta, roughness) * cos_theta * sin_theta * d_theta * TAU;
         }
 
         assert!(
@@ -209,8 +210,7 @@ mod test {
         let n = Vec3::Y;
         for roughness in [0.0, 0.001, 1.0] {
             for metallic in [0.0, 1.0] {
-                let result =
-                    direct_lighting(n, n, n, Vec3::ONE, metallic, roughness, Vec3::ONE);
+                let result = direct_lighting(n, n, n, Vec3::ONE, metallic, roughness, Vec3::ONE);
                 assert!(
                     result.is_finite(),
                     "r={roughness} m={metallic} 产生了 NaN/inf：{result:?}"

@@ -56,11 +56,8 @@ fn aces(x: f32) -> f32 {
 mod test {
     use super::*;
 
-    const OPERATORS: [ToneMapping; 3] = [
-        ToneMapping::Clamp,
-        ToneMapping::Reinhard,
-        ToneMapping::Aces,
-    ];
+    const OPERATORS: [ToneMapping; 3] =
+        [ToneMapping::Clamp, ToneMapping::Reinhard, ToneMapping::Aces];
 
     #[test]
     fn black_maps_to_black() {

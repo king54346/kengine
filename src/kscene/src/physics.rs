@@ -476,7 +476,10 @@ mod test {
         body.set_body_type(RigidBodyType::Fixed);
         body.flush(&mut world);
 
-        assert_eq!(world.body(native).unwrap().body_type(), RigidBodyType::Fixed);
+        assert_eq!(
+            world.body(native).unwrap().body_type(),
+            RigidBodyType::Fixed
+        );
         assert!(!body.desc_dirty);
     }
 
@@ -581,7 +584,10 @@ mod scene_test {
         scene.step_physics(1.0 / 60.0);
 
         let after = scene.cast_ray(&probe).unwrap().point.y;
-        assert!((after - 3.0).abs() < 1e-3, "静态碰撞体没跟着节点走：{after}");
+        assert!(
+            (after - 3.0).abs() < 1e-3,
+            "静态碰撞体没跟着节点走：{after}"
+        );
     }
 
     #[test]
@@ -609,7 +615,10 @@ mod scene_test {
         run(&mut scene, 0.2);
 
         let p = scene.try_get(ball).unwrap().transform.position;
-        assert!(p.x.abs() < 1.0 && p.y < 10.0, "直接改 transform 竟然生效了：{p:?}");
+        assert!(
+            p.x.abs() < 1.0 && p.y < 10.0,
+            "直接改 transform 竟然生效了：{p:?}"
+        );
     }
 
     #[test]
@@ -667,7 +676,10 @@ mod scene_test {
         );
 
         // 建好的当帧就施加冲量，中间不插任何一次 step。
-        scene[ball].rigid_body_mut().unwrap().apply_impulse(Vec3::Y * 10.0);
+        scene[ball]
+            .rigid_body_mut()
+            .unwrap()
+            .apply_impulse(Vec3::Y * 10.0);
         scene.step_physics(1.0 / 60.0);
 
         let mass = 4.0 / 3.0 * std::f32::consts::PI * 0.5f32.powi(3);
@@ -678,8 +690,6 @@ mod scene_test {
             10.0 / mass
         );
     }
-
-
 
     #[test]
     fn collision_events_must_be_read_after_every_substep() {
@@ -735,7 +745,6 @@ mod scene_test {
             "只在帧末读会丢事件——这正是 Stage::Physics 必须跟着子步的原因"
         );
     }
-
 
     #[test]
     fn velocities_are_read_back_onto_the_component() {
@@ -856,11 +865,13 @@ mod scene_test {
             scene.update();
             let p = scene.try_get(bob).unwrap().transform.position;
             lowest = lowest.min(p.y);
-            worst_radius_error =
-                worst_radius_error.max(((p - Vec3::Y * 8.0).length() - 2.0).abs());
+            worst_radius_error = worst_radius_error.max(((p - Vec3::Y * 8.0).length() - 2.0).abs());
         }
 
-        assert!(worst_radius_error < 0.1, "绳长最多偏了 {worst_radius_error}");
+        assert!(
+            worst_radius_error < 0.1,
+            "绳长最多偏了 {worst_radius_error}"
+        );
         assert!(lowest < 6.5, "摆锤最低只荡到 {lowest}");
     }
 
@@ -1014,8 +1025,14 @@ mod scene_test {
         let platform_y = scene.try_get(platform).unwrap().transform.position.y;
         let crate_y = scene.try_get(crate_node).unwrap().transform.position.y;
 
-        assert!((platform_y - 2.0).abs() < 0.05, "平台没走到位：{platform_y}");
-        assert!(crate_y > platform_y, "箱子没被平台顶着：{crate_y} vs {platform_y}");
+        assert!(
+            (platform_y - 2.0).abs() < 0.05,
+            "平台没走到位：{platform_y}"
+        );
+        assert!(
+            crate_y > platform_y,
+            "箱子没被平台顶着：{crate_y} vs {platform_y}"
+        );
     }
 
     #[test]
@@ -1059,7 +1076,10 @@ mod scene_test {
 
         run(&mut scene, 1.0);
 
-        assert_eq!(scene.try_get(ball).unwrap().transform.scale, Vec3::splat(2.0));
+        assert_eq!(
+            scene.try_get(ball).unwrap().transform.scale,
+            Vec3::splat(2.0)
+        );
     }
 
     #[test]
@@ -1079,7 +1099,10 @@ mod scene_test {
         run(&mut scene, 1.0);
 
         let now = scene.try_get(ball).unwrap().transform.position;
-        assert!((now - frozen_at).length() < 0.05, "冻住的球还在动：{frozen_at:?} → {now:?}");
+        assert!(
+            (now - frozen_at).length() < 0.05,
+            "冻住的球还在动：{frozen_at:?} → {now:?}"
+        );
     }
 
     #[test]
@@ -1102,7 +1125,6 @@ mod scene_test {
         assert!((y - 2.0).abs() < 0.15, "换形状后球停在了 {y}");
         assert_eq!(scene.physics().collider_count(), 2, "重建时漏删了旧碰撞体");
     }
-
 
     #[test]
     fn particles_bounce_off_real_scene_geometry() {

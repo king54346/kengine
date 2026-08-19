@@ -270,7 +270,7 @@ mod test {
         let (new_mid, new_end) = solution.apply(root, mid, end);
 
         // 骨头不能被拉长或压扁，这是 IK 最基本的约束。
-        assert!((( new_mid - root).length() - upper).abs() < 1e-4);
+        assert!(((new_mid - root).length() - upper).abs() < 1e-4);
         assert!(((new_end - new_mid).length() - lower).abs() < 1e-4);
     }
 
@@ -284,7 +284,10 @@ mod test {
 
         // 够不着时应当朝目标伸直，而不是抽搐或缩回。
         let total = (new_mid - root).length() + (new_end - new_mid).length();
-        assert!((( new_end - root).length() - total).abs() < 1e-3, "链没有伸直");
+        assert!(
+            ((new_end - root).length() - total).abs() < 1e-3,
+            "链没有伸直"
+        );
         // 而且要朝着目标的方向。
         let direction = (new_end - root).normalize();
         assert!(direction.dot(Vec3::X) > 0.999);
@@ -359,7 +362,10 @@ mod test {
         // 中关节可能恰好落回原位（旋转轴与它共线），末端却一定会朝目标移动。
         let (_, half_end) = solution.scaled(0.5).apply(root, mid, end);
         assert!((half_end - end).length() > 1e-4, "半权重下末端没动");
-        assert!((half_end - exact_end).length() > 1e-4, "半权重下末端就已经到位了");
+        assert!(
+            (half_end - exact_end).length() > 1e-4,
+            "半权重下末端就已经到位了"
+        );
     }
 
     #[test]

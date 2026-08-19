@@ -55,8 +55,8 @@
 
 #![warn(missing_docs)]
 
-pub use kapp;
 pub use kanim;
+pub use kapp;
 pub use kasset;
 pub use kaudio;
 pub use kcamera;
@@ -69,8 +69,8 @@ pub use kmaterial;
 pub use kmath;
 pub use kmesh;
 pub use kparticle;
-pub use kphysics;
 pub use kpbr;
+pub use kphysics;
 pub use krender;
 pub use kscene;
 pub use kscript;
@@ -101,26 +101,26 @@ pub mod prelude {
         AnimationClip, Animator, BlendTree, Condition, IkChain, Parameters, State, StateMachine,
         Transition,
     };
+    pub use kaudio::{
+        Attenuation, AudioBuffer, AudioDevice, AudioLoader, Listener, Mixer, Sound, Spatial, Status,
+    };
+    pub use klight::{Light, LightKind};
     pub use kmesh::{Mesh, SkinVertex, Vertex};
     pub use kparticle::{
         BlendMode, Collision, CollisionResponse, ColorGradient, Curve, Emitter, EmitterShape,
         ParticleSystem, Space, SurfaceHit,
     };
     pub use kpbr::{Environment, PbrMaterial};
-    pub use krender::RenderStats;
-    pub use klight::{Light, LightKind};
     pub use kphysics::{
         BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, CollisionEvent, InteractionGroups,
         JointDesc, JointHandle, JointKind, PhysicsWorld, RayCastOptions, RayHit, RigidBodyDesc,
         RigidBodyType, ShapeCastOptions, SphericalLimits,
     };
+    pub use krender::RenderStats;
     pub use kscene::{
         AnimationPlayer, Cell, Collider, Joint, LimbDesc, Node, Ragdoll, RagdollBuilder,
         RagdollLimb, RigidBody, Scene, SceneRayHit, ScriptSlot, Skin, SoundSource, Streaming,
         Transform, hinge_limits,
-    };
-    pub use kaudio::{
-        Attenuation, AudioBuffer, AudioDevice, AudioLoader, Listener, Mixer, Sound, Spatial, Status,
     };
     pub use kscript::{Script, ScriptLoader, ScriptRuntime, ScriptStats, Signal};
     pub use kshader::{Shader, ShaderLoader};

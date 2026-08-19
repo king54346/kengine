@@ -307,7 +307,6 @@ impl Material {
     }
 }
 
-
 impl MaterialValue {
     /// 类型标签，序列化时区分变体用。
     ///
@@ -439,9 +438,7 @@ mod test {
 
     #[test]
     fn values_can_be_overwritten() {
-        let material = Material::standard()
-            .with_roughness(0.1)
-            .with_roughness(0.9);
+        let material = Material::standard().with_roughness(0.1).with_roughness(0.9);
 
         assert_eq!(material.roughness(), 0.9);
     }
@@ -459,7 +456,9 @@ mod test {
         let material = Material::new().with("wind_strength", 2.5f32);
 
         assert_eq!(
-            material.get("wind_strength").and_then(MaterialValue::as_float),
+            material
+                .get("wind_strength")
+                .and_then(MaterialValue::as_float),
             Some(2.5)
         );
         assert_eq!(material.values().count(), 1);
@@ -473,7 +472,6 @@ mod test {
         let stored = material.base_color_texture().expect("贴图应当存在");
         assert_eq!(stored, &texture);
     }
-
 
     // ── 内容版本号 ──
 
@@ -622,7 +620,11 @@ mod test {
     #[test]
     fn a_material_without_a_shader_reads_back_without_one() {
         let manager = kasset::ResourceManager::new();
-        assert!(roundtrip(&Material::standard(), &manager).shader().is_none());
+        assert!(
+            roundtrip(&Material::standard(), &manager)
+                .shader()
+                .is_none()
+        );
     }
 
     #[test]

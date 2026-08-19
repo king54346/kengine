@@ -61,7 +61,8 @@ mod test {
             let current = distance(i as f32 / 10.0, range);
             assert!(
                 current <= previous + 1e-6,
-                "衰减应单调递减，在 d={} 处回升", i as f32 / 10.0
+                "衰减应单调递减，在 d={} 处回升",
+                i as f32 / 10.0
             );
             previous = current;
         }

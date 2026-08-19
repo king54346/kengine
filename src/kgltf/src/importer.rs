@@ -331,10 +331,7 @@ async fn load_textures(
     textures
 }
 
-fn import_materials(
-    gltf: &gltf::Gltf,
-    textures: &[Option<Resource<Texture>>],
-) -> Vec<Material> {
+fn import_materials(gltf: &gltf::Gltf, textures: &[Option<Resource<Texture>>]) -> Vec<Material> {
     gltf.materials()
         .map(|source| {
             let pbr = source.pbr_metallic_roughness();
@@ -392,12 +389,10 @@ fn import_meshes(
             let positions: Vec<[f32; 3]> = positions.collect();
 
             let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(Iterator::collect);
-            let uvs: Option<Vec<[f32; 2]>> = reader
-                .read_tex_coords(0)
-                .map(|tc| tc.into_f32().collect());
-            let colors: Option<Vec<[f32; 4]>> = reader
-                .read_colors(0)
-                .map(|c| c.into_rgba_f32().collect());
+            let uvs: Option<Vec<[f32; 2]>> =
+                reader.read_tex_coords(0).map(|tc| tc.into_f32().collect());
+            let colors: Option<Vec<[f32; 4]>> =
+                reader.read_colors(0).map(|c| c.into_rgba_f32().collect());
             let tangents: Option<Vec<[f32; 4]>> = reader.read_tangents().map(Iterator::collect);
 
             let vertices: Vec<Vertex> = positions
@@ -452,7 +447,8 @@ fn import_meshes(
             }
 
             // ── 形变目标 ──
-            let morph_targets = read_morph_targets(&primitive, &reader, mesh.vertices().len(), &target_names);
+            let morph_targets =
+                read_morph_targets(&primitive, &reader, mesh.vertices().len(), &target_names);
             if !morph_targets.is_empty() {
                 mesh = mesh.with_morph_targets(morph_targets, default_weights.clone());
             }
@@ -461,10 +457,7 @@ fn import_meshes(
                 let skin: Vec<SkinVertex> = (0..mesh.vertices().len())
                     .map(|index| SkinVertex {
                         joints: joints.get(index).copied().unwrap_or([0; 4]),
-                        weights: weights
-                            .get(index)
-                            .copied()
-                            .unwrap_or([1.0, 0.0, 0.0, 0.0]),
+                        weights: weights.get(index).copied().unwrap_or([1.0, 0.0, 0.0, 0.0]),
                     })
                     .collect();
                 // 权重的归一化交给 `with_skin`，它对所有来源一视同仁。

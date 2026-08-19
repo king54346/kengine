@@ -5,11 +5,11 @@
 //!
 //! [`async-executor`]: https://crates.io/crates/async-executor
 
+use derive_more::{Deref, DerefMut};
 use std::{
     fmt,
     panic::{RefUnwindSafe, UnwindSafe},
 };
-use derive_more::{Deref, DerefMut};
 
 // 直接复用 async-executor 库的实现，这里只是起别名，方便后面包一层。
 type ExecutorInner<'a> = async_executor::Executor<'a>;

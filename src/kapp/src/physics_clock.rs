@@ -144,7 +144,10 @@ mod test {
         }
 
         let accounted = simulated + clock.leftover();
-        assert!((accounted - 1.0).abs() < 1e-3, "喂进去 1 秒，账上只有 {accounted} 秒");
+        assert!(
+            (accounted - 1.0).abs() < 1e-3,
+            "喂进去 1 秒，账上只有 {accounted} 秒"
+        );
         // 零头按定义不该攒够一步。
         assert!(clock.leftover() < clock.step());
     }

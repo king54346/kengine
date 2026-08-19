@@ -251,7 +251,11 @@ impl Scene {
         let mut mixer = device.mixer().lock();
         for position in 0..self.index.sounds.len() {
             let handle = self.index.sounds[position];
-            let Some(source) = self.nodes.try_borrow_mut(handle).ok().and_then(|n| n.sound.as_deref_mut())
+            let Some(source) = self
+                .nodes
+                .try_borrow_mut(handle)
+                .ok()
+                .and_then(|n| n.sound.as_deref_mut())
             else {
                 continue;
             };
@@ -338,8 +342,7 @@ mod test {
         let manager = manager();
         let mut scene = Scene::new();
         let node = scene.add_node(
-            Node::new("mover")
-                .with_sound(SoundSource::spatial(beep(&manager), Spatial::default())),
+            Node::new("mover").with_sound(SoundSource::spatial(beep(&manager), Spatial::default())),
         );
 
         scene.update();
@@ -351,7 +354,10 @@ mod test {
 
         let native = scene[node].sound().unwrap().native().unwrap();
         let mixer = device.mixer().lock();
-        assert_eq!(mixer.sound(native).unwrap().position, Vec3::new(7.0, 0.0, -3.0));
+        assert_eq!(
+            mixer.sound(native).unwrap().position,
+            Vec3::new(7.0, 0.0, -3.0)
+        );
     }
 
     #[test]
@@ -374,7 +380,11 @@ mod test {
         let listener = device.mixer().lock().listener;
         assert!((listener.position - Vec3::new(0.0, 2.0, 10.0)).length() < 1e-4);
         // 相机看向原点，听者的前方也该指向原点。
-        assert!(listener.forward.z < 0.0, "听者朝向不对：{:?}", listener.forward);
+        assert!(
+            listener.forward.z < 0.0,
+            "听者朝向不对：{:?}",
+            listener.forward
+        );
     }
 
     #[test]
@@ -418,11 +428,17 @@ mod test {
 
         scene[node].sound_mut().unwrap().pause();
         scene.tick_audio(&device);
-        assert_eq!(device.mixer().lock().sound(native).unwrap().status(), Status::Paused);
+        assert_eq!(
+            device.mixer().lock().sound(native).unwrap().status(),
+            Status::Paused
+        );
 
         scene[node].sound_mut().unwrap().play();
         scene.tick_audio(&device);
-        assert_eq!(device.mixer().lock().sound(native).unwrap().status(), Status::Playing);
+        assert_eq!(
+            device.mixer().lock().sound(native).unwrap().status(),
+            Status::Playing
+        );
     }
 
     #[test]
@@ -430,14 +446,17 @@ mod test {
         let device = AudioDevice::silent();
         let manager = manager();
         let mut scene = Scene::new();
-        let node = scene
-            .add_node(Node::new("s").with_sound(SoundSource::new(beep(&manager)).paused()));
+        let node =
+            scene.add_node(Node::new("s").with_sound(SoundSource::new(beep(&manager)).paused()));
 
         scene.update();
         scene.tick_audio(&device);
 
         let native = scene[node].sound().unwrap().native().unwrap();
-        assert_eq!(device.mixer().lock().sound(native).unwrap().status(), Status::Paused);
+        assert_eq!(
+            device.mixer().lock().sound(native).unwrap().status(),
+            Status::Paused
+        );
     }
 
     #[test]
@@ -492,12 +511,9 @@ mod test {
         let device = AudioDevice::silent();
         let manager = manager();
         let mut scene = Scene::new();
-        let node = scene.add_node(
-            Node::new("hum").with_sound(
-                SoundSource::new(manager.request_blocking::<AudioBuffer>("hum.wav").unwrap())
-                    .looping(),
-            ),
-        );
+        let node = scene.add_node(Node::new("hum").with_sound(
+            SoundSource::new(manager.request_blocking::<AudioBuffer>("hum.wav").unwrap()).looping(),
+        ));
 
         scene.update();
         scene.tick_audio(&device);

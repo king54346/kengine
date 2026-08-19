@@ -8,7 +8,6 @@ use syn::*;
 
 // impl `#[derive(Visit)]` for `struct` or `enum`
 pub fn impl_visit(ast: DeriveInput) -> TokenStream {
-
     let ty_args = args::TypeArgs::from_derive_input(&ast).unwrap();
     match &ty_args.data {
         ast::Data::Struct(field_args) => self::impl_visit_struct(&ty_args, field_args),
@@ -64,7 +63,6 @@ fn impl_visit_struct(
         }
     };
     utils::create_impl(ty_args, visit_fn_body)
-
 }
 
 /// impl `Visit` for `enum`

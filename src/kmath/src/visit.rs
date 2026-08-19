@@ -71,5 +71,4 @@ mod test {
         assert!((restored.normal - plane.normal).length() < 1e-6);
         assert!((restored.d - plane.d).abs() < 1e-6);
     }
-
 }

@@ -158,14 +158,12 @@ impl JointDesc {
         let (locked, axis_align) = match &self.kind {
             JointKind::Fixed => (Mask::LOCKED_FIXED_AXES, Quat::IDENTITY),
             JointKind::Spherical { .. } => (Mask::LOCKED_SPHERICAL_AXES, Quat::IDENTITY),
-            JointKind::Revolute { axis, .. } => (
-                Mask::LOCKED_REVOLUTE_AXES,
-                Self::align_x_to(*axis),
-            ),
-            JointKind::Prismatic { axis, .. } => (
-                Mask::LOCKED_PRISMATIC_AXES,
-                Self::align_x_to(*axis),
-            ),
+            JointKind::Revolute { axis, .. } => {
+                (Mask::LOCKED_REVOLUTE_AXES, Self::align_x_to(*axis))
+            }
+            JointKind::Prismatic { axis, .. } => {
+                (Mask::LOCKED_PRISMATIC_AXES, Self::align_x_to(*axis))
+            }
         };
 
         let mut joint = rd::GenericJointBuilder::new(locked)
@@ -293,7 +291,11 @@ mod test {
     #[test]
     fn contacts_are_off_by_default() {
         // 相连的两截肢体几乎必然互相插入，默认开着会抖。
-        assert!(!JointDesc::fixed(Vec3::ZERO, Vec3::ZERO).build().contacts_enabled());
+        assert!(
+            !JointDesc::fixed(Vec3::ZERO, Vec3::ZERO)
+                .build()
+                .contacts_enabled()
+        );
         assert!(
             JointDesc::fixed(Vec3::ZERO, Vec3::ZERO)
                 .with_contacts()

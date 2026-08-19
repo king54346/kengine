@@ -177,7 +177,11 @@ mod test {
             assert_eq!(read, Vec3::Y * 42.0, "同一次 tick 里没读到刚写的值");
         }
 
-        assert_eq!(scene[node].transform.position, Vec3::Y * 42.0, "改动没搬回来");
+        assert_eq!(
+            scene[node].transform.position,
+            Vec3::Y * 42.0,
+            "改动没搬回来"
+        );
     }
 
     #[test]

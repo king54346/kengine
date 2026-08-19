@@ -132,9 +132,7 @@ mod test {
         // 与太阳相反的方向不该有任何太阳贡献。
         let opposite = -sky.sun_direction;
 
-        assert!(
-            (sky.sample(opposite) - sky.sample_without_sun(opposite)).length() < 1e-6
-        );
+        assert!((sky.sample(opposite) - sky.sample_without_sun(opposite)).length() < 1e-6);
     }
 
     #[test]

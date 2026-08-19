@@ -10,9 +10,8 @@ use concurrent_queue::ConcurrentQueue;
 use futures_lite::FutureExt;
 
 use crate::{
-    block_on,
+    Task, block_on,
     thread_executor::{ThreadExecutor, ThreadExecutorTicker},
-    Task,
 };
 
 struct CallOnDrop(Option<Arc<dyn Fn() + Send + Sync + 'static>>);
@@ -489,7 +488,7 @@ impl TaskPool {
                             scope_ticker,
                             get_results,
                         )
-                            .await
+                        .await
                     }
                     (Some(external_ticker), false) => {
                         Self::execute_external_scope(external_ticker, scope_ticker, get_results)

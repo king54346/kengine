@@ -93,9 +93,7 @@ impl Aabb {
 
     /// 是否包含某个点。
     pub fn contains(&self, point: Vec3) -> bool {
-        !self.is_empty()
-            && point.cmpge(self.min).all()
-            && point.cmple(self.max).all()
+        !self.is_empty() && point.cmpge(self.min).all() && point.cmple(self.max).all()
     }
 
     /// 是否与另一个包围盒相交（接触算相交）。

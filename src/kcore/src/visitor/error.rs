@@ -121,10 +121,9 @@ impl Display for VisitError {
             Self::FieldAlreadyExists(name) => write!(f, "字段已存在：{name}"),
             Self::RegionAlreadyExists(name) => write!(f, "区域已存在：{name}"),
             Self::InvalidCurrentNode => write!(f, "无效的当前节点"),
-            Self::FieldTypeDoesNotMatch { expected, actual } => write!(
-                f,
-                "字段类型不匹配。预期：{expected}，实际：{actual}"
-            ),
+            Self::FieldTypeDoesNotMatch { expected, actual } => {
+                write!(f, "字段类型不匹配。预期：{expected}，实际：{actual}")
+            }
             Self::RegionDoesNotExist(name) => write!(f, "区域不存在：{name}"),
             Self::NoActiveNode => write!(f, "无活跃节点"),
             Self::NotSupportedFormat => write!(f, "不支持的格式"),

@@ -1,9 +1,17 @@
-use std::{cell::{RefCell, Cell}, future::Future, marker::PhantomData, mem, string::String, thread_local, vec::Vec};
 use std::sync::Arc;
+use std::{
+    cell::{Cell, RefCell},
+    future::Future,
+    marker::PhantomData,
+    mem,
+    string::String,
+    thread_local,
+    vec::Vec,
+};
 
 use crate::executor::LocalExecutor;
 use crate::executor::LocalExecutor as Executor;
-use crate::{block_on, Task};
+use crate::{Task, block_on};
 
 thread_local! {
     static LOCAL_EXECUTOR: Executor<'static> = const { Executor::new() };
@@ -315,7 +323,7 @@ impl<T> MaybeSync for T {}
 
 #[cfg(test)]
 mod test {
-    use std::{time, thread};
+    use std::{thread, time};
 
     use super::*;
 
@@ -335,9 +343,7 @@ mod test {
             let _ = sender.send(0);
         });
         task_pool.scope(|scope| {
-            scope.spawn(async {
-                receiver.recv().await
-            });
+            scope.spawn(async { receiver.recv().await });
         });
     }
 }

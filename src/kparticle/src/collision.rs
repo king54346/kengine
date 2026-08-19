@@ -344,18 +344,23 @@ mod test {
     #[test]
     fn several_planes_all_get_a_say() {
         // 墙角：两块平面同时把粒子往外推。
-        let collision = Collision::default()
-            .with_plane(ground())
-            .with_plane(Plane {
-                normal: Vec3::X,
-                d: 0.0,
-            });
+        let collision = Collision::default().with_plane(ground()).with_plane(Plane {
+            normal: Vec3::X,
+            d: 0.0,
+        });
 
-        let resolved =
-            resolve_planes(&collision, Vec3::new(-1.0, -1.0, 0.0), Vec3::new(-1.0, -1.0, 0.0), 1.0)
-                .unwrap();
+        let resolved = resolve_planes(
+            &collision,
+            Vec3::new(-1.0, -1.0, 0.0),
+            Vec3::new(-1.0, -1.0, 0.0),
+            1.0,
+        )
+        .unwrap();
 
-        assert!(resolved.position.x >= 0.0 && resolved.position.y >= 0.0, "没被推出墙角");
+        assert!(
+            resolved.position.x >= 0.0 && resolved.position.y >= 0.0,
+            "没被推出墙角"
+        );
         assert!(resolved.velocity.x >= 0.0 && resolved.velocity.y >= 0.0);
     }
 
@@ -369,13 +374,19 @@ mod test {
             .with_plane(slope)
             .with_response(CollisionResponse::default().with_material(1.0, 0.0));
 
-        let resolved = resolve_planes(&collision, Vec3::new(-1.0, -1.0, 0.0), Vec3::NEG_Y, 1.0)
-            .unwrap();
+        let resolved =
+            resolve_planes(&collision, Vec3::new(-1.0, -1.0, 0.0), Vec3::NEG_Y, 1.0).unwrap();
 
         // 完全弹性下速率不变，方向被镜像到斜面另一侧。
         assert!((resolved.velocity.length() - 1.0).abs() < 1e-5);
-        assert!(resolved.velocity.dot(slope.normal) > 0.0, "反射后仍朝着斜面里");
-        assert!(slope.distance_to(resolved.position) > -1e-5, "没被推到斜面外侧");
+        assert!(
+            resolved.velocity.dot(slope.normal) > 0.0,
+            "反射后仍朝着斜面里"
+        );
+        assert!(
+            slope.distance_to(resolved.position) > -1e-5,
+            "没被推到斜面外侧"
+        );
     }
 
     #[test]

@@ -231,9 +231,7 @@ impl Input {
                 let (x, y) = match delta {
                     MouseScrollDelta::LineDelta(x, y) => (*x, *y),
                     // 像素滚动量级远大于行数，缩放到相近范围便于统一处理。
-                    MouseScrollDelta::PixelDelta(p) => {
-                        (p.x as f32 / 120.0, p.y as f32 / 120.0)
-                    }
+                    MouseScrollDelta::PixelDelta(p) => (p.x as f32 / 120.0, p.y as f32 / 120.0),
                 };
                 self.scroll_delta += Vec2::new(x, y);
             }

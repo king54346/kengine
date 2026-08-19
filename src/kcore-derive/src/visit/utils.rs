@@ -1,12 +1,11 @@
-
 use darling::ast;
 use fxhash::FxHashSet;
 use proc_macro2::TokenStream;
 use quote::*;
 use syn::*;
 
-use convert_case::*;
 use crate::visit::args;
+use convert_case::*;
 
 pub fn create_impl(ty_args: &args::TypeArgs, impl_body: TokenStream) -> TokenStream {
     let ty_ident = &ty_args.ident;

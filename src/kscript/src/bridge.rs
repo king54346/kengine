@@ -41,7 +41,11 @@ fn vec3(args: &[JsValue], start: usize, context: &mut Context) -> JsResult<Vec3>
 }
 
 /// 取节点句柄参数。
-fn node_arg(args: &[JsValue], index: usize, context: &mut Context) -> JsResult<Option<Handle<Node>>> {
+fn node_arg(
+    args: &[JsValue],
+    index: usize,
+    context: &mut Context,
+) -> JsResult<Option<Handle<Node>>> {
     Ok(handle_of(number(args, index, context)?))
 }
 
@@ -68,14 +72,18 @@ pub(crate) fn register(context: &mut Context) {
         // ── 时间 ──
         .function(
             NativeFunction::from_fn_ptr(|_, _, _| {
-                Ok(JsValue::from(with_host(|host| host.elapsed).unwrap_or(0.0) as f64))
+                Ok(JsValue::from(
+                    with_host(|host| host.elapsed).unwrap_or(0.0) as f64
+                ))
             }),
             js_string!("time"),
             0,
         )
         .function(
             NativeFunction::from_fn_ptr(|_, _, _| {
-                Ok(JsValue::from(with_host(|host| host.dt).unwrap_or(0.0) as f64))
+                Ok(JsValue::from(
+                    with_host(|host| host.dt).unwrap_or(0.0) as f64
+                ))
             }),
             js_string!("delta"),
             0,
@@ -451,7 +459,11 @@ pub(crate) fn register(context: &mut Context) {
                     .property(js_string!("nx"), hit.normal.x as f64, Attribute::all())
                     .property(js_string!("ny"), hit.normal.y as f64, Attribute::all())
                     .property(js_string!("nz"), hit.normal.z as f64, Attribute::all())
-                    .property(js_string!("distance"), hit.distance as f64, Attribute::all())
+                    .property(
+                        js_string!("distance"),
+                        hit.distance as f64,
+                        Attribute::all(),
+                    )
                     .build()
                     .into())
             }),

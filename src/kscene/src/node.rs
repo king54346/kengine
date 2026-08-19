@@ -1,15 +1,15 @@
 //! 场景节点。
 
-use crate::{Camera, Mesh, Transform};
-use klight::Light;
-use kcore::pool::Handle;
-use kmaterial::Material;
-use kmath::{Aabb, Mat4, Vec3};
-use crate::physics::{Collider, Joint, RigidBody};
 use crate::audio::SoundSource;
+use crate::physics::{Collider, Joint, RigidBody};
 use crate::ragdoll::Ragdoll;
 use crate::script::ScriptSlot;
 use crate::skin::{AnimationPlayer, Skin};
+use crate::{Camera, Mesh, Transform};
+use kcore::pool::Handle;
+use klight::Light;
+use kmaterial::Material;
+use kmath::{Aabb, Mat4, Vec3};
 use kparticle::ParticleSystem;
 
 /// 场景树中的一个节点。
@@ -308,7 +308,11 @@ impl Node {
 
     /// 按形变目标的名字设置权重，返回是否找到了这个名字。
     pub fn set_morph_weight_by_name(&mut self, name: &str, weight: f32) -> bool {
-        let Some(index) = self.mesh.as_ref().and_then(|mesh| mesh.find_morph_target(name)) else {
+        let Some(index) = self
+            .mesh
+            .as_ref()
+            .and_then(|mesh| mesh.find_morph_target(name))
+        else {
             return false;
         };
         self.set_morph_weight(index, weight);

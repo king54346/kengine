@@ -140,7 +140,10 @@ mod test {
     }
 
     /// 存进 Visitor 再读回来，读取端带上资源管理器。
-    fn roundtrip(slot: &mut Option<Resource<Note>>, manager: &ResourceManager) -> Option<Resource<Note>> {
+    fn roundtrip(
+        slot: &mut Option<Resource<Note>>,
+        manager: &ResourceManager,
+    ) -> Option<Resource<Note>> {
         let mut visitor = Visitor::new();
         visit_resource_option("Slot", slot, &mut visitor).unwrap();
         let bytes = visitor.save_binary_to_vec().unwrap();

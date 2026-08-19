@@ -64,7 +64,11 @@ impl PackWriter {
     pub fn add(&mut self, path: impl AsRef<Path>, contents: impl Into<Vec<u8>>) {
         let name = normalize(path.as_ref());
         let contents = contents.into();
-        match self.entries.iter_mut().find(|(existing, _)| *existing == name) {
+        match self
+            .entries
+            .iter_mut()
+            .find(|(existing, _)| *existing == name)
+        {
             Some(slot) => slot.1 = contents,
             None => self.entries.push((name, contents)),
         }
@@ -229,7 +233,8 @@ impl PackResourceIo {
             if cursor + 4 > body {
                 return Err(PackError::Truncated);
             }
-            let name_len = u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
+            let name_len =
+                u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
             cursor += 4;
 
             if cursor + name_len + 16 > body {
@@ -286,13 +291,15 @@ impl PackResourceIo {
 impl ResourceIo for PackResourceIo {
     fn load_file<'a>(&'a self, path: &'a Path) -> BoxedFuture<'a, Result<Vec<u8>, LoadError>> {
         Box::pin(async move {
-            self.get(path).map(<[u8]>::to_vec).ok_or_else(|| LoadError::Io {
-                path: path.to_path_buf(),
-                source: Arc::new(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "资源包里没有这个路径",
-                )),
-            })
+            self.get(path)
+                .map(<[u8]>::to_vec)
+                .ok_or_else(|| LoadError::Io {
+                    path: path.to_path_buf(),
+                    source: Arc::new(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "资源包里没有这个路径",
+                    )),
+                })
         })
     }
 

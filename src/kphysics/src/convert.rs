@@ -89,7 +89,10 @@ mod test {
         let expected = q * v;
         let actual = from_rv(to_rq(q) * to_rv(v));
 
-        assert!((actual - expected).length() < 1e-5, "{actual:?} vs {expected:?}");
+        assert!(
+            (actual - expected).length() < 1e-5,
+            "{actual:?} vs {expected:?}"
+        );
     }
 
     #[test]

@@ -105,7 +105,12 @@ impl<T: ResourceData> Resource<T> {
 
 impl<T: ResourceData> Debug for Resource<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Resource<{}>({:?})", std::any::type_name::<T>(), self.untyped)
+        write!(
+            f,
+            "Resource<{}>({:?})",
+            std::any::type_name::<T>(),
+            self.untyped
+        )
     }
 }
 

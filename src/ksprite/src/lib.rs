@@ -289,7 +289,10 @@ impl Atlas {
         for row in 0..rows {
             for column in 0..columns {
                 let min = Vec2::new(column as f32 * step.x, row as f32 * step.y);
-                atlas.push(format!("{row}_{column}"), SpriteRegion::new(min, min + step));
+                atlas.push(
+                    format!("{row}_{column}"),
+                    SpriteRegion::new(min, min + step),
+                );
             }
         }
         atlas
@@ -715,11 +718,8 @@ mod test {
     #[test]
     fn sizing_by_height_preserves_the_region_aspect() {
         // 图集里各格宽高不一时，手写尺寸会把精灵拉变形。
-        let sprite = Sprite::from_region(SpriteRegion::new(
-            Vec2::ZERO,
-            Vec2::new(0.5, 0.25),
-        ))
-        .with_height(2.0);
+        let sprite = Sprite::from_region(SpriteRegion::new(Vec2::ZERO, Vec2::new(0.5, 0.25)))
+            .with_height(2.0);
 
         // 该格是 2:1 的，高 2 就该宽 4。
         assert_eq!(sprite.size, Vec2::new(4.0, 2.0));
@@ -775,8 +775,8 @@ mod test {
 
     #[test]
     fn ping_pong_with_a_single_frame_stays_put() {
-        let mut animation = SpriteAnimation::new(vec![SpriteRegion::FULL], 10.0)
-            .with_mode(PlayMode::PingPong);
+        let mut animation =
+            SpriteAnimation::new(vec![SpriteRegion::FULL], 10.0).with_mode(PlayMode::PingPong);
 
         animation.tick(5.0);
 

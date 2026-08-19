@@ -273,7 +273,8 @@ impl Mixer {
 
             let source_frames = sound.buffer.frame_count() as f64;
             // 源采样率与输出采样率的比值就是重采样系数；音高乘在上面。
-            let step = sound.buffer.sample_rate() as f64 / output_rate * sound.pitch.max(0.0) as f64;
+            let step =
+                sound.buffer.sample_rate() as f64 / output_rate * sound.pitch.max(0.0) as f64;
 
             let target = sound.target_gains(&listener);
             let target = [target[0] * master, target[1] * master];
@@ -458,7 +459,10 @@ mod test {
         // 一块 256 帧远长于 64 帧的素材，中间必然绕好几圈。
         let out = render(&mut mixer, 256, 2);
 
-        assert!(out.iter().all(|s| (*s - 1.0).abs() < 1e-5), "循环时出现了静音空档");
+        assert!(
+            out.iter().all(|s| (*s - 1.0).abs() < 1e-5),
+            "循环时出现了静音空档"
+        );
     }
 
     #[test]
@@ -519,7 +523,8 @@ mod test {
             // 只看距离，把方向的影响排除掉。
             .with_panning(0.0);
 
-        let near = mixer.add(Sound::new(constant(48_000, 48_000)).with_spatial(Vec3::Z * -1.0, spatial));
+        let near =
+            mixer.add(Sound::new(constant(48_000, 48_000)).with_spatial(Vec3::Z * -1.0, spatial));
         render(&mut mixer, 8, 2);
         let near_level = render(&mut mixer, 8, 2)[0];
         mixer.remove(near);
@@ -528,7 +533,10 @@ mod test {
         render(&mut mixer, 8, 2);
         let far_level = render(&mut mixer, 8, 2)[0];
 
-        assert!(far_level < near_level * 0.2, "远处 {far_level} 对近处 {near_level}");
+        assert!(
+            far_level < near_level * 0.2,
+            "远处 {far_level} 对近处 {near_level}"
+        );
     }
 
     #[test]
@@ -699,7 +707,10 @@ mod test {
         // 过渡块，峰值仍然是起点值——这正是块间过渡该有的样子。
         mixer.master_gain = 0.0;
         render(&mut mixer, 64, 2);
-        assert!((mixer.last_peak() - 0.75).abs() < 1e-5, "过渡块不该立刻静音");
+        assert!(
+            (mixer.last_peak() - 0.75).abs() < 1e-5,
+            "过渡块不该立刻静音"
+        );
 
         render(&mut mixer, 64, 2);
         assert_eq!(mixer.last_peak(), 0.0);

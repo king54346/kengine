@@ -87,7 +87,6 @@ impl Visit for Mat4 {
     }
 }
 
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -172,6 +171,9 @@ mod test {
 
         let text = visitor.save_ascii_to_string();
         assert!(text.contains("Position"), "{text}");
-        assert!(text.contains('X') && text.contains('Y') && text.contains('Z'), "{text}");
+        assert!(
+            text.contains('X') && text.contains('Y') && text.contains('Z'),
+            "{text}"
+        );
     }
 }

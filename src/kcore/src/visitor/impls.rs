@@ -1,7 +1,7 @@
 use crate::{
     replace_slashes,
     visitor::{
-        error::VisitError, field::FieldKind, BinaryBlob, Field, Visit, VisitResult, Visitor,
+        BinaryBlob, Field, Visit, VisitResult, Visitor, error::VisitError, field::FieldKind,
     },
 };
 use nalgebra::{Matrix2, Matrix3, Matrix4, UnitComplex, UnitQuaternion, Vector2, Vector3, Vector4};
@@ -363,15 +363,15 @@ unsafe fn rc_to_ptr<T>(rc: &Rc<T>) -> *mut T {
 
 // FIXME: Visiting an Rc/Arc is undefined behavior because it mutates the shared data.
 #[allow(clippy::mut_from_ref)]
-unsafe fn arc_to_raw<T>(arc: &Arc<T>) -> &mut T { unsafe {
-    &mut *arc_to_ptr(arc)
-}}
+unsafe fn arc_to_raw<T>(arc: &Arc<T>) -> &mut T {
+    unsafe { &mut *arc_to_ptr(arc) }
+}
 
 // FIXME: Visiting an Rc/Arc is undefined behavior because it mutates the shared data.
 #[allow(clippy::mut_from_ref)]
-unsafe fn rc_to_raw<T>(rc: &Rc<T>) -> &mut T { unsafe {
-    &mut *rc_to_ptr(rc)
-}}
+unsafe fn rc_to_raw<T>(rc: &Rc<T>) -> &mut T {
+    unsafe { &mut *rc_to_ptr(rc) }
+}
 
 impl<T> Visit for Arc<T>
 where

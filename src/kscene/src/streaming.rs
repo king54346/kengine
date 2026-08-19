@@ -62,7 +62,12 @@ pub struct Cell {
 
 impl Cell {
     /// 描述一个区块。
-    pub fn new(name: impl Into<String>, path: impl Into<PathBuf>, center: Vec3, radius: f32) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        path: impl Into<PathBuf>,
+        center: Vec3,
+        radius: f32,
+    ) -> Self {
         Self {
             name: name.into(),
             path: path.into(),
@@ -350,7 +355,11 @@ mod test {
     use kmesh::Mesh;
 
     /// 造一个区块场景文件，返回路径。
-    fn write_cell(directory: &std::path::Path, name: &str, build: impl FnOnce(&mut Scene)) -> PathBuf {
+    fn write_cell(
+        directory: &std::path::Path,
+        name: &str,
+        build: impl FnOnce(&mut Scene),
+    ) -> PathBuf {
         let mut scene = Scene::new();
         build(&mut scene);
         let path = directory.join(format!("{name}.scene"));
@@ -543,7 +552,10 @@ mod test {
         streaming.add_cell(Cell::new("a", path, Vec3::ZERO, 1.0));
 
         assert!(streaming.force_load(&mut scene, "a", None));
-        assert!(!streaming.force_load(&mut scene, "a", None), "重复装载该被忽略");
+        assert!(
+            !streaming.force_load(&mut scene, "a", None),
+            "重复装载该被忽略"
+        );
         assert_eq!(streaming.loaded_count(), 1);
 
         assert!(streaming.force_unload(&mut scene, "a"));

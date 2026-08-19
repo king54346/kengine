@@ -30,8 +30,8 @@ mod loader;
 mod model;
 mod uri;
 
-pub use loader::GltfLoader;
 pub use kanim::AnimationClip;
+pub use loader::GltfLoader;
 pub use model::{MODEL_TYPE_UUID, MeshPart, Model, ModelNode, ModelSkin, NodeTransform};
 
 /// 常用类型的集中导出。

@@ -104,7 +104,10 @@ impl AudioDevice {
         // 只处理 f32 输出。现代系统上默认格式几乎总是 f32；
         // 遇到别的格式宁可退回静默，也不要在这里铺开一堆样本格式转换。
         if supported.sample_format() != cpal::SampleFormat::F32 {
-            return Err(format!("输出格式是 {:?}，只支持 F32", supported.sample_format()));
+            return Err(format!(
+                "输出格式是 {:?}，只支持 F32",
+                supported.sample_format()
+            ));
         }
 
         let stream = device

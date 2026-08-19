@@ -22,7 +22,6 @@ pub struct Handle<T> {
     pub(super) type_marker: PhantomData<T>,
 }
 
-
 impl<T> Copy for Handle<T> {}
 
 impl<T> Eq for Handle<T> {}
@@ -450,7 +449,7 @@ mod test {
                 index: 42,
                 generation: 15
             }
-                .index(),
+            .index(),
             42
         );
     }
@@ -462,7 +461,7 @@ mod test {
                 index: 42,
                 generation: 15
             }
-                .generation(),
+            .generation(),
             15
         );
     }

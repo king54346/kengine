@@ -47,8 +47,8 @@ where
                 s.spawn(async move { batch.count() });
             }
         })
-            .iter()
-            .sum()
+        .iter()
+        .sum()
     }
 
     /// Consumes the parallel iterator and returns the last item.
@@ -208,9 +208,9 @@ where
                 s.spawn(async move { batch.collect::<Vec<_>>() });
             }
         })
-            .into_iter()
-            .flatten()
-            .collect()
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     /// Consumes a parallel iterator, creating two collections from it.
@@ -230,11 +230,11 @@ where
                 s.spawn(async move { batch.partition::<Vec<_>, F>(newf) });
             }
         })
-            .into_iter()
-            .for_each(|(c, d)| {
-                a.extend(c);
-                b.extend(d);
-            });
+        .into_iter()
+        .for_each(|(c, d)| {
+            a.extend(c);
+            b.extend(d);
+        });
         (a, b)
     }
 
@@ -274,8 +274,8 @@ where
                 s.spawn(async move { batch.all(newf) });
             }
         })
-            .into_iter()
-            .all(core::convert::identity)
+        .into_iter()
+        .all(core::convert::identity)
     }
 
     /// Tests if any element of the parallel iterator matches a predicate.
@@ -293,8 +293,8 @@ where
                 s.spawn(async move { batch.any(newf) });
             }
         })
-            .into_iter()
-            .any(core::convert::identity)
+        .into_iter()
+        .any(core::convert::identity)
     }
 
     /// Searches for an element in a parallel iterator, returning its index.
@@ -347,9 +347,9 @@ where
                 s.spawn(async move { batch.max() });
             }
         })
-            .into_iter()
-            .flatten()
-            .max()
+        .into_iter()
+        .flatten()
+        .max()
     }
 
     /// Returns the minimum item of a parallel iterator.
@@ -364,9 +364,9 @@ where
                 s.spawn(async move { batch.min() });
             }
         })
-            .into_iter()
-            .flatten()
-            .min()
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Returns the item that gives the maximum value from the specified function.
@@ -384,9 +384,9 @@ where
                 s.spawn(async move { batch.max_by_key(newf) });
             }
         })
-            .into_iter()
-            .flatten()
-            .max_by_key(f)
+        .into_iter()
+        .flatten()
+        .max_by_key(f)
     }
 
     /// Returns the item that gives the maximum value with respect to the specified comparison
@@ -404,9 +404,9 @@ where
                 s.spawn(async move { batch.max_by(newf) });
             }
         })
-            .into_iter()
-            .flatten()
-            .max_by(f)
+        .into_iter()
+        .flatten()
+        .max_by(f)
     }
 
     /// Returns the item that gives the minimum value from the specified function.
@@ -424,9 +424,9 @@ where
                 s.spawn(async move { batch.min_by_key(newf) });
             }
         })
-            .into_iter()
-            .flatten()
-            .min_by_key(f)
+        .into_iter()
+        .flatten()
+        .min_by_key(f)
     }
 
     /// Returns the item that gives the minimum value with respect to the specified comparison
@@ -444,9 +444,9 @@ where
                 s.spawn(async move { batch.min_by(newf) });
             }
         })
-            .into_iter()
-            .flatten()
-            .min_by(f)
+        .into_iter()
+        .flatten()
+        .min_by(f)
     }
 
     /// Creates a parallel iterator which copies all of its items.
@@ -497,8 +497,8 @@ where
                 s.spawn(async move { batch.sum() });
             }
         })
-            .into_iter()
-            .sum()
+        .into_iter()
+        .sum()
     }
 
     /// Multiplies all the items of a parallel iterator.
@@ -514,7 +514,7 @@ where
                 s.spawn(async move { batch.product() });
             }
         })
-            .into_iter()
-            .product()
+        .into_iter()
+        .product()
     }
 }

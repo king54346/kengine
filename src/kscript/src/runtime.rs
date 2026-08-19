@@ -291,7 +291,14 @@ impl ScriptRuntime {
 
             if !ready {
                 if let Err(error) = call_method(&mut self.context, &object, "_ready", &[]) {
-                    fail(&mut self.instances, &mut self.stats, index, &name, "_ready", &error);
+                    fail(
+                        &mut self.instances,
+                        &mut self.stats,
+                        index,
+                        &name,
+                        "_ready",
+                        &error,
+                    );
                     continue;
                 }
                 if let Some(instance) = self.instances[index].as_mut() {
@@ -301,7 +308,14 @@ impl ScriptRuntime {
 
             let args = [JsValue::from(dt as f64)];
             if let Err(error) = call_method(&mut self.context, &object, method, &args) {
-                fail(&mut self.instances, &mut self.stats, index, &name, method, &error);
+                fail(
+                    &mut self.instances,
+                    &mut self.stats,
+                    index,
+                    &name,
+                    method,
+                    &error,
+                );
                 continue;
             }
             self.stats.ran += 1;

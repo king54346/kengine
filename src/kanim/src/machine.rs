@@ -432,11 +432,9 @@ impl StateMachine {
             return;
         }
 
-        let Some(transition) = self
-            .transitions
-            .iter()
-            .find(|t| t.from == self.current && t.to != self.current && t.condition.evaluate(parameters))
-        else {
+        let Some(transition) = self.transitions.iter().find(|t| {
+            t.from == self.current && t.to != self.current && t.condition.evaluate(parameters)
+        }) else {
             return;
         };
         if transition.to >= self.states.len() {
@@ -693,7 +691,11 @@ mod test {
 
     #[test]
     fn empty_blend_produces_nothing() {
-        assert!(BlendTree::Blend(Vec::new()).weights(&Parameters::new()).is_empty());
+        assert!(
+            BlendTree::Blend(Vec::new())
+                .weights(&Parameters::new())
+                .is_empty()
+        );
         assert!(
             BlendTree::blend_space_1d("speed", [])
                 .weights(&Parameters::new())

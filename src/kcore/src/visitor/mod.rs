@@ -1,4 +1,3 @@
-
 //! Visitor 是一个基于树形结构的序列化/反序列化器，使用中间表示（IR）来存储数据。
 //! 数据序列化时，首先被转换为中间表示，然后写入磁盘。
 //! 反序列化同理：先将数据（二进制或文本）读取并转换为 IR，再由用户解析。
@@ -15,9 +14,9 @@
 #![warn(missing_docs)]
 
 pub mod blackboard;
-pub mod glam_impls;
 pub mod error;
 pub mod field;
+pub mod glam_impls;
 mod impls;
 pub mod pod;
 mod reader;
@@ -37,8 +36,8 @@ use crate::{
     io::{self},
     pool::{Handle, Pool},
     visitor::{
-        reader::{ascii::AsciiReader, binary::BinaryReader, Reader},
-        writer::{ascii::AsciiWriter, binary::BinaryWriter, Writer},
+        reader::{Reader, ascii::AsciiReader, binary::BinaryReader},
+        writer::{Writer, ascii::AsciiWriter, binary::BinaryWriter},
     },
 };
 use bitflags::bitflags;
@@ -730,13 +729,13 @@ impl Visitor {
 
 #[cfg(test)]
 mod test {
-    use crate::visitor::{prelude::*, BinaryBlob};
+    use crate::visitor::{BinaryBlob, prelude::*};
     use nalgebra::{
         Matrix2, Matrix3, Matrix4, UnitComplex, UnitQuaternion, Vector2, Vector3, Vector4,
     };
     use std::sync::Arc;
     use std::{fs::File, io::Write, path::Path, rc, rc::Rc, sync};
-    use uuid::{uuid, Uuid};
+    use uuid::{Uuid, uuid};
 
     #[derive(Visit, Default, PartialEq, Debug)]
     pub struct Model {

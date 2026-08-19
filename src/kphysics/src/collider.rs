@@ -172,7 +172,9 @@ impl ColliderShape {
             ColliderShape::TriMesh(_)
             | ColliderShape::HalfSpace { .. }
             | ColliderShape::Heightfield { .. } => false,
-            ColliderShape::Compound(parts) => parts.iter().all(|(_, _, s)| s.supports_dynamic_body()),
+            ColliderShape::Compound(parts) => {
+                parts.iter().all(|(_, _, s)| s.supports_dynamic_body())
+            }
             _ => true,
         }
     }
@@ -630,23 +632,25 @@ mod test {
     #[test]
     fn degenerate_geometry_returns_none_instead_of_panicking() {
         // 一个坏模型不该让整个游戏挂掉——退化几何必须走 None 这条路。
-        assert!(ColliderShape::HalfSpace { normal: Vec3::ZERO }
+        assert!(
+            ColliderShape::HalfSpace { normal: Vec3::ZERO }
+                .to_shared_shape()
+                .is_none()
+        );
+        assert!(
+            ColliderShape::TriMesh(Arc::new(TriMeshData {
+                vertices: vec![],
+                indices: vec![],
+            }))
             .to_shared_shape()
-            .is_none());
-        assert!(ColliderShape::TriMesh(Arc::new(TriMeshData {
-            vertices: vec![],
-            indices: vec![],
-        }))
-        .to_shared_shape()
-        .is_none());
+            .is_none()
+        );
         // 三个共线的点撑不出凸包。
-        assert!(ColliderShape::ConvexHull(Arc::new(vec![
-            Vec3::ZERO,
-            Vec3::X,
-            Vec3::X * 2.0
-        ]))
-        .to_shared_shape()
-        .is_none());
+        assert!(
+            ColliderShape::ConvexHull(Arc::new(vec![Vec3::ZERO, Vec3::X, Vec3::X * 2.0]))
+                .to_shared_shape()
+                .is_none()
+        );
         assert!(ColliderShape::Compound(vec![]).to_shared_shape().is_none());
     }
 
@@ -673,8 +677,10 @@ mod test {
     fn only_volumetric_shapes_support_dynamic_bodies() {
         assert!(ColliderShape::ball(1.0).supports_dynamic_body());
         assert!(!ColliderShape::HalfSpace { normal: Vec3::Y }.supports_dynamic_body());
-        assert!(!ColliderShape::TriMesh(Arc::new(TriMeshData::new(vec![], &[])))
-            .supports_dynamic_body());
+        assert!(
+            !ColliderShape::TriMesh(Arc::new(TriMeshData::new(vec![], &[])))
+                .supports_dynamic_body()
+        );
 
         // 复合形状里混进一个三角网格，整体就不能当动态刚体用了。
         let mixed = ColliderShape::Compound(vec![

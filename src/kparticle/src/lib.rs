@@ -536,7 +536,12 @@ impl ParticleSystem {
         };
 
         if columns.len() < PARALLEL_THRESHOLD {
-            simulate(columns, step, &self.color_over_lifetime, &self.size_over_lifetime);
+            simulate(
+                columns,
+                step,
+                &self.color_over_lifetime,
+                &self.size_over_lifetime,
+            );
             return;
         }
 
@@ -583,7 +588,6 @@ impl ParticleSystem {
         }
         bounds
     }
-
 
     /// 所有活着粒子的位置。
     pub fn positions(&self) -> &[Vec3] {
@@ -900,12 +904,11 @@ mod test {
     #[test]
     fn parallel_and_serial_paths_agree() {
         // 一个刚好跨过并行阈值的系统，与一个被强行串行推进的副本对比。
-        let mut parallel = ParticleSystem::new(
-            Emitter::sphere(2.0).with_rate(6000.0).with_lifetime(5.0),
-        )
-        .with_capacity(8192)
-        .with_acceleration(Vec3::new(1.0, -2.0, 0.5))
-        .with_seed(7);
+        let mut parallel =
+            ParticleSystem::new(Emitter::sphere(2.0).with_rate(6000.0).with_lifetime(5.0))
+                .with_capacity(8192)
+                .with_acceleration(Vec3::new(1.0, -2.0, 0.5))
+                .with_seed(7);
         let mut serial = parallel.clone();
 
         run(&mut parallel, 1.0);
@@ -953,16 +956,26 @@ mod test {
     #[test]
     fn world_space_particles_stay_behind() {
         let mut system = ParticleSystem::new(
-            Emitter::default().with_rate(0.0).with_lifetime(10.0).with_speed(0.0),
+            Emitter::default()
+                .with_rate(0.0)
+                .with_lifetime(10.0)
+                .with_speed(0.0),
         )
         .with_space(Space::World);
 
         system.burst(1, Mat4::from_translation(Vec3::new(5.0, 0.0, 0.0)));
         // 发射器移走了，已经出生的粒子不该跟着走。
-        system.tick(1.0 / 60.0, Mat4::from_translation(Vec3::new(100.0, 0.0, 0.0)));
+        system.tick(
+            1.0 / 60.0,
+            Mat4::from_translation(Vec3::new(100.0, 0.0, 0.0)),
+        );
 
         let mut gpu = Vec::new();
-        system.collect(Mat4::from_translation(Vec3::new(100.0, 0.0, 0.0)), Vec3::ZERO, &mut gpu);
+        system.collect(
+            Mat4::from_translation(Vec3::new(100.0, 0.0, 0.0)),
+            Vec3::ZERO,
+            &mut gpu,
+        );
 
         assert!((gpu[0].position[0] - 5.0).abs() < 1e-4);
     }
@@ -970,7 +983,10 @@ mod test {
     #[test]
     fn local_space_particles_follow_the_node() {
         let mut system = ParticleSystem::new(
-            Emitter::default().with_rate(0.0).with_lifetime(10.0).with_speed(0.0),
+            Emitter::default()
+                .with_rate(0.0)
+                .with_lifetime(10.0)
+                .with_speed(0.0),
         )
         .with_space(Space::Local);
 
@@ -987,7 +1003,10 @@ mod test {
     #[test]
     fn collect_sorts_back_to_front() {
         let mut system = ParticleSystem::new(
-            Emitter::sphere(10.0).with_rate(0.0).with_lifetime(10.0).with_speed(0.0),
+            Emitter::sphere(10.0)
+                .with_rate(0.0)
+                .with_lifetime(10.0)
+                .with_speed(0.0),
         )
         .with_seed(5);
         system.burst(200, Mat4::IDENTITY);
@@ -1019,10 +1038,8 @@ mod test {
 
     #[test]
     fn bounds_cover_every_particle() {
-        let mut system = ParticleSystem::new(
-            Emitter::sphere(3.0).with_rate(500.0).with_size(0.5),
-        )
-        .with_seed(11);
+        let mut system =
+            ParticleSystem::new(Emitter::sphere(3.0).with_rate(500.0).with_size(0.5)).with_seed(11);
 
         run(&mut system, 1.0);
 
@@ -1046,7 +1063,11 @@ mod test {
     #[test]
     fn local_bounds_are_transformed_into_world_space() {
         let mut system = ParticleSystem::new(
-            Emitter::default().with_rate(0.0).with_lifetime(10.0).with_speed(0.0).with_size(0.0),
+            Emitter::default()
+                .with_rate(0.0)
+                .with_lifetime(10.0)
+                .with_speed(0.0)
+                .with_size(0.0),
         )
         .with_space(Space::Local);
         system.burst(1, Mat4::IDENTITY);
@@ -1169,9 +1190,8 @@ mod test {
     fn a_bouncy_particle_actually_comes_back_up() {
         // 地面放在 -5：粒子要先自由落体一段，撞上去时才有速度可弹。
         // 出生就贴着地面的话，它只会每帧微弹，永远攒不起速度（见下一个测试）。
-        let mut system = falling_onto_ground(
-            Collision::ground(-5.0).with_response(CollisionResponse::bouncy()),
-        );
+        let mut system =
+            falling_onto_ground(Collision::ground(-5.0).with_response(CollisionResponse::bouncy()));
         system.burst(1, Mat4::IDENTITY);
 
         let mut peak_upward = f32::MIN;
@@ -1191,9 +1211,8 @@ mod test {
         // 出生就贴着地面的粒子每帧会被重力拉进去一点点、再被推回来，
         // 幅度是亚毫米级。这是离散碰撞的正常表现，不是 bug——
         // 记一个测试免得下次有人以为它坏了。
-        let mut system = falling_onto_ground(
-            Collision::ground(0.0).with_response(CollisionResponse::bouncy()),
-        );
+        let mut system =
+            falling_onto_ground(Collision::ground(0.0).with_response(CollisionResponse::bouncy()));
         system.burst(1, Mat4::IDENTITY);
 
         let mut lowest = f32::MAX;
@@ -1207,9 +1226,8 @@ mod test {
 
     #[test]
     fn a_sticky_particle_settles_instead_of_bouncing() {
-        let mut system = falling_onto_ground(
-            Collision::ground(0.0).with_response(CollisionResponse::sticky()),
-        );
+        let mut system =
+            falling_onto_ground(Collision::ground(0.0).with_response(CollisionResponse::sticky()));
         system.burst(1, Mat4::IDENTITY);
 
         run(&mut system, 2.0);
@@ -1248,8 +1266,7 @@ mod test {
     #[test]
     fn the_collision_radius_keeps_particles_above_the_surface() {
         let mut system = falling_onto_ground(
-            Collision::ground(0.0)
-                .with_response(CollisionResponse::sticky().with_radius(0.5)),
+            Collision::ground(0.0).with_response(CollisionResponse::sticky().with_radius(0.5)),
         );
         system.burst(1, Mat4::IDENTITY);
 
@@ -1444,8 +1461,10 @@ mod test {
         });
 
         let (from, to) = segment.get();
-        assert!((from - before).length() < 1e-5, "起点不是上一帧的位置：{from:?}");
+        assert!(
+            (from - before).length() < 1e-5,
+            "起点不是上一帧的位置：{from:?}"
+        );
         assert!((to - after).length() < 1e-6, "终点不是这一帧的位置：{to:?}");
     }
-
 }

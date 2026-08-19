@@ -160,14 +160,7 @@ fn hermite_scalar(a: f32, out_tangent: f32, b: f32, in_tangent: f32, t: f32, dt:
     h[0] * a + h[1] * dt * out_tangent + h[2] * b + h[3] * dt * in_tangent
 }
 
-fn hermite_generic<T: Animatable>(
-    a: T,
-    out_tangent: T,
-    b: T,
-    in_tangent: T,
-    t: f32,
-    dt: f32,
-) -> T {
+fn hermite_generic<T: Animatable>(a: T, out_tangent: T, b: T, in_tangent: T, t: f32, dt: f32) -> T {
     let h = hermite_basis(t);
     a.scale(h[0])
         .add(out_tangent.scale(h[1] * dt))
@@ -308,7 +301,12 @@ mod test {
     }
 
     fn linear_curve() -> Curve<f32> {
-        Curve::new(vec![0.0, 1.0, 2.0], vec![0.0, 10.0, 30.0], Interpolation::Linear).unwrap()
+        Curve::new(
+            vec![0.0, 1.0, 2.0],
+            vec![0.0, 10.0, 30.0],
+            Interpolation::Linear,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -340,8 +338,7 @@ mod test {
 
     #[test]
     fn step_holds_the_previous_value() {
-        let curve =
-            Curve::new(vec![0.0, 1.0], vec![5.0, 9.0], Interpolation::Step).unwrap();
+        let curve = Curve::new(vec![0.0, 1.0], vec![5.0, 9.0], Interpolation::Step).unwrap();
 
         assert_eq!(curve.sample(0.0), 5.0);
         assert_eq!(curve.sample(0.999), 5.0);
@@ -365,9 +362,7 @@ mod test {
         assert!(Curve::<f32>::new(vec![], vec![], Interpolation::Linear).is_none());
         // 三次样条要三倍的值。
         assert!(Curve::new(vec![0.0], vec![0.0], Interpolation::CubicSpline).is_none());
-        assert!(
-            Curve::new(vec![0.0], vec![0.0, 1.0, 2.0], Interpolation::CubicSpline).is_some()
-        );
+        assert!(Curve::new(vec![0.0], vec![0.0, 1.0, 2.0], Interpolation::CubicSpline).is_some());
     }
 
     #[test]
@@ -421,7 +416,11 @@ mod test {
         let middle = Quat::lerp(a, b, 0.5);
         let angle = rotation_angle(middle);
 
-        assert!(angle.to_degrees().abs() < 15.0, "插值绕了远路：{}", angle.to_degrees());
+        assert!(
+            angle.to_degrees().abs() < 15.0,
+            "插值绕了远路：{}",
+            angle.to_degrees()
+        );
     }
 
     #[test]
@@ -467,8 +466,12 @@ mod test {
 
     #[test]
     fn duplicate_key_times_do_not_divide_by_zero() {
-        let curve =
-            Curve::new(vec![0.0, 0.0, 1.0], vec![1.0, 2.0, 3.0], Interpolation::Linear).unwrap();
+        let curve = Curve::new(
+            vec![0.0, 0.0, 1.0],
+            vec![1.0, 2.0, 3.0],
+            Interpolation::Linear,
+        )
+        .unwrap();
 
         let value = curve.sample(0.0);
         assert!(value.is_finite());

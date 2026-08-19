@@ -3,8 +3,9 @@
 
 #![warn(missing_docs)]
 
-use crate::{visitor::prelude::*, safelock::SafeLock};
+use crate::{safelock::SafeLock, visitor::prelude::*};
 use fxhash::{FxHashMap, FxHasher};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::{Debug, Display, Formatter},
@@ -12,7 +13,6 @@ use std::{
     ops::Deref,
     sync::{Arc, LazyLock},
 };
-use parking_lot::Mutex;
 
 #[derive(Clone, Debug)]
 struct State {

@@ -180,7 +180,10 @@ mod test {
 
         // 16 位量化的误差上限是 1/32768，放宽一点留给取整。
         for (index, (a, b)) in original.samples().iter().zip(decoded.samples()).enumerate() {
-            assert!((a - b).abs() < 1e-3, "第 {index} 个样本差得太多：{a} vs {b}");
+            assert!(
+                (a - b).abs() < 1e-3,
+                "第 {index} 个样本差得太多：{a} vs {b}"
+            );
         }
     }
 
@@ -260,6 +263,10 @@ mod test {
         let manager = ResourceManager::with_io(Arc::new(io));
         manager.add_loader(AudioLoader);
 
-        assert!(manager.request_blocking::<AudioBuffer>("broken.wav").is_err());
+        assert!(
+            manager
+                .request_blocking::<AudioBuffer>("broken.wav")
+                .is_err()
+        );
     }
 }

@@ -103,7 +103,6 @@ mod test {
         assert!(Stage::Culling < Stage::Render);
     }
 
-
     #[test]
     fn fixed_update_sits_between_logic_and_physics_results() {
         // 定长逻辑要能读到这一帧的输入与游戏逻辑（所以排在 PostUpdate 之后），

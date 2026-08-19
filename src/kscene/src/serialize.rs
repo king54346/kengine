@@ -481,8 +481,7 @@ impl Scene {
                 node.mesh = Some(mesh.clone());
                 // 万一网格换过（形变目标数量变了），按目标数补齐或截断，
                 // 已存下来的权重尽量留住。
-                node.morph_weights
-                    .resize(mesh.morph_target_count(), 0.0);
+                node.morph_weights.resize(mesh.morph_target_count(), 0.0);
             }
         }
         for (handle, slot) in node_materials {
@@ -526,7 +525,6 @@ fn visit_pairs(
     Ok(())
 }
 
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -562,13 +560,11 @@ mod test {
     #[test]
     fn the_hierarchy_and_transforms_come_back_intact() {
         let mut scene = Scene::new();
-        let parent = scene.add_node(
-            Node::new("parent").with_transform(Transform {
-                position: Vec3::new(1.0, 2.0, 3.0),
-                rotation: Quat::from_rotation_y(0.7),
-                scale: Vec3::splat(2.0),
-            }),
-        );
+        let parent = scene.add_node(Node::new("parent").with_transform(Transform {
+            position: Vec3::new(1.0, 2.0, 3.0),
+            rotation: Quat::from_rotation_y(0.7),
+            scale: Vec3::splat(2.0),
+        }));
         let child = scene.add_node_with_parent(
             Node::new("child").with_position(Vec3::new(0.0, 5.0, 0.0)),
             parent,
@@ -585,7 +581,10 @@ mod test {
         // 世界变换是派生数据，读回来应当由 `update` 重算出同一个结果。
         let restored_world = restored[child].global_transform();
         assert!(
-            (restored_world - expected_world).to_cols_array().iter().all(|v| v.abs() < 1e-5),
+            (restored_world - expected_world)
+                .to_cols_array()
+                .iter()
+                .all(|v| v.abs() < 1e-5),
             "世界变换没对上：{restored_world:?} vs {expected_world:?}"
         );
     }
@@ -659,7 +658,11 @@ mod test {
     fn materials_are_deduplicated_but_distinct_ones_are_kept_apart() {
         let mut scene = Scene::new();
         let shared = PbrMaterial::dielectric(Vec3::new(0.2, 0.4, 0.8), 0.3);
-        let a = scene.add_node(Node::new("a").with_mesh(Mesh::cube()).with_material(shared.clone()));
+        let a = scene.add_node(
+            Node::new("a")
+                .with_mesh(Mesh::cube())
+                .with_material(shared.clone()),
+        );
         let b = scene.add_node(Node::new("b").with_mesh(Mesh::cube()).with_material(shared));
         let c = scene.add_node(
             Node::new("c")
@@ -774,7 +777,10 @@ mod test {
         assert_eq!(restored.environment().sky.zenith, Vec3::new(0.9, 0.1, 0.2));
         // 球谐系数不存盘，读回来是重算的——结果必须一致。
         let actual = restored.environment().irradiance(Vec3::Y);
-        assert!((actual - expected).length() < 1e-4, "{actual:?} vs {expected:?}");
+        assert!(
+            (actual - expected).length() < 1e-4,
+            "{actual:?} vs {expected:?}"
+        );
     }
 
     #[test]
@@ -795,7 +801,8 @@ mod test {
                 ],
             )
         };
-        let mesh = base.with_morph_targets(vec![target("a", 1.0), target("b", 2.0)], vec![0.0, 0.0]);
+        let mesh =
+            base.with_morph_targets(vec![target("a", 1.0), target("b", 2.0)], vec![0.0, 0.0]);
 
         let mut scene = Scene::new();
         let node = scene.add_node(Node::new("face").with_mesh(mesh));
@@ -908,10 +915,7 @@ mod test {
         let component = restored[joint].joint().unwrap();
         assert_eq!(component.body1(), anchor);
         assert_eq!(component.body2(), bob);
-        assert!(matches!(
-            component.desc().kind,
-            JointKind::Revolute { .. }
-        ));
+        assert!(matches!(component.desc().kind, JointKind::Revolute { .. }));
 
         restored.step_physics(1.0 / 60.0);
         assert_eq!(restored.physics().joint_count(), 1, "关节没被重建出来");
@@ -986,12 +990,10 @@ mod test {
     fn an_unresolvable_mesh_reference_degrades_instead_of_failing_the_load() {
         // 模型文件被挪走了，不该让整个存档读不进来。
         let mut scene = Scene::new();
-        let node = scene.add_node(
-            Node::new("gone").with_mesh(Mesh::cube().with_source(kmesh::MeshSource::new(
-                "missing/nowhere.glb",
-                0,
-            ))),
-        );
+        let node =
+            scene.add_node(Node::new("gone").with_mesh(
+                Mesh::cube().with_source(kmesh::MeshSource::new("missing/nowhere.glb", 0)),
+            ));
         let bytes = scene.save_to_vec().unwrap();
 
         let restored = Scene::load_from_slice(&bytes, Some(&manager())).expect("整体读档不该失败");

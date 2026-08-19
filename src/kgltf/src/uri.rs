@@ -109,7 +109,9 @@ mod test {
 
         let bytes = ktask::block_on(async {
             let io: Arc<dyn ResourceIo> = Arc::new(memory);
-            read_uri("data.bin", Path::new("models"), &io).await.unwrap()
+            read_uri("data.bin", Path::new("models"), &io)
+                .await
+                .unwrap()
         });
 
         assert_eq!(bytes, vec![1, 2, 3]);
@@ -122,7 +124,9 @@ mod test {
 
         let bytes = ktask::block_on(async {
             let io: Arc<dyn ResourceIo> = Arc::new(memory);
-            read_uri("my%20model.bin", Path::new(""), &io).await.unwrap()
+            read_uri("my%20model.bin", Path::new(""), &io)
+                .await
+                .unwrap()
         });
 
         assert_eq!(bytes, vec![7]);

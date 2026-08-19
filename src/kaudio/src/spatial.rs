@@ -195,7 +195,10 @@ mod test {
             Attenuation::Exponential,
         ] {
             let spatial = Spatial::default().with_model(model, 1.0);
-            assert!((spatial.gain(spatial.min_distance) - 1.0).abs() < 1e-5, "{model:?}");
+            assert!(
+                (spatial.gain(spatial.min_distance) - 1.0).abs() < 1e-5,
+                "{model:?}"
+            );
         }
     }
 
@@ -208,7 +211,11 @@ mod test {
             Attenuation::Exponential,
         ] {
             let spatial = Spatial::default().with_model(model, 1.0);
-            assert_eq!(spatial.gain(0.0), spatial.gain(spatial.min_distance), "{model:?}");
+            assert_eq!(
+                spatial.gain(0.0),
+                spatial.gain(spatial.min_distance),
+                "{model:?}"
+            );
             assert!(spatial.gain(0.001) <= 1.0, "{model:?}");
         }
     }
@@ -220,7 +227,9 @@ mod test {
             Attenuation::Inverse,
             Attenuation::Exponential,
         ] {
-            let spatial = Spatial::default().with_range(1.0, 50.0).with_model(model, 1.0);
+            let spatial = Spatial::default()
+                .with_range(1.0, 50.0)
+                .with_model(model, 1.0);
             let mut previous = f32::MAX;
             for step in 0..200 {
                 let gain = spatial.gain(step as f32 * 0.5);
@@ -241,7 +250,10 @@ mod test {
             let spatial = Spatial::default().with_model(model, 4.0);
             for distance in [0.0, 0.5, 1.0, 10.0, 1e6] {
                 let gain = spatial.gain(distance);
-                assert!((0.0..=1.0).contains(&gain), "{model:?} 在 {distance} 处给出 {gain}");
+                assert!(
+                    (0.0..=1.0).contains(&gain),
+                    "{model:?} 在 {distance} 处给出 {gain}"
+                );
             }
         }
     }
@@ -406,7 +418,11 @@ mod test {
         assert!((listener.position - eye).length() < 1e-4);
         // 相机看向原点，前方应当指向原点。
         let expected = (Vec3::ZERO - eye).normalize();
-        assert!((listener.forward - expected).length() < 1e-4, "{:?}", listener.forward);
+        assert!(
+            (listener.forward - expected).length() < 1e-4,
+            "{:?}",
+            listener.forward
+        );
     }
 
     #[test]

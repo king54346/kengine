@@ -35,8 +35,7 @@ pub const LIGHT_WGSL: &str = include_str!("light.wgsl");
 /// 常用类型的集中导出。
 pub mod prelude {
     pub use crate::{
-        GpuLight, LIGHT_WGSL, Light, LightKind, MAX_LIGHTS, attenuation,
-        shadow::ShadowSettings,
+        GpuLight, LIGHT_WGSL, Light, LightKind, MAX_LIGHTS, attenuation, shadow::ShadowSettings,
     };
 }
 
@@ -261,12 +260,7 @@ impl Light {
 
         GpuLight {
             position: [position.x, position.y, position.z, self.kind.tag()],
-            direction: [
-                direction.x,
-                direction.y,
-                direction.z,
-                self.kind.range(),
-            ],
+            direction: [direction.x, direction.y, direction.z, self.kind.range()],
             color: [self.color.x, self.color.y, self.color.z, self.intensity],
             params: [cos_inner, cos_outer, 0.0, 0.0],
         }
@@ -328,7 +322,10 @@ mod test {
         // 单位变换下 -Z 即 (0,0,-1)。
         let gpu = light.to_gpu(Mat4::IDENTITY);
 
-        assert_eq!([gpu.direction[0], gpu.direction[1], gpu.direction[2]], [0.0, 0.0, -1.0]);
+        assert_eq!(
+            [gpu.direction[0], gpu.direction[1], gpu.direction[2]],
+            [0.0, 0.0, -1.0]
+        );
         assert_eq!(gpu.position[3], 0.0, "方向光的类型标签应为 0");
     }
 
@@ -339,7 +336,10 @@ mod test {
 
         let gpu = light.to_gpu(transform);
 
-        assert_eq!([gpu.position[0], gpu.position[1], gpu.position[2]], [1.0, 2.0, 3.0]);
+        assert_eq!(
+            [gpu.position[0], gpu.position[1], gpu.position[2]],
+            [1.0, 2.0, 3.0]
+        );
         assert_eq!(gpu.position[3], 1.0, "点光源的类型标签应为 1");
         assert_eq!(gpu.direction[3], 5.0, "作用半径应写入 direction.w");
     }
@@ -354,7 +354,10 @@ mod test {
         let direction = Vec3::new(gpu.direction[0], gpu.direction[1], gpu.direction[2]);
 
         assert!((direction.length() - 1.0).abs() < 1e-5, "方向应当归一化");
-        assert!(direction.y.abs() > 0.99, "转向后应指向 Y 轴，实得 {direction:?}");
+        assert!(
+            direction.y.abs() > 0.99,
+            "转向后应指向 Y 轴，实得 {direction:?}"
+        );
     }
 
     #[test]
@@ -403,7 +406,10 @@ mod test {
         let gpu = light.to_gpu(transform);
         let helper = light.direction(transform);
 
-        assert!((Vec3::new(gpu.direction[0], gpu.direction[1], gpu.direction[2]) - helper).length() < 1e-6);
+        assert!(
+            (Vec3::new(gpu.direction[0], gpu.direction[1], gpu.direction[2]) - helper).length()
+                < 1e-6
+        );
     }
 
     #[test]

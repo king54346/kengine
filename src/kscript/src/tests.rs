@@ -24,7 +24,13 @@ fn resources(scripts: &[(&str, &str)]) -> ResourceManager {
 }
 
 /// 跑 `frames` 帧 `_process`。
-fn process(runtime: &mut ScriptRuntime, scene: &mut Scene, manager: &ResourceManager, frames: usize, dt: f32) -> Vec<Signal> {
+fn process(
+    runtime: &mut ScriptRuntime,
+    scene: &mut Scene,
+    manager: &ResourceManager,
+    frames: usize,
+    dt: f32,
+) -> Vec<Signal> {
     let mut all = Vec::new();
     for frame in 0..frames {
         scene.update();
@@ -39,7 +45,10 @@ fn process(runtime: &mut ScriptRuntime, scene: &mut Scene, manager: &ResourceMan
 fn writing_a_single_axis_writes_through_to_the_scene() {
     // 这是 GDScript 最标志性的一行。返回临时副本的话，`.y += 1` 改的是副本，
     // 写完就丢——脚本看起来在动，物体纹丝不动，而且不报错。
-    let manager = resources(&[("a.js", "return { _process(dt) { self.position.y += 1.0; } };")]);
+    let manager = resources(&[(
+        "a.js",
+        "return { _process(dt) { self.position.y += 1.0; } };",
+    )]);
     let mut runtime = ScriptRuntime::new();
     let mut scene = Scene::new();
     let node = scene.add_node(Node::new("mover").with_script("a.js"));
@@ -127,13 +136,19 @@ fn global_position_accounts_for_the_parent() {
     let mut scene = Scene::new();
     let parent = scene.add_node(Node::new("parent").with_position(Vec3::Y * 10.0));
     scene.add_node_with_parent(
-        Node::new("child").with_position(Vec3::Y * 3.0).with_script("a.js"),
+        Node::new("child")
+            .with_position(Vec3::Y * 3.0)
+            .with_script("a.js"),
         parent,
     );
 
     let signals = process(&mut runtime, &mut scene, &manager, 1, 0.016);
 
-    assert!((signals[0].value - 13.0).abs() < 1e-4, "世界坐标不对：{}", signals[0].value);
+    assert!(
+        (signals[0].value - 13.0).abs() < 1e-4,
+        "世界坐标不对：{}",
+        signals[0].value
+    );
 }
 
 // ── 生命周期 ──
@@ -446,7 +461,10 @@ fn an_infinite_loop_is_stopped_instead_of_hanging_the_engine() {
 
 #[test]
 fn a_throwing_script_is_disabled_rather_than_spamming() {
-    let manager = resources(&[("a.js", "return { _process() { throw new Error('boom'); } };")]);
+    let manager = resources(&[(
+        "a.js",
+        "return { _process() { throw new Error('boom'); } };",
+    )]);
     let mut runtime = ScriptRuntime::new();
     let mut scene = Scene::new();
     scene.add_node(Node::new("n").with_script("a.js"));

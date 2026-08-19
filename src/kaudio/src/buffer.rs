@@ -71,7 +71,9 @@ impl AudioBuffer {
         let frames = (seconds.max(0.0) * sample_rate as f32) as usize;
         let step = std::f32::consts::TAU * frequency / sample_rate as f32;
 
-        let samples = (0..frames).map(|index| (index as f32 * step).sin()).collect();
+        let samples = (0..frames)
+            .map(|index| (index as f32 * step).sin())
+            .collect();
         Self::new(samples, 1, sample_rate)
     }
 
@@ -171,7 +173,9 @@ impl AudioBuffer {
 
     /// 峰值幅度，用来检查是否削波。
     pub fn peak(&self) -> f32 {
-        self.samples.iter().fold(0.0f32, |peak, s| peak.max(s.abs()))
+        self.samples
+            .iter()
+            .fold(0.0f32, |peak, s| peak.max(s.abs()))
     }
 }
 
@@ -268,7 +272,11 @@ mod test {
         assert!(tone.is_mono());
         assert!((tone.duration() - 0.5).abs() < 1e-6);
         // 正弦波的峰值应当贴近 1，明显偏离说明生成有问题。
-        assert!(tone.peak() > 0.99 && tone.peak() <= 1.0, "峰值 {}", tone.peak());
+        assert!(
+            tone.peak() > 0.99 && tone.peak() <= 1.0,
+            "峰值 {}",
+            tone.peak()
+        );
     }
 
     #[test]

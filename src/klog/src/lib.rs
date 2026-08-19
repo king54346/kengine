@@ -15,15 +15,15 @@ macro_rules! once {
 }
 
 pub use tracing::{
-    self, debug, debug_span, error, error_span, event, info, info_span, trace, trace_span, warn,
-    warn_span, Level,
+    self, Level, debug, debug_span, error, error_span, event, info, info_span, trace, trace_span,
+    warn, warn_span,
 };
 pub use tracing_subscriber;
 
 /// 日志前缀模块
 pub mod prelude {
-    pub use tracing::{debug, error, info, trace, warn};
     pub use crate::{debug_once, error_once, info_once, trace_once, warn_once};
+    pub use tracing::{debug, error, info, trace, warn};
 }
 
 /// 默认过滤器：应用自身放行到 `info`，同时屏蔽 wgpu / naga 的冗余日志。
