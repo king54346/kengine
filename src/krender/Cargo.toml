@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 kcamera = { path = "../kcamera" }
 kcore = { path = "../kcore" }
+kgizmo = { path = "../kgizmo" }
 klog = { path = "../klog" }
 klight = { path = "../klight" }
 kmaterial = { path = "../kmaterial" }
@@ -24,3 +25,5 @@ winit = "0.30.13"
 
 [dev-dependencies]
 kshader = { path = "../kshader" }
+# 测试里解析 WGSL，核对着色器入口与顶点布局。
+naga = { version = "30", features = ["wgsl-in"] }

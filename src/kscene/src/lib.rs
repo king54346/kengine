@@ -22,6 +22,7 @@ mod transform;
 pub use audio::SoundSource;
 pub use kaudio::{Attenuation, AudioBuffer, AudioDevice, Listener, Spatial};
 pub use kcamera::{Camera, Frustum, Projection};
+pub use kgizmo::{Color, Gizmos, Layer};
 pub use kmath::{Aabb, Intersection};
 pub use kmesh::{Mesh, Vertex};
 pub use kparticle::ParticleSystem;
@@ -125,6 +126,11 @@ pub struct Scene {
     index: NodeIndex,
     /// 物理世界。场景节点上的刚体 / 碰撞体 / 关节都在这里有一个对应物。
     physics: PhysicsWorld,
+    /// 本帧的调试线。
+    ///
+    /// 放在场景上而不是渲染器上，是因为想画调试线的代码（游戏逻辑、
+    /// 物理、脚本）拿得到的是场景，拿不到渲染器。渲染器每帧读走后清空。
+    gizmos: Gizmos,
 }
 
 /// 按组件分类的节点句柄索引。
@@ -186,6 +192,7 @@ impl Scene {
             culling: SceneCulling::default(),
             index: NodeIndex::default(),
             physics: PhysicsWorld::new(),
+            gizmos: Gizmos::new(),
         }
     }
 
@@ -205,6 +212,7 @@ impl Scene {
             culling: SceneCulling::default(),
             index: NodeIndex::default(),
             physics: PhysicsWorld::new(),
+            gizmos: Gizmos::new(),
         }
     }
 
@@ -1132,6 +1140,19 @@ impl Scene {
     /// 物理世界的可变引用，用来改重力、求解器参数。
     pub fn physics_mut(&mut self) -> &mut PhysicsWorld {
         &mut self.physics
+    }
+
+    /// 本帧的调试线缓冲。
+    pub fn gizmos(&self) -> &Gizmos {
+        &self.gizmos
+    }
+
+    /// 往调试线缓冲里画东西。
+    ///
+    /// 默认是关的，先 [`Gizmos::set_enabled`] 打开。渲染器每帧画完会清空，
+    /// 所以要让一条线一直在，就每帧都画它。
+    pub fn gizmos_mut(&mut self) -> &mut Gizmos {
+        &mut self.gizmos
     }
 
     /// 沿父链算出一个节点当前的世界变换。

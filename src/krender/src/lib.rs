@@ -8,6 +8,7 @@
 //! - `group(1)`：每个对象的变换与材质参数，用动态偏移在一个大缓冲里寻址
 //! - `group(2)`：材质贴图与采样器，按材质缓存
 
+mod gizmo;
 mod particle;
 mod post;
 mod tonemap;
@@ -15,6 +16,7 @@ mod tonemap;
 pub use post::PostSettings;
 pub use tonemap::ToneMapping;
 
+use gizmo::GizmoResources;
 use kcamera::{Camera, Frustum};
 use klight::{GpuLight, MAX_LIGHTS, shadow::ShadowSettings};
 use kmesh::{MorphDelta, SkinVertex, Vertex};
@@ -203,6 +205,8 @@ pub struct RenderStats {
     pub draw_calls: u32,
     /// 本帧绘制的粒子数。
     pub particles: u32,
+    /// 本帧的调试线顶点数，两个一组构成一条线段。
+    pub gizmo_vertices: u32,
     /// 视锥剔除耗时（微秒）。
     pub cull_micros: u32,
     /// CPU 端准备一帧的总耗时（微秒）：剔除 + 收集 + 分批 + 上传。
@@ -330,6 +334,8 @@ pub struct Renderer {
     particles: ParticleResources,
     /// 逐帧复用的粒子暂存区。
     particle_scratch: Vec<GpuParticle>,
+    /// 调试线 pass 的资源。
+    gizmos: GizmoResources,
 
     sky_pipeline: wgpu::RenderPipeline,
     sky_buffer: wgpu::Buffer,
@@ -753,6 +759,12 @@ impl Renderer {
             post::HDR_FORMAT,
             wgpu::TextureFormat::Depth32Float,
         );
+        // 调试线同样画在主 pass 里，格式必须一致。
+        let gizmos = GizmoResources::new(
+            &device,
+            post::HDR_FORMAT,
+            wgpu::TextureFormat::Depth32Float,
+        );
 
         Self {
             surface,
@@ -783,6 +795,7 @@ impl Renderer {
             post,
             particles,
             particle_scratch: Vec::new(),
+            gizmos,
             sky_pipeline,
             sky_buffer,
             sky_bind_group,
@@ -1135,6 +1148,12 @@ impl Renderer {
         stats.draw_calls += particle_batches.len() as u32;
         self.particle_scratch = scratch;
 
+        // ── 调试线：整帧攒下来的线段一次传上去 ──
+        let gizmo_draw =
+            self.gizmos
+                .prepare(&self.device, &self.queue, scene.gizmos(), view_proj);
+        stats.gizmo_vertices = scene.gizmos().len() as u32;
+
         // 统计在取交换链纹理之前定格：那一步会因垂直同步而阻塞，
         // 算进来的话读到的就是显示器刷新率，不是 CPU 的准备耗时。
         stats.prepare_micros = prepare_start.elapsed().as_micros() as u32;
@@ -1402,6 +1421,10 @@ impl Renderer {
             // 粒子最后画：它们半透明且不写深度，任何在它们之后画的不透明物体
             // 都会把它们盖掉——包括天空。
             self.particles.draw(&mut pass, &particle_batches);
+
+            // 调试线放在最后：它要盖在所有东西上面，而且不写深度，
+            // 所以画在哪一步都不会影响别人，唯独顺序决定了它自己可不可见。
+            self.gizmos.draw(&mut pass, &gizmo_draw);
         }
 
         // 后处理：Bloom + 色调映射，最终写入交换链。

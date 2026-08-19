@@ -7,4 +7,5 @@ edition = "2024"
 kcore = { path = "../kcore" }
 kmath = { path = "../kmath" }
 kmesh = { path = "../kmesh" }
-rapier3d = "0.35"
+# debug-render：把碰撞体/关节/接触点拆成线段，只要求一个「画线」回调。
+rapier3d = { version = "0.35", features = ["debug-render"] }

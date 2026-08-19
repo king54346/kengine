@@ -9,6 +9,7 @@ kasset = { path = "../kasset" }
 kaudio = { path = "../kaudio" }
 kcamera = { path = "../kcamera" }
 kcore = { path = "../kcore" }
+kgizmo = { path = "../kgizmo" }
 kgltf = { path = "../kgltf" }
 klog = { path = "../klog" }
 klight = { path = "../klight" }

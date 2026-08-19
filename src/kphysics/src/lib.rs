@@ -48,6 +48,7 @@
 mod body;
 mod collider;
 mod convert;
+mod debug;
 mod events;
 mod joint;
 mod query;
@@ -55,6 +56,7 @@ mod visit;
 mod world;
 
 pub use body::{BodyMut, BodyRef, RigidBodyDesc, RigidBodyType};
+pub use debug::PhysicsDebugOptions;
 pub use collider::{
     Axis, CoefficientCombineRule, ColliderDesc, ColliderMut, ColliderRef, ColliderShape,
     InteractionGroups, TriMeshData,

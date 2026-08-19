@@ -1640,6 +1640,7 @@ dependencies = [
  "kaudio",
  "kcamera",
  "kcore",
+ "kgizmo",
  "kgltf",
  "kinput",
  "klight",
@@ -1659,6 +1660,15 @@ dependencies = [
  "ktexture",
  "kwinit",
  "winit",
+]
+
+[[package]]
+name = "kgizmo"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "kmath",
+ "naga",
 ]
 
 [[package]]
@@ -1795,6 +1805,7 @@ dependencies = [
  "fxhash",
  "kcamera",
  "kcore",
+ "kgizmo",
  "klight",
  "klog",
  "kmaterial",
@@ -1805,6 +1816,7 @@ dependencies = [
  "kscene",
  "kshader",
  "ktexture",
+ "naga",
  "wgpu",
  "winit",
 ]
@@ -1819,6 +1831,7 @@ dependencies = [
  "kaudio",
  "kcamera",
  "kcore",
+ "kgizmo",
  "kgltf",
  "klight",
  "klog",

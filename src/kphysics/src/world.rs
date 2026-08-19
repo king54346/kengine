@@ -66,7 +66,7 @@ impl Default for IntegrationParameters {
 /// 这是 rapier 在本引擎里唯一的出口：外面看到的全是 kmath 类型与本 crate 的句柄，
 /// rapier 的类型一个都不外泄。换引擎时要改的代码全在这一层里。
 pub struct PhysicsWorld {
-    inner: rp::PhysicsWorld,
+    pub(crate) inner: rp::PhysicsWorld,
     enabled: bool,
     event_handler: rp::ChannelEventCollector,
     collision_rx: mpsc::Receiver<rapier3d::geometry::CollisionEvent>,
