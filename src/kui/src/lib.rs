@@ -34,14 +34,16 @@ mod context;
 pub mod draw;
 pub mod interact;
 pub mod layout;
+pub mod text_edit;
 pub mod widgets;
 
 pub use context::Ui;
 pub use draw::{DrawBatch, DrawList, Rect, UiVertex};
-pub use interact::{Interaction, PointerButton, Response, UiInput};
+pub use interact::{EditAction, Interaction, PointerButton, Response, UiInput};
 pub use layout::{
     AlignCross, Direction, Edges, Id, Justify, LayoutNode, Length, MAX_DEPTH, Solved, Style, solve,
 };
+pub use text_edit::TextEdit;
 pub use widgets::{Theme, WidgetUi};
 
 /// UI 着色器源码，由 `krender` 编译。

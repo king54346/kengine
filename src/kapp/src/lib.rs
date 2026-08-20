@@ -36,7 +36,7 @@ mod stage;
 
 pub use context::{Context, DebugDraw};
 use kinput::{KeyCode, MouseButton};
-use kui::{PointerButton, Ui, UiInput};
+use kui::{EditAction, PointerButton, Ui, UiInput};
 pub use physics_clock::PhysicsClock;
 pub use stage::Stage;
 
@@ -146,14 +146,33 @@ fn translate_ui_input(input: &Input, scale: f32, out: &mut UiInput) {
         }
     }
 
+    let shift = input.key_pressed(KeyCode::ShiftLeft) || input.key_pressed(KeyCode::ShiftRight);
+    let ctrl = input.key_pressed(KeyCode::ControlLeft) || input.key_pressed(KeyCode::ControlRight);
+
+    // 按键翻译成编辑动作。文本框只认动作，不认按键——
+    // 按键到动作的映射跟平台走（macOS 上行首是 Cmd+←），
+    // 文本框不该知道这件事。
+    for (key, action) in [
+        (KeyCode::Backspace, EditAction::Backspace),
+        (KeyCode::Delete, EditAction::Delete),
+        (KeyCode::ArrowLeft, EditAction::Left { select: shift }),
+        (KeyCode::ArrowRight, EditAction::Right { select: shift }),
+        (KeyCode::Home, EditAction::Home { select: shift }),
+        (KeyCode::End, EditAction::End { select: shift }),
+        (KeyCode::Enter, EditAction::Submit),
+        (KeyCode::Escape, EditAction::Cancel),
+    ] {
+        if input.key_just_pressed(key) {
+            out.edits.push(action);
+        }
+    }
+    if ctrl && input.key_just_pressed(KeyCode::KeyA) {
+        out.edits.push(EditAction::SelectAll);
+    }
+
     if input.key_just_pressed(KeyCode::Tab) {
         // Shift+Tab 往回走，和所有桌面 UI 一致。
-        out.focus_step =
-            if input.key_pressed(KeyCode::ShiftLeft) || input.key_pressed(KeyCode::ShiftRight) {
-                -1
-            } else {
-                1
-            };
+        out.focus_step = if shift { -1 } else { 1 };
     }
 }
 
@@ -414,6 +433,28 @@ impl AppHandler for App {
 
         if let WindowEvent::Resized(size) = event {
             runtime.renderer.resize(*size);
+        }
+
+        // 文本输入走事件而不是轮询键位：键位到字符的映射、修饰键组合、
+        // 输入法合成全由系统做完，这里拿到的是最终结果。
+        //
+        // 累积到 `ui_input.text`，帧末统一清掉——一帧内可能来好几个字符。
+        match event {
+            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
+                if let Some(text) = &event.text {
+                    // 过滤控制字符。回车、退格、Tab 也会带 text，
+                    // 不滤掉的话文本框里会插进去一个看不见的字符。
+                    runtime
+                        .ui_input
+                        .text
+                        .extend(text.chars().filter(|c| !c.is_control()));
+                }
+            }
+            // 输入法合成完成。中日韩输入走的是这条路径，不是 KeyboardInput。
+            WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+                runtime.ui_input.text.push_str(text);
+            }
+            _ => {}
         }
 
         self.dispatch(|plugin, ctx| plugin.on_os_event(event, ctx));

@@ -29,6 +29,32 @@ pub enum PointerButton {
     Middle,
 }
 
+/// 一次编辑动作。文本框认这些，不认具体按键。
+///
+/// 抽一层是因为按键到动作的映射跟平台走（macOS 上行首是 Cmd+←），
+/// 而文本框不该知道这件事。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditAction {
+    /// 退格。
+    Backspace,
+    /// 删除。
+    Delete,
+    /// 左移。`select` 为真时扩展选区。
+    Left { select: bool },
+    /// 右移。
+    Right { select: bool },
+    /// 跳到行首。
+    Home { select: bool },
+    /// 跳到行尾。
+    End { select: bool },
+    /// 全选。
+    SelectAll,
+    /// 提交（回车）。
+    Submit,
+    /// 放弃焦点（Esc）。
+    Cancel,
+}
+
 /// 一帧的输入。由调用方（通常是 `kapp`）填。
 #[derive(Debug, Clone, Default)]
 pub struct UiInput {
@@ -44,6 +70,8 @@ pub struct UiInput {
     pub text: String,
     /// 本帧按下的 Tab 数：正数往后走焦点，负数（Shift+Tab）往前。
     pub focus_step: i32,
+    /// 本帧的编辑动作，按发生顺序。
+    pub edits: Vec<EditAction>,
 }
 
 impl UiInput {
@@ -54,6 +82,7 @@ impl UiInput {
         self.scroll = Vec2::ZERO;
         self.text.clear();
         self.focus_step = 0;
+        self.edits.clear();
     }
 
     /// 某个键本帧刚按下。
@@ -428,6 +457,7 @@ mod tests {
         let mut input = at(10.0, 10.0);
         input.pressed.push(PointerButton::Primary);
         input.text.push('a');
+        input.edits.push(EditAction::Backspace);
         input.scroll = Vec2::new(0.0, 3.0);
         input.focus_step = 1;
 
@@ -435,6 +465,7 @@ mod tests {
 
         assert!(input.pressed.is_empty());
         assert!(input.text.is_empty());
+        assert!(input.edits.is_empty());
         assert_eq!(input.scroll, Vec2::ZERO);
         assert_eq!(input.focus_step, 0);
         assert_eq!(

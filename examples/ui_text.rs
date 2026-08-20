@@ -44,6 +44,7 @@ struct UiDemo {
     show_body: bool,
     volume: f32,
     clicks: u32,
+    name: String,
 }
 
 impl Default for UiDemo {
@@ -56,6 +57,7 @@ impl Default for UiDemo {
             show_body: true,
             volume: 0.7,
             clicks: 0,
+            name: String::new(),
         }
     }
 }
@@ -110,7 +112,7 @@ impl Plugin for UiDemo {
             None => klog::error!("本机找不到可用的系统字体，界面上不会有文字"),
         }
 
-        klog::info!("← → 改字号，Tab 切焦点，鼠标点控件，Esc 退出");
+        klog::info!("← → 改字号，Tab 切焦点，点文本框打字（支持中文），滚轮滚日志，Esc 退出");
     }
 
     fn update(&mut self, ctx: &mut Context) {
@@ -148,6 +150,18 @@ impl Plugin for UiDemo {
         let reset = self.widgets.button("reset", "重置字号");
         let body_box = self.widgets.checkbox("body", "显示正文", self.show_body);
         let volume = self.widgets.slider("volume", self.volume);
+
+        // 文本框：点进去打字，支持中文输入法、方向键、选区。
+        self.widgets
+            .text_input("name", &mut self.name, "输入点什么…", ctx.ui_input);
+
+        // 滚动区：内容比视口高时可以滚，滚出视口的行连几何都不生成。
+        self.widgets.begin_scroll("log", 120.0);
+        for i in 0..40 {
+            self.widgets
+                .dim_label(&format!("row{i}"), format!("第 {i} 行日志"));
+        }
+        self.widgets.end_scroll();
 
         self.widgets.finish(ctx.ui, ctx.ui_input);
 
@@ -198,9 +212,10 @@ impl Plugin for UiDemo {
 
         // 右上角状态行。
         let status = format!(
-            "{:.0} px · 音量 {:.0}% · UI {} 顶点",
+            "{:.0} px · 音量 {:.0}% · 输入「{}」· UI {} 顶点",
             self.size,
             self.volume * 100.0,
+            self.name,
             ctx.stats.ui_vertices,
         );
         let style = TextStyle {

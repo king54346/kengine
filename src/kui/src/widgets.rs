@@ -92,6 +92,13 @@ enum Widget {
     Checkbox { text: String, checked: bool },
     /// 滑条。`value` 已归一化到 0..=1。
     Slider { value: f32 },
+    /// 文本框。
+    TextInput {
+        /// 当前内容的一份快照。绘制期要用。
+        text: String,
+        /// 没内容时显示的提示。
+        placeholder: String,
+    },
 }
 
 /// 一个已经声明、等待求解的控件。
@@ -131,12 +138,36 @@ pub struct WidgetUi {
     interaction: crate::Interaction,
     /// 上一次求解的结果。
     solved: crate::layout::Solved,
+    /// 本帧生效的滚动区（`begin` 时从 `open_scroll` 取过来）。
+    scroll_frame: Option<ScrollFrame>,
+    /// 各控件本帧的最终矩形（已经算上滚动偏移）。
+    rects: Vec<Rect>,
+    /// 每个文本框的编辑状态（光标、选区），跨帧。
+    edits: std::collections::HashMap<Id, crate::TextEdit>,
+    /// 每个滚动区的滚动位置，跨帧。
+    scroll: std::collections::HashMap<Id, f32>,
+}
+
+/// 本帧的滚动区。
+///
+/// 只支持一个：嵌套滚动区的手感本来就很差（滚轮该滚哪个？），
+/// 实现还要一整套事件冒泡。不做，也不假装做了。
+#[derive(Debug, Clone, Copy)]
+struct ScrollFrame {
+    id: Id,
+    /// 视口高度。
+    height: f32,
+    /// 这个滚动区是从第几个声明开始的。
+    first: usize,
+    /// 到第几个为止（不含）。`end_scroll` 之前是 `usize::MAX`。
+    last: usize,
 }
 
 impl WidgetUi {
     /// 开一帧，清掉上一帧的声明。
     pub fn begin(&mut self) {
         self.declared.clear();
+        self.scroll_frame = None;
         self.root_style = Style {
             direction: Direction::Column,
             align: AlignCross::Start,
@@ -233,6 +264,82 @@ impl WidgetUi {
         )
     }
 
+    /// 一个文本框。
+    ///
+    /// **直接改传进来的 `text`**：编辑动作在声明期就应用了，不像别的控件
+    /// 那样滞后一帧——打字滞后一帧会让人以为按键丢了。
+    ///
+    /// 只在这个文本框**有焦点**时才处理输入。
+    pub fn text_input(
+        &mut self,
+        id: &str,
+        text: &mut String,
+        placeholder: impl Into<String>,
+        input: &crate::UiInput,
+    ) -> Id {
+        let id = Id::new(id);
+        let focused = self.interaction.focused() == Some(id);
+
+        let edit = self.edits.entry(id).or_default();
+        // 文本可能被外部改过（读档、重置）。不夹的话光标停在旧位置，
+        // 下一次切片直接 panic。
+        edit.clamp(text);
+
+        if focused {
+            for action in &input.edits {
+                apply_edit(edit, text, *action);
+            }
+            if !input.text.is_empty() {
+                edit.insert(text, &input.text);
+            }
+        }
+
+        let snapshot = text.clone();
+        self.declared.push(Declared {
+            id,
+            widget: Widget::TextInput {
+                text: snapshot,
+                placeholder: placeholder.into(),
+            },
+        });
+        id
+    }
+
+    /// 一个文本框的光标与选区。
+    pub fn text_state(&self, id: Id) -> crate::TextEdit {
+        self.edits.get(&id).copied().unwrap_or_default()
+    }
+
+    // ───────────────────────── 滚动区 ─────────────────────────
+
+    /// 开一个滚动区。之后声明的控件都进这个区，直到 [`end_scroll`](Self::end_scroll)。
+    ///
+    /// `height` 是视口高度；内容比它高时可以滚。
+    pub fn begin_scroll(&mut self, id: &str, height: f32) -> Id {
+        let id = Id::new(id);
+        self.scroll_frame = Some(ScrollFrame {
+            id,
+            height,
+            first: self.declared.len(),
+            last: usize::MAX,
+        });
+        id
+    }
+
+    /// 收一个滚动区。
+    ///
+    /// 滚轮由 [`finish`](Self::finish) 统一处理——那时才知道内容有多高。
+    pub fn end_scroll(&mut self) {
+        if let Some(frame) = self.scroll_frame.as_mut() {
+            frame.last = self.declared.len();
+        }
+    }
+
+    /// 一个滚动区当前滚到哪了（像素，向下为正）。
+    pub fn scroll_offset(&self, id: Id) -> f32 {
+        self.scroll.get(&id).copied().unwrap_or(0.0)
+    }
+
     /// 一块面板底色。通常作为根容器的背景。
     pub fn panel(&mut self, id: &str) -> Id {
         let color = self.theme.panel;
@@ -246,6 +353,12 @@ impl WidgetUi {
         id
     }
 
+    /// 某个声明是不是在滚动区里。
+    fn scrolled(&self, index: usize) -> Option<ScrollFrame> {
+        self.scroll_frame
+            .filter(|frame| index >= frame.first && index < frame.last)
+    }
+
     // ───────────────────────── 求解与绘制 ─────────────────────────
 
     /// 排版、判交互、出几何。一帧的收尾。
@@ -256,15 +369,76 @@ impl WidgetUi {
         let root = self.build_tree(ui);
         self.solved = crate::layout::solve(&root, screen);
 
-        // 交互按前序的矩形判定；后面的画在上面，命中时从后往前找。
-        let hits: Vec<(Id, Rect)> = self
-            .solved
+        self.rects = self
+            .declared
             .iter()
-            .filter(|(id, _)| self.declared.iter().any(|d| d.id == *id))
+            .map(|d| self.solved.rect(d.id).unwrap_or_default())
+            .collect();
+
+        self.apply_scroll(input);
+
+        // 交互按前序的矩形判定；后面的画在上面，命中时从后往前找。
+        //
+        // 用**滚动之后**的矩形：不然滚下去之后，点击命中的还是原位置，
+        // 表现为「点这一行，亮的是另一行」。
+        let hits: Vec<(Id, Rect)> = self
+            .declared
+            .iter()
+            .zip(&self.rects)
+            .map(|(d, rect)| (d.id, *rect))
             .collect();
         self.interaction.update(&hits, input);
 
         self.paint(ui);
+    }
+
+    /// 处理滚轮、夹取偏移，并把滚动区里的矩形整体上移。
+    fn apply_scroll(&mut self, input: &crate::UiInput) {
+        let Some(frame) = self.scroll_frame else {
+            return;
+        };
+        let Some(viewport) = self.scroll_viewport() else {
+            return;
+        };
+
+        // 内容总高：从第一个被滚的控件顶端到最后一个的底端。
+        let end = frame.last.min(self.rects.len());
+        let content = self.rects[frame.first..end]
+            .iter()
+            .fold(0.0f32, |h, r| h.max(r.max.y))
+            - viewport.min.y;
+        let max_offset = (content - frame.height).max(0.0);
+
+        let offset = self.scroll.entry(frame.id).or_insert(0.0);
+        // 指针在视口里才响应滚轮，否则页面上所有滚动区会一起滚。
+        if input.pointer.is_some_and(|p| viewport.contains(p)) {
+            *offset -= input.scroll.y * 40.0;
+        }
+        // 夹取要在**每帧**做，不只是滚的时候：内容变短之后，
+        // 旧偏移会把内容整个顶出视口，看起来像列表空了。
+        *offset = offset.clamp(0.0, max_offset);
+        let offset = *offset;
+
+        for rect in &mut self.rects[frame.first..end] {
+            rect.min.y -= offset;
+            rect.max.y -= offset;
+        }
+    }
+
+    /// 滚动区的视口矩形。
+    fn scroll_viewport(&self) -> Option<Rect> {
+        let frame = self.scroll_frame?;
+        let end = frame.last.min(self.rects.len());
+        let first = self.rects.get(frame.first)?;
+        Some(Rect {
+            min: Vec2::new(first.min.x, first.min.y),
+            max: Vec2::new(
+                self.rects[frame.first..end]
+                    .iter()
+                    .fold(first.max.x, |w, r| w.max(r.max.x)),
+                first.min.y + frame.height,
+            ),
+        })
     }
 
     /// 把声明变成布局树。
@@ -274,7 +448,8 @@ impl WidgetUi {
             let style = Style {
                 width: match declared.widget {
                     // 滑条要占满一行才好拖。
-                    Widget::Slider { .. } => Length::Percent(1.0),
+                    // 滑条和文本框都要占满一行才好用。
+                    Widget::Slider { .. } | Widget::TextInput { .. } => Length::Percent(1.0),
                     _ => Length::Auto,
                 },
                 min_size: Vec2::new(0.0, theme.row_height),
@@ -291,6 +466,16 @@ impl WidgetUi {
             // 内容的固有尺寸。文字节点不给的话 flexbox 认为它零尺寸，
             // 整行塌陷，界面上什么都看不见。
             let content = self.content_size(ui, &declared.widget);
+            let mut style = style;
+            // 最小宽度也按内容兜底。
+            //
+            // 固有尺寸只在宽度是 `Auto` 时生效，而滑条和文本框用的是
+            // `Percent(1.0)`——在宽度不确定的父容器里，百分比解析成 0，
+            // 于是一个空文本框会塌成零宽，根本点不进去。
+            style.min_size.x = style
+                .min_size
+                .x
+                .max(content.x + theme.padding.left + theme.padding.right);
             LayoutNode::leaf(declared.id, style, content)
         });
 
@@ -314,16 +499,47 @@ impl WidgetUi {
                 Vec2::new(text_size.x + theme.row_height, text_size.y)
             }
             Widget::Slider { .. } => Vec2::new(120.0, theme.font_size),
+            Widget::TextInput { text, placeholder } => {
+                // 按内容和提示里较宽的那个量，但至少留出一段可打字的宽度——
+                // 空文本框宽度为零的话根本点不进去。
+                let shown = if text.is_empty() { placeholder } else { text };
+                let size = ui.measure(shown, &style(theme.font_size), None).size;
+                Vec2::new(size.x.max(160.0), theme.font_size)
+            }
         }
     }
 
     /// 走一遍求解结果，出几何。
     fn paint(&self, ui: &mut Ui) {
         let theme = self.theme;
-        for declared in &self.declared {
-            let Some(rect) = self.solved.rect(declared.id) else {
+        let viewport = self.scroll_viewport();
+        let mut clipped = false;
+
+        for (index, declared) in self.declared.iter().enumerate() {
+            let rect = self.rects[index];
+
+            // 进滚动区时压一层裁剪，出来时弹掉。
+            let inside = self.scrolled(index).is_some();
+            if inside != clipped {
+                match (inside, viewport) {
+                    (true, Some(v)) => ui.push_clip(v),
+                    (true, None) => {}
+                    (false, _) => ui.pop_clip(),
+                }
+                clipped = inside;
+            }
+
+            // 滚出视口的控件连几何都不生成。
+            //
+            // 不跳的话，一个一千行的列表每帧都要为看不见的九百多行
+            // 生成顶点——CPU 和带宽全花在裁剪之后会被丢掉的东西上。
+            if inside
+                && let Some(v) = viewport
+                && rect.intersect(&v).is_empty()
+            {
                 continue;
-            };
+            }
+
             let response = self.interaction.response(declared.id);
 
             match &declared.widget {
@@ -438,8 +654,99 @@ impl WidgetUi {
                     };
                     ui.rounded_rect(knob, knob_radius, fill);
                 }
+
+                Widget::TextInput { text, placeholder } => {
+                    let fill = if response.focused {
+                        theme.active
+                    } else if response.hovered {
+                        theme.hovered
+                    } else {
+                        theme.surface
+                    };
+                    ui.rounded_rect(rect, theme.radius, fill);
+                    ui.border(
+                        rect,
+                        theme.radius,
+                        if response.focused { 2.0 } else { 1.0 },
+                        if response.focused {
+                            theme.focus
+                        } else {
+                            theme.outline
+                        },
+                    );
+
+                    let inner = rect.shrink(theme.padding.left.min(theme.padding.top).max(6.0));
+                    let text_style = TextStyle {
+                        size: theme.font_size,
+                        wrap: kfont::Wrap::None,
+                        ..Default::default()
+                    };
+                    let baseline = Vec2::new(inner.min.x, rect.center().y - theme.font_size * 0.62);
+
+                    // 内容会比框长。裁剪掉溢出的部分，否则文字会画到
+                    // 框外面、盖住旁边的控件。
+                    ui.push_clip(inner);
+
+                    let edit = self.text_state(declared.id);
+                    // 选区先画，文字盖在上面。反过来的话高亮会糊住文字。
+                    if edit.has_selection() {
+                        let range = edit.selection();
+                        let before = ui.measure(&text[..range.start], &text_style, None).size.x;
+                        let width = ui.measure(&text[range.clone()], &text_style, None).size.x;
+                        ui.rect(
+                            Rect {
+                                min: Vec2::new(baseline.x + before, inner.min.y),
+                                max: Vec2::new(baseline.x + before + width, inner.max.y),
+                            },
+                            theme.accent * Vec4::new(1.0, 1.0, 1.0, 0.45),
+                        );
+                    }
+
+                    if text.is_empty() {
+                        ui.text(baseline, placeholder, &text_style, theme.dim, None);
+                    } else {
+                        ui.text(baseline, text, &text_style, theme.text, None);
+                    }
+
+                    // 光标。只在有焦点时画，否则每个文本框里都杵着一根竖线。
+                    if response.focused {
+                        let before = ui
+                            .measure(&text[..edit.cursor().min(text.len())], &text_style, None)
+                            .size
+                            .x;
+                        ui.rect(
+                            Rect {
+                                min: Vec2::new(baseline.x + before, inner.min.y),
+                                max: Vec2::new(baseline.x + before + 1.5, inner.max.y),
+                            },
+                            theme.text,
+                        );
+                    }
+
+                    ui.pop_clip();
+                }
             }
         }
+
+        if clipped {
+            ui.pop_clip();
+        }
+    }
+}
+
+/// 把一个编辑动作应用到状态上。
+fn apply_edit(edit: &mut crate::TextEdit, text: &mut String, action: crate::EditAction) {
+    use crate::EditAction as A;
+    match action {
+        A::Backspace => edit.backspace(text),
+        A::Delete => edit.delete(text),
+        A::Left { select } => edit.move_left(text, select),
+        A::Right { select } => edit.move_right(text, select),
+        A::Home { select } => edit.move_home(select),
+        A::End { select } => edit.move_end(text, select),
+        A::SelectAll => edit.select_all(text),
+        // 提交与取消由调用方处理——文本框不知道回车该干什么。
+        A::Submit | A::Cancel => {}
     }
 }
 
@@ -680,6 +987,287 @@ mod tests {
 
         assert!(w.response(b).rect.min.x > w.response(a).rect.min.x);
         assert_eq!(w.response(a).rect.min.y, w.response(b).rect.min.y);
+    }
+
+    /// 让某个控件拿到焦点：Tab 一次就走到第一个。
+    fn focus_first(w: &mut WidgetUi, ui: &mut Ui, declare: impl Fn(&mut WidgetUi)) {
+        let tab = UiInput {
+            focus_step: 1,
+            ..Default::default()
+        };
+        w.begin();
+        declare(w);
+        w.finish(ui, &tab);
+    }
+
+    #[test]
+    fn typing_into_a_focused_text_input_changes_the_text() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let mut text = String::new();
+
+        focus_first(&mut w, &mut ui, |w| {
+            let mut scratch = String::new();
+            w.text_input("name", &mut scratch, "名字", &UiInput::default());
+        });
+
+        let input = UiInput {
+            text: "中文".to_string(),
+            ..Default::default()
+        };
+        w.begin();
+        w.text_input("name", &mut text, "名字", &input);
+        w.finish(&mut ui, &input);
+
+        assert_eq!(text, "中文");
+    }
+
+    #[test]
+    fn an_unfocused_text_input_ignores_typing() {
+        // 不判焦点的话，界面上每个文本框都会同时收到同一串字。
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let mut a = String::new();
+        let mut b = String::new();
+
+        // 先让第一个拿到焦点。
+        focus_first(&mut w, &mut ui, |w| {
+            let mut s1 = String::new();
+            let mut s2 = String::new();
+            w.text_input("a", &mut s1, "", &UiInput::default());
+            w.text_input("b", &mut s2, "", &UiInput::default());
+        });
+
+        let input = UiInput {
+            text: "x".to_string(),
+            ..Default::default()
+        };
+        w.begin();
+        w.text_input("a", &mut a, "", &input);
+        w.text_input("b", &mut b, "", &input);
+        w.finish(&mut ui, &input);
+
+        assert_eq!(a, "x");
+        assert_eq!(b, "", "没有焦点的文本框不该收到输入");
+    }
+
+    #[test]
+    fn backspace_in_a_text_input_removes_a_whole_character() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let mut text = String::from("中文");
+
+        focus_first(&mut w, &mut ui, |w| {
+            let mut scratch = String::from("中文");
+            w.text_input("t", &mut scratch, "", &UiInput::default());
+        });
+        // 光标要先到末尾。
+        let to_end = UiInput {
+            edits: vec![crate::EditAction::End { select: false }],
+            ..Default::default()
+        };
+        w.begin();
+        w.text_input("t", &mut text, "", &to_end);
+        w.finish(&mut ui, &to_end);
+
+        let backspace = UiInput {
+            edits: vec![crate::EditAction::Backspace],
+            ..Default::default()
+        };
+        w.begin();
+        w.text_input("t", &mut text, "", &backspace);
+        w.finish(&mut ui, &backspace);
+
+        assert_eq!(text, "中");
+    }
+
+    #[test]
+    fn a_text_input_survives_the_text_being_replaced_externally() {
+        // 读档、重置会把文本整个换掉。光标不夹回去的话下一次切片就 panic。
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let mut text = String::from("很长的一段内容");
+
+        focus_first(&mut w, &mut ui, |w| {
+            let mut scratch = String::from("很长的一段内容");
+            w.text_input("t", &mut scratch, "", &UiInput::default());
+        });
+        let to_end = UiInput {
+            edits: vec![crate::EditAction::End { select: false }],
+            ..Default::default()
+        };
+        w.begin();
+        w.text_input("t", &mut text, "", &to_end);
+        w.finish(&mut ui, &to_end);
+
+        // 外部换成短的。
+        text = String::from("短");
+        w.begin();
+        w.text_input("t", &mut text, "", &UiInput::default());
+        w.finish(&mut ui, &UiInput::default());
+
+        assert!(w.text_state(Id::new("t")).cursor() <= text.len());
+    }
+
+    #[test]
+    fn an_empty_text_input_still_has_a_clickable_width() {
+        // 宽度按内容算的话，空文本框会塌成零宽，根本点不进去。
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let mut text = String::new();
+        w.begin();
+        let id = w.text_input("t", &mut text, "", &UiInput::default());
+        w.finish(&mut ui, &UiInput::default());
+
+        assert!(w.response(id).rect.size().x >= 160.0);
+    }
+
+    /// 一个装了 `count` 个按钮的滚动区。
+    fn scroll_list(w: &mut WidgetUi, ui: &mut Ui, input: &UiInput, count: usize) -> Id {
+        w.begin();
+        let id = w.begin_scroll("list", 100.0);
+        for i in 0..count {
+            w.button(&format!("row{i}"), format!("第 {i} 行"));
+        }
+        w.end_scroll();
+        w.finish(ui, input);
+        id
+    }
+
+    /// 视口里的一个点。
+    ///
+    /// 不硬编码坐标：测试里没有字体，按钮宽度只剩内边距（24 px），
+    /// 随手写个 x=60 就落到视口外面去了。
+    fn inside_viewport(w: &WidgetUi) -> Vec2 {
+        w.scroll_viewport().expect("应当有滚动区").center()
+    }
+
+    fn scrolling(x: f32, y: f32, amount: f32) -> UiInput {
+        UiInput {
+            pointer: Some(Vec2::new(x, y)),
+            scroll: Vec2::new(0.0, amount),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn scrolling_moves_the_content_up() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        let list = scroll_list(&mut w, &mut ui, &UiInput::default(), 20);
+        let before = w.response(Id::new("row0")).rect.min.y;
+
+        // 滚轮向下（负 y）。指针要在视口里。
+        let point = inside_viewport(&w);
+        let input = scrolling(point.x, point.y, -3.0);
+        scroll_list(&mut w, &mut ui, &input, 20);
+
+        assert!(
+            w.scroll_offset(list) > 0.0,
+            "偏移是 {}",
+            w.scroll_offset(list)
+        );
+        assert!(
+            w.response(Id::new("row0")).rect.min.y < before,
+            "内容该往上跑"
+        );
+    }
+
+    #[test]
+    fn scrolling_stops_at_the_top_and_bottom() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let list = scroll_list(&mut w, &mut ui, &UiInput::default(), 20);
+        let p = inside_viewport(&w);
+
+        // 往上滚到头。
+        for _ in 0..50 {
+            scroll_list(&mut w, &mut ui, &scrolling(p.x, p.y, 10.0), 20);
+        }
+        assert_eq!(w.scroll_offset(list), 0.0, "不该滚到内容上面去");
+
+        // 往下滚到底。
+        for _ in 0..200 {
+            scroll_list(&mut w, &mut ui, &scrolling(p.x, p.y, -10.0), 20);
+        }
+        let max = w.scroll_offset(list);
+        scroll_list(&mut w, &mut ui, &scrolling(p.x, p.y, -10.0), 20);
+        assert_eq!(w.scroll_offset(list), max, "到底之后不该继续滚");
+    }
+
+    #[test]
+    fn a_shorter_list_clamps_the_old_offset() {
+        // 内容变短之后旧偏移会把内容整个顶出视口，看起来像列表空了。
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let list = scroll_list(&mut w, &mut ui, &UiInput::default(), 50);
+        let p = inside_viewport(&w);
+        for _ in 0..100 {
+            scroll_list(&mut w, &mut ui, &scrolling(p.x, p.y, -10.0), 50);
+        }
+        assert!(w.scroll_offset(list) > 0.0);
+
+        // 换成只有两行。
+        scroll_list(&mut w, &mut ui, &UiInput::default(), 2);
+        assert_eq!(w.scroll_offset(list), 0.0, "内容变短后偏移该夹回去");
+    }
+
+    #[test]
+    fn the_wheel_only_scrolls_the_area_under_the_pointer() {
+        // 不判的话页面上所有滚动区会一起滚。
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let list = scroll_list(&mut w, &mut ui, &UiInput::default(), 20);
+
+        scroll_list(&mut w, &mut ui, &scrolling(700.0, 500.0, -5.0), 20);
+        assert_eq!(w.scroll_offset(list), 0.0, "指针不在视口里不该滚");
+    }
+
+    #[test]
+    fn hit_testing_follows_the_scrolled_position() {
+        // 用滚动前的矩形判命中的话，会「点这一行，亮的是另一行」。
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        scroll_list(&mut w, &mut ui, &UiInput::default(), 20);
+        let p = inside_viewport(&w);
+        for _ in 0..5 {
+            scroll_list(&mut w, &mut ui, &scrolling(p.x, p.y, -3.0), 20);
+        }
+
+        // 指针停在视口正中，命中的那一行的矩形必须真的包含这个点。
+        let point = p;
+        let input = UiInput {
+            pointer: Some(point),
+            ..Default::default()
+        };
+        scroll_list(&mut w, &mut ui, &input, 20);
+
+        let hit = (0..20)
+            .map(|i| Id::new(&format!("row{i}")))
+            .find(|id| w.response(*id).hovered);
+        if let Some(id) = hit {
+            assert!(w.response(id).rect.contains(point));
+        }
+    }
+
+    #[test]
+    fn offscreen_rows_produce_no_geometry() {
+        // 一千行的列表每帧为看不见的九百多行生成顶点的话，
+        // CPU 和带宽全花在裁剪之后会被丢掉的东西上。
+        let count_for = |rows: usize| {
+            let mut ui = ui();
+            let mut w = WidgetUi::default();
+            scroll_list(&mut w, &mut ui, &UiInput::default(), rows);
+            ui.end_frame();
+            ui.draw_list().vertices().len()
+        };
+        let few = count_for(5);
+        let many = count_for(500);
+        assert!(
+            many < few * 4,
+            "视口高度不变，几何量不该随行数线性增长：{few} → {many}"
+        );
     }
 
     #[test]

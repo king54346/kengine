@@ -115,6 +115,10 @@ impl<H: AppHandler> ApplicationHandler for Backend<H> {
             }
         };
 
+        // 打开输入法。默认是关的——不开的话中日韩输入完全收不到，
+        // 而且不会有任何报错，表现为「打中文没反应」。
+        window.set_ime_allowed(true);
+
         self.window = Some(window.clone());
         self.handler.on_resume(window);
     }
