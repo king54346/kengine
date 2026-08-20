@@ -18,11 +18,7 @@ use std::hint::black_box;
 const STEP: f32 = 1.0 / 60.0;
 
 fn ground(world: &mut PhysicsWorld) {
-    world.add_collider(
-        &ColliderDesc::cuboid(Vec3::new(200.0, 0.5, 200.0)),
-        None,
-        0,
-    );
+    world.add_collider(&ColliderDesc::cuboid(Vec3::new(200.0, 0.5, 200.0)), None, 0);
 }
 
 /// 一堆互不接触的球，自由下落。
@@ -65,7 +61,11 @@ fn stacked(stacks: usize, height: usize) -> PhysicsWorld {
                 )),
                 user_data,
             );
-            world.add_collider(&ColliderDesc::cuboid(Vec3::splat(0.5)), Some(body), user_data);
+            world.add_collider(
+                &ColliderDesc::cuboid(Vec3::splat(0.5)),
+                Some(body),
+                user_data,
+            );
             user_data += 1;
         }
     }

@@ -98,7 +98,9 @@ pub mod prelude {
     pub use kgltf::{GltfLoader, Model};
     pub use kinput::{Binding, Input, KeyCode, MouseButton};
     pub use kmaterial::{Material, MaterialValue};
-    pub use kmath::{Aabb, Mat4, Quat, Vec2, Vec3, Vec4};
+    // `Plane` 出现在 `kparticle::Collision::planes` 的签名里，
+    // 不放进 prelude 的话用起来要额外写一行 `use kengine::kmath::Plane`。
+    pub use kmath::{Aabb, Mat4, Plane, Quat, Vec2, Vec3, Vec4};
     // 动画状态机的 `State` 与阶段调度的 `Stage` 容易混淆，这里按原名导出，
     // 用的时候看得见它来自哪个体系。
     pub use kanim::{

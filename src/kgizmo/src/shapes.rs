@@ -6,9 +6,33 @@
 
 use crate::{Color, Gizmos};
 use kmath::{Aabb, Mat4, Vec3};
+use std::sync::LazyLock;
 
 /// 一整圈分多少段。
 const RING_SEGMENTS: usize = 24;
+
+/// 单位圆上的采样点，`[cos, sin]`，含闭合的那一个（下标 24 与下标 0 重合）。
+///
+/// 建这张表是 benches 直接推出来的：球比同顶点数的盒子慢 3.2 倍
+/// （14.6 ns/顶点 vs 4.5 ns/顶点），差的全在每段两次 `sin`/`cos` 上。
+/// 角步长是编译期常量，本来就没必要每次重算。
+///
+/// 首尾两项写成精确的 `[1, 0]`：`(TAU).cos()` 只是**接近** 1，
+/// 环会差着最后一丝没闭上。
+fn unit_circle() -> &'static [[f32; 2]; RING_SEGMENTS + 1] {
+    static TABLE: LazyLock<[[f32; 2]; RING_SEGMENTS + 1]> = LazyLock::new(|| {
+        let step = std::f32::consts::TAU / RING_SEGMENTS as f32;
+        let mut table = [[0.0; 2]; RING_SEGMENTS + 1];
+        for (i, entry) in table.iter_mut().enumerate() {
+            let angle = step * i as f32;
+            *entry = [angle.cos(), angle.sin()];
+        }
+        table[0] = [1.0, 0.0];
+        table[RING_SEGMENTS] = [1.0, 0.0];
+        table
+    });
+    &TABLE
+}
 
 /// 箭头尖端那四根倒刺占箭身长度的比例。
 const ARROW_HEAD_RATIO: f32 = 0.15;
@@ -88,24 +112,22 @@ impl Gizmos {
 
     /// 以 `u`、`v` 两个半轴张成的椭圆环。所有圆形都走这里。
     fn ring(&mut self, center: Vec3, u: Vec3, v: Vec3, color: Color) {
-        let step = std::f32::consts::TAU / RING_SEGMENTS as f32;
-        let mut previous = center + u;
-        for i in 1..=RING_SEGMENTS {
-            let angle = step * i as f32;
-            let point = center + u * angle.cos() + v * angle.sin();
-            self.line(previous, point, color);
-            previous = point;
-        }
+        self.arc(center, u, v, RING_SEGMENTS, color);
     }
 
     /// 半圆弧，从 `u` 方向绕向 `v` 方向。胶囊的两个帽子用它。
+    ///
+    /// 半圈的角步长与整圈相同（`PI / 12 == TAU / 24`），所以两者共用同一张表。
     fn half_ring(&mut self, center: Vec3, u: Vec3, v: Vec3, color: Color) {
-        let segments = RING_SEGMENTS / 2;
-        let step = std::f32::consts::PI / segments as f32;
+        self.arc(center, u, v, RING_SEGMENTS / 2, color);
+    }
+
+    /// 从 `u` 方向起，按单位圆表走 `segments` 段。
+    fn arc(&mut self, center: Vec3, u: Vec3, v: Vec3, segments: usize, color: Color) {
+        let table = unit_circle();
         let mut previous = center + u;
-        for i in 1..=segments {
-            let angle = step * i as f32;
-            let point = center + u * angle.cos() + v * angle.sin();
+        for entry in &table[1..=segments] {
+            let point = center + u * entry[0] + v * entry[1];
             self.line(previous, point, color);
             previous = point;
         }
