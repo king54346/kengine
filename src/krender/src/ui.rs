@@ -12,8 +12,8 @@
 use bytemuck::{Pod, Zeroable};
 use fxhash::FxHashMap;
 use kcore::uuid::Uuid;
-use kui::{DrawList, UiVertex};
 use ktexture::Texture;
+use kui::{DrawList, UiVertex};
 use std::num::NonZeroU64;
 
 /// UI pass 的全局量，对应 `ui.wgsl` 的 `Globals`。
@@ -250,7 +250,11 @@ impl UiResources {
             self.index_buffer = create_index_buffer(device, self.index_capacity);
         }
 
-        queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(list.vertices()));
+        queue.write_buffer(
+            &self.vertex_buffer,
+            0,
+            bytemuck::cast_slice(list.vertices()),
+        );
         queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(list.indices()));
         queue.write_buffer(
             &self.globals_buffer,
@@ -374,7 +378,11 @@ mod tests {
     #[test]
     fn the_shader_compiles_and_has_both_entry_points() {
         let module = naga::front::wgsl::parse_str(kui::UI_WGSL).expect("着色器应当能解析");
-        let names: Vec<_> = module.entry_points.iter().map(|e| e.name.as_str()).collect();
+        let names: Vec<_> = module
+            .entry_points
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
         assert!(names.contains(&"ui_vs"));
         assert!(names.contains(&"ui_fs"));
     }

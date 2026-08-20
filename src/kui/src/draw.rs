@@ -69,7 +69,10 @@ impl Rect {
     /// 边界的取舍是有讲究的：两个相邻的控件共享一条边时，
     /// 两边都算「含」会让那一列像素同时命中两个控件。
     pub fn contains(&self, point: Vec2) -> bool {
-        point.x >= self.min.x && point.y >= self.min.y && point.x < self.max.x && point.y < self.max.y
+        point.x >= self.min.x
+            && point.y >= self.min.y
+            && point.x < self.max.x
+            && point.y < self.max.y
     }
 
     /// 交集。不相交时返回一个空矩形。
@@ -229,13 +232,7 @@ impl DrawList {
     /// 贴一张图。`uv` 是 `[[u0, v0], [u1, v1]]`。
     ///
     /// 会另起一批：换纹理必须断批。
-    pub fn image(
-        &mut self,
-        rect: Rect,
-        texture: kcore::uuid::Uuid,
-        uv: [[f32; 2]; 2],
-        tint: Vec4,
-    ) {
+    pub fn image(&mut self, rect: Rect, texture: kcore::uuid::Uuid, uv: [[f32; 2]; 2], tint: Vec4) {
         self.quad(rect, 0.0, 0.0, tint, Some(texture), uv);
     }
 
@@ -424,8 +421,18 @@ mod tests {
         let b = kcore::uuid::Uuid::new_v4();
 
         list.rect(Rect::new(0.0, 0.0, 10.0, 10.0), red());
-        list.image(Rect::new(0.0, 0.0, 10.0, 10.0), a, [[0.0, 0.0], [1.0, 1.0]], red());
-        list.image(Rect::new(0.0, 0.0, 10.0, 10.0), b, [[0.0, 0.0], [1.0, 1.0]], red());
+        list.image(
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+            a,
+            [[0.0, 0.0], [1.0, 1.0]],
+            red(),
+        );
+        list.image(
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+            b,
+            [[0.0, 0.0], [1.0, 1.0]],
+            red(),
+        );
         list.end();
 
         assert_eq!(list.batches().len(), 3);
@@ -439,7 +446,12 @@ mod tests {
         let mut list = list();
         let texture = kcore::uuid::Uuid::new_v4();
         list.rect(Rect::new(0.0, 0.0, 10.0, 10.0), red());
-        list.image(Rect::new(0.0, 0.0, 10.0, 10.0), texture, [[0.0, 0.0], [1.0, 1.0]], red());
+        list.image(
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+            texture,
+            [[0.0, 0.0], [1.0, 1.0]],
+            red(),
+        );
         list.push_clip(Rect::new(0.0, 0.0, 5.0, 5.0));
         list.rect(Rect::new(0.0, 0.0, 4.0, 4.0), red());
         list.pop_clip();
@@ -583,8 +595,7 @@ mod tests {
     #[test]
     fn the_vertex_layout_matches_the_shader() {
         // 顶点字段和 WGSL 的 `@location` 对不上就是满屏乱码。
-        let module =
-            naga::front::wgsl::parse_str(crate::UI_WGSL).expect("着色器应当能解析");
+        let module = naga::front::wgsl::parse_str(crate::UI_WGSL).expect("着色器应当能解析");
         let vs = module
             .entry_points
             .iter()

@@ -5,8 +5,8 @@ use kaudio::AudioDevice;
 use kinput::Input;
 use krender::RenderStats;
 use kscene::{PhysicsDebugOptions, Scene, SceneDebugOptions};
-use kui::Ui;
 use kscript::Signal;
+use kui::Ui;
 use winit::window::Window;
 
 /// 引擎每帧自动画哪些调试信息。

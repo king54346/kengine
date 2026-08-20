@@ -11,14 +11,13 @@
 mod gizmo;
 mod particle;
 mod post;
-mod ui;
 mod tonemap;
+mod ui;
 
 pub use post::PostSettings;
 pub use tonemap::ToneMapping;
 
 use gizmo::GizmoResources;
-use ui::UiResources;
 use kcamera::{Camera, Frustum};
 use klight::{GpuLight, MAX_LIGHTS, shadow::ShadowSettings};
 use kmesh::{MorphDelta, SkinVertex, Vertex};
@@ -27,6 +26,7 @@ use kscene::Scene;
 use kui::Ui;
 use particle::ParticleResources;
 use post::PostProcess;
+use ui::UiResources;
 
 /// 顶点属性布局。字段顺序必须与 [`Vertex`] 及着色器的 `@location` 一致。
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
@@ -1173,8 +1173,7 @@ impl Renderer {
         let ui_list = ui.draw_list();
         if ui.atlas_version() != self.ui_atlas_version {
             let texture = ui.atlas_texture();
-            self.ui
-                .prepare_atlas(&self.device, &self.queue, &texture);
+            self.ui.prepare_atlas(&self.device, &self.queue, &texture);
             self.ui_atlas_version = ui.atlas_version();
         }
         self.ui.prepare(

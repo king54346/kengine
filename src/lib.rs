@@ -112,6 +112,7 @@ pub mod prelude {
     pub use kaudio::{
         Attenuation, AudioBuffer, AudioDevice, AudioLoader, Listener, Mixer, Sound, Spatial, Status,
     };
+    pub use kfont::{Align as TextAlign, Font, TextStyle, Wrap as TextWrap};
     pub use klight::{Light, LightKind};
     pub use kmesh::{Mesh, SkinVertex, Vertex};
     pub use kparticle::{
@@ -124,9 +125,7 @@ pub mod prelude {
         JointDesc, JointHandle, JointKind, PhysicsDebugOptions, PhysicsWorld, RayCastOptions,
         RayHit, RigidBodyDesc, RigidBodyType, ShapeCastOptions, SphericalLimits,
     };
-    pub use kfont::{Align as TextAlign, Font, TextStyle, Wrap as TextWrap};
     pub use krender::RenderStats;
-    pub use kui::{Rect as UiRect, Ui};
     pub use kscene::{
         AnimationPlayer, Cell, Collider, Joint, LimbDesc, Node, Ragdoll, RagdollBuilder,
         RagdollLimb, RigidBody, Scene, SceneDebugOptions, SceneRayHit, ScriptSlot, Skin,
@@ -136,5 +135,6 @@ pub mod prelude {
     pub use kshader::{Shader, ShaderLoader};
     pub use ksprite::{Anchor, Atlas, PlayMode, Sprite, SpriteAnimation, SpriteRegion};
     pub use ktexture::{Sampler, Texture, TextureLoader};
+    pub use kui::{Rect as UiRect, Ui};
     pub use winit::event::WindowEvent;
 }

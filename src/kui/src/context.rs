@@ -155,7 +155,9 @@ impl Ui {
         // 插不进去（图集满了且无可驱逐）时只是这个字形画不出来，
         // 不影响别的字——所以忽略错误，而不是整段文字放弃。
         for glyph in &layout.glyphs {
-            let _ = self.fonts.ensure_glyph(&mut self.atlas, glyph.c, style.size);
+            let _ = self
+                .fonts
+                .ensure_glyph(&mut self.atlas, glyph.c, style.size);
         }
 
         self.list
@@ -164,7 +166,13 @@ impl Ui {
     }
 
     /// 在一个矩形里居中画一行文字。按钮的文字用它。
-    pub fn text_centered(&mut self, rect: Rect, text: &str, style: &TextStyle, color: Vec4) -> TextLayout {
+    pub fn text_centered(
+        &mut self,
+        rect: Rect,
+        text: &str,
+        style: &TextStyle,
+        color: Vec4,
+    ) -> TextLayout {
         let layout = self.measure(text, style, None);
         let origin = rect.center() - layout.size * 0.5;
         self.text(origin, text, style, color, None)
@@ -224,7 +232,13 @@ mod tests {
             eprintln!("跳过：本机没有找到可用的系统字体");
             return;
         };
-        ui.text(Vec2::new(10.0, 10.0), "Hello", &TextStyle::default(), white(), None);
+        ui.text(
+            Vec2::new(10.0, 10.0),
+            "Hello",
+            &TextStyle::default(),
+            white(),
+            None,
+        );
         ui.end_frame();
 
         // 五个字母，每个一个四边形。
@@ -240,7 +254,13 @@ mod tests {
             return;
         };
         ui.rect(Rect::new(0.0, 0.0, 200.0, 40.0), white());
-        ui.text(Vec2::new(8.0, 8.0), "按钮", &TextStyle::default(), white(), None);
+        ui.text(
+            Vec2::new(8.0, 8.0),
+            "按钮",
+            &TextStyle::default(),
+            white(),
+            None,
+        );
         ui.rounded_rect(Rect::new(0.0, 60.0, 200.0, 40.0), 8.0, white());
         ui.end_frame();
 

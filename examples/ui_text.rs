@@ -126,15 +126,6 @@ impl Plugin for UiDemo {
     }
 
     fn update(&mut self, ctx: &mut Context) {
-        // TEMP-VALIDATION
-        if ctx.elapsed > 2.0 && ctx.elapsed < 2.1 {
-            klog::info!(
-                "UI 顶点 {} / 绘制调用 {} / 图集版本 {}",
-                ctx.stats.ui_vertices,
-                ctx.stats.draw_calls,
-                ctx.ui.atlas_version()
-            );
-        }
         if ctx.input.key_just_pressed(KeyCode::Escape) {
             ctx.request_exit();
         }
@@ -206,9 +197,9 @@ impl Plugin for UiDemo {
 
         // 右上角的状态行。
         let status = format!(
-            "{:.0} px · {} 绘制调用 · 图集版本 {}",
+            "{:.0} px · UI {} 顶点 · 图集版本 {}",
             self.size,
-            ctx.stats.draw_calls,
+            ctx.stats.ui_vertices,
             ctx.ui.atlas_version(),
         );
         let style = TextStyle {
