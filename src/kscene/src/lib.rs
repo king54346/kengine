@@ -11,7 +11,6 @@
 mod audio;
 mod cull;
 mod debug;
-mod terrain;
 mod node;
 mod physics;
 mod ragdoll;
@@ -19,11 +18,11 @@ mod script;
 mod serialize;
 mod skin;
 mod streaming;
+mod terrain;
 mod transform;
 
 pub use audio::SoundSource;
 pub use debug::SceneDebugOptions;
-pub use kterrain::{Brush, Terrain};
 pub use kaudio::{Attenuation, AudioBuffer, AudioDevice, Listener, Spatial};
 pub use kcamera::{Camera, Frustum, Projection};
 pub use kgizmo::{Color, Gizmos, Layer};
@@ -36,6 +35,7 @@ pub use kphysics::{
     JointDesc, JointHandle, JointKind, PhysicsWorld, RayCastOptions, RayHit, RigidBodyDesc,
     RigidBodyType, ShapeCastOptions, SphericalLimits,
 };
+pub use kterrain::{Brush, Terrain};
 pub use node::Node;
 pub use physics::{Collider, Joint, RigidBody};
 pub use ragdoll::{LimbDesc, Ragdoll, RagdollBuilder, RagdollLimb, hinge_limits};
@@ -615,11 +615,6 @@ impl Scene {
     ///
     /// 引擎每帧在插件的 `update` 之后自动调用，通常不需要手动调。
     pub fn update(&mut self) {
-        // 地形排在**最前面**：它会新建块子节点，那些节点必须赶上
-        // 本帧的世界变换与剔除结构。放在后面的话，新块要等下一帧才出现，
-        // 表现为相机一动，远处的地形闪一下才补上。
-        self.update_terrains();
-
         self.culling.begin();
         self.index.clear();
 
@@ -715,6 +710,15 @@ impl Scene {
                 stack.push((child, global, visible));
             }
         }
+
+        // ── 地形 ──
+        // 排在第一趟**之后**：它要靠索引找到地形节点，而索引正是第一趟建的。
+        // 排在之前的话第一帧一块都处理不到，地形要到第二帧才出现。
+        //
+        // 新建的块子节点赶不上第一趟，所以 `update_terrains` 会把它们的
+        // 世界变换与索引补上——不补的话新块要等下一帧才进剔除结构，
+        // 表现为相机一动，远处的地形闪一下才补上。
+        self.update_terrains();
 
         // ── 第二趟：骨骼矩阵 ──
         // 必须等整棵树的世界变换都算完：关节可能在树上任何位置，

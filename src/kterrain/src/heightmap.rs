@@ -154,9 +154,9 @@ impl Heightmap {
 
     /// 高度的最小值与最大值。用来算包围盒。
     pub fn height_range(&self) -> (f32, f32) {
-        self.heights.iter().fold((f32::MAX, f32::MIN), |(lo, hi), h| {
-            (lo.min(*h), hi.max(*h))
-        })
+        self.heights
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), h| (lo.min(*h), hi.max(*h)))
     }
 
     /// 一条射线和地形的交点（地形局部坐标）。
@@ -356,7 +356,10 @@ mod tests {
     #[test]
     fn a_ray_pointing_away_misses() {
         let map = flat();
-        assert!(map.raycast(Vec3::new(20.0, 10.0, 20.0), Vec3::Y, 100.0).is_none());
+        assert!(
+            map.raycast(Vec3::new(20.0, 10.0, 20.0), Vec3::Y, 100.0)
+                .is_none()
+        );
     }
 
     #[test]
@@ -388,7 +391,11 @@ mod tests {
             .raycast(Vec3::new(0.0, 2.0, 20.0), Vec3::X, 100.0)
             .expect("水平射线该在坡升到它的高度处相交");
 
-        assert!((hit.x - 20.0).abs() < 0.2, "该在 x=20 附近相交，实测 {}", hit.x);
+        assert!(
+            (hit.x - 20.0).abs() < 0.2,
+            "该在 x=20 附近相交，实测 {}",
+            hit.x
+        );
         assert!((hit.y - 2.0).abs() < 1e-3, "水平射线的高度不该变");
     }
 

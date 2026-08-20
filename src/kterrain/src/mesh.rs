@@ -240,7 +240,12 @@ mod tests {
     fn each_lod_level_halves_the_resolution() {
         let map = map();
         let counts: Vec<usize> = (0..4)
-            .map(|lod| full().build(&map, lod, NeighborLods::default()).vertices().len())
+            .map(|lod| {
+                full()
+                    .build(&map, lod, NeighborLods::default())
+                    .vertices()
+                    .len()
+            })
             .collect();
         assert_eq!(counts, vec![17 * 17, 9 * 9, 5 * 5, 3 * 3]);
     }

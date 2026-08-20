@@ -288,7 +288,9 @@ mod tests {
     fn the_weight_falls_off_smoothly() {
         // 线性衰减在边缘会留下一圈能看出来的折线。
         let brush = at(0.0, 0.0, 10.0);
-        let samples: Vec<f32> = (0..10).map(|i| brush.weight(Vec2::new(i as f32, 0.0))).collect();
+        let samples: Vec<f32> = (0..10)
+            .map(|i| brush.weight(Vec2::new(i as f32, 0.0)))
+            .collect();
         for pair in samples.windows(2) {
             assert!(pair[1] <= pair[0] + 1e-6, "权重该单调不增");
         }
@@ -322,7 +324,10 @@ mod tests {
         apply(&mut map, &brush, Operation::Raise);
         let raised = map.sample(100.0, 100.0);
         apply(&mut map, &brush, Operation::Lower);
-        assert!(map.sample(100.0, 100.0).abs() < 1e-4, "抬起再压下该回到原处");
+        assert!(
+            map.sample(100.0, 100.0).abs() < 1e-4,
+            "抬起再压下该回到原处"
+        );
         assert!(raised > 0.0);
     }
 
@@ -332,10 +337,7 @@ mod tests {
         let mut map = map();
         let touched = apply(&mut map, &at(100.0, 100.0, 15.0), Operation::Raise);
         assert!(touched > 0);
-        assert!(
-            touched < 40,
-            "碰了 {touched} 个顶点，说明遍历了整张图"
-        );
+        assert!(touched < 40, "碰了 {touched} 个顶点，说明遍历了整张图");
     }
 
     #[test]
