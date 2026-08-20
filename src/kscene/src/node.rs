@@ -45,6 +45,8 @@ pub struct Node {
     pub(crate) collider: Option<Box<Collider>>,
     pub(crate) joint: Option<Box<Joint>>,
     pub(crate) ragdoll: Option<Box<Ragdoll>>,
+    /// 地形。块网格由 [`Scene::update`] 生成成子节点。
+    pub(crate) terrain: Option<Box<kterrain::Terrain>>,
     pub(crate) sound: Option<Box<SoundSource>>,
     pub(crate) script: Option<Box<ScriptSlot>>,
     pub(crate) parent: Handle<Node>,
@@ -83,6 +85,7 @@ impl Node {
             collider: None,
             joint: None,
             ragdoll: None,
+            terrain: None,
             sound: None,
             script: None,
             parent: Handle::NONE,
@@ -185,6 +188,13 @@ impl Node {
 
     /// 挂上布娃娃。通常由
     /// [`RagdollBuilder`](crate::RagdollBuilder) 代劳，不必手写。
+    /// 挂一块地形。
+    pub fn with_terrain(mut self, terrain: kterrain::Terrain) -> Self {
+        self.terrain = Some(Box::new(terrain));
+        self
+    }
+
+    /// 挂一个布娃娃。
     pub fn with_ragdoll(mut self, ragdoll: Ragdoll) -> Self {
         self.ragdoll = Some(Box::new(ragdoll));
         self
@@ -335,6 +345,12 @@ impl Node {
     }
 
     /// 碰撞体的只读引用。
+    /// 挂一个碰撞体。
+    pub fn set_collider(&mut self, collider: Collider) {
+        self.collider = Some(Box::new(collider));
+    }
+
+    /// 碰撞体。
     pub fn collider(&self) -> Option<&Collider> {
         self.collider.as_deref()
     }
@@ -367,6 +383,29 @@ impl Node {
     /// 挂上布娃娃。
     pub fn set_ragdoll(&mut self, ragdoll: Ragdoll) {
         self.ragdoll = Some(Box::new(ragdoll));
+    }
+
+    /// 挂一块地形。
+    pub fn set_terrain(&mut self, terrain: kterrain::Terrain) {
+        self.terrain = Some(Box::new(terrain));
+    }
+
+    /// 地形。
+    pub fn terrain(&self) -> Option<&kterrain::Terrain> {
+        self.terrain.as_deref()
+    }
+
+    /// 地形的可变引用。
+    pub fn terrain_mut(&mut self) -> Option<&mut kterrain::Terrain> {
+        self.terrain.as_deref_mut()
+    }
+
+    /// 把地形整个取走，节点上留空。
+    ///
+    /// 引擎内部用：更新 LOD 时既要读地形又要往场景里加子节点，
+    /// 两个可变借用碰在一起。取出来用完再 [`set_terrain`](Self::set_terrain) 放回去。
+    pub(crate) fn take_terrain(&mut self) -> Option<kterrain::Terrain> {
+        self.terrain.take().map(|t| *t)
     }
 
     /// 声源的只读引用。

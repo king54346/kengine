@@ -11,6 +11,7 @@
 mod audio;
 mod cull;
 mod debug;
+mod terrain;
 mod node;
 mod physics;
 mod ragdoll;
@@ -22,6 +23,7 @@ mod transform;
 
 pub use audio::SoundSource;
 pub use debug::SceneDebugOptions;
+pub use kterrain::{Brush, Terrain};
 pub use kaudio::{Attenuation, AudioBuffer, AudioDevice, Listener, Spatial};
 pub use kcamera::{Camera, Frustum, Projection};
 pub use kgizmo::{Color, Gizmos, Layer};
@@ -158,6 +160,7 @@ struct NodeIndex {
     ragdolls: Vec<Handle<Node>>,
     sounds: Vec<Handle<Node>>,
     scripts: Vec<Handle<Node>>,
+    terrains: Vec<Handle<Node>>,
 }
 
 impl NodeIndex {
@@ -612,6 +615,11 @@ impl Scene {
     ///
     /// 引擎每帧在插件的 `update` 之后自动调用，通常不需要手动调。
     pub fn update(&mut self) {
+        // 地形排在**最前面**：它会新建块子节点，那些节点必须赶上
+        // 本帧的世界变换与剔除结构。放在后面的话，新块要等下一帧才出现，
+        // 表现为相机一动，远处的地形闪一下才补上。
+        self.update_terrains();
+
         self.culling.begin();
         self.index.clear();
 
@@ -641,6 +649,7 @@ impl Scene {
                         node.ragdoll.is_some(),
                         node.sound.is_some(),
                         node.script.is_some(),
+                        node.terrain.is_some(),
                     ),
                 )
             };
@@ -657,6 +666,7 @@ impl Scene {
                 has_ragdoll,
                 has_sound,
                 has_script,
+                has_terrain,
             ) = components;
             if drawable {
                 self.index.drawables.push(handle);
@@ -693,6 +703,9 @@ impl Scene {
             }
             if has_script {
                 self.index.scripts.push(handle);
+            }
+            if has_terrain {
+                self.index.terrains.push(handle);
             }
 
             // 按下标取子节点而不是克隆整个列表：每帧对上万个节点做一次分配，
