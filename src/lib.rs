@@ -79,6 +79,7 @@ pub use kscript;
 pub use kshader;
 pub use ksprite;
 pub use ktask;
+pub use kterrain;
 pub use ktexture;
 pub use kui;
 pub use kwinit;
@@ -129,7 +130,7 @@ pub mod prelude {
     pub use kscene::{
         AnimationPlayer, Cell, Collider, Joint, LimbDesc, Node, Ragdoll, RagdollBuilder,
         RagdollLimb, RigidBody, Scene, SceneDebugOptions, SceneRayHit, ScriptSlot, Skin,
-        SoundSource, Streaming, Transform, hinge_limits,
+        SoundSource, Streaming, Terrain, Transform, hinge_limits,
     };
     pub use kscript::{Script, ScriptLoader, ScriptRuntime, ScriptStats, Signal};
     pub use kshader::{Shader, ShaderLoader};
