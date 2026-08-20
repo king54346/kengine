@@ -1786,6 +1786,7 @@ dependencies = [
  "kaudio",
  "kcamera",
  "kcore",
+ "kfont",
  "kgizmo",
  "kgltf",
  "kinput",
@@ -1806,6 +1807,16 @@ dependencies = [
  "ktexture",
  "kwinit",
  "winit",
+]
+
+[[package]]
+name = "kfont"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "fxhash",
+ "kmath",
+ "ktexture",
 ]
 
 [[package]]

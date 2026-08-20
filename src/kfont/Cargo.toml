@@ -1,0 +1,11 @@
+[package]
+name = "kfont"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kmath = { path = "../kmath" }
+ktexture = { path = "../ktexture" }
+fxhash = "0.2"
+# 纯 Rust 的字形光栅化器，不需要 FreeType。bevy_text 用的也是它。
+ab_glyph = "0.2"

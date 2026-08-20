@@ -164,8 +164,10 @@ impl Plugin for GizmoDemo {
 
         // 一部停用的相机：内置叠加层会画出它的视锥。
         // 活动相机的视锥就是屏幕本身，引擎会跳过不画。
-        let mut parked = Camera::default();
-        parked.enabled = false;
+        let parked = Camera {
+            enabled: false,
+            ..Default::default()
+        };
         ctx.scene.add_node(
             Node::new("ParkedCamera")
                 .with_camera(parked)
