@@ -142,9 +142,10 @@ impl TextLayout {
     /// 点在某个字形的左半边就返回它的偏移，右半边返回下一个——
     /// 这是文本编辑器的通行手感：点在字的右侧，光标落在字之后。
     pub fn offset_at(&self, point: Vec2) -> Option<usize> {
-        let line = self.lines.iter().enumerate().find(|(_, l)| {
-            point.y < l.baseline + self.size.y / self.lines.len().max(1) as f32
-        })?;
+        let line =
+            self.lines.iter().enumerate().find(|(_, l)| {
+                point.y < l.baseline + self.size.y / self.lines.len().max(1) as f32
+            })?;
         let (start, end) = line.1.range;
 
         for glyph in &self.glyphs[start..end] {
@@ -351,7 +352,12 @@ fn segments(text: &str) -> Vec<Segment> {
 }
 
 /// 量一段文本的宽度。
-fn measure(text: &str, range: std::ops::Range<usize>, metrics: &dyn Metrics, cursor: &Cursor) -> f32 {
+fn measure(
+    text: &str,
+    range: std::ops::Range<usize>,
+    metrics: &dyn Metrics,
+    cursor: &Cursor,
+) -> f32 {
     let mut width = 0.0;
     let mut previous = cursor.previous;
     for c in text[range].chars() {
@@ -490,7 +496,12 @@ mod tests {
         layout
             .lines
             .iter()
-            .map(|l| layout.glyphs[l.range.0..l.range.1].iter().map(|g| g.c).collect())
+            .map(|l| {
+                layout.glyphs[l.range.0..l.range.1]
+                    .iter()
+                    .map(|g| g.c)
+                    .collect()
+            })
             .collect()
     }
 

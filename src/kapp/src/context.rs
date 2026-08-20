@@ -5,6 +5,7 @@ use kaudio::AudioDevice;
 use kinput::Input;
 use krender::RenderStats;
 use kscene::{PhysicsDebugOptions, Scene, SceneDebugOptions};
+use kui::Ui;
 use kscript::Signal;
 use winit::window::Window;
 
@@ -69,6 +70,11 @@ pub struct Context<'a> {
     pub script_events: &'a [Signal],
     /// 内置调试叠加层的开关，改了下一帧生效。
     pub debug: &'a mut DebugDraw,
+    /// 本帧的 UI。即时模式：每帧重新画，不画就没有。
+    ///
+    /// 引擎在 `update` 之前 `begin_frame`、渲染之前 `end_frame`，
+    /// 所以插件里直接画即可，不必自己管这两步。
+    pub ui: &'a mut Ui,
     pub(crate) exit_requested: &'a mut bool,
 }
 

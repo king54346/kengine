@@ -35,6 +35,7 @@ mod physics_clock;
 mod stage;
 
 pub use context::{Context, DebugDraw};
+use kui::Ui;
 pub use physics_clock::PhysicsClock;
 pub use stage::Stage;
 
@@ -116,6 +117,8 @@ struct Runtime {
     script_events: Vec<Signal>,
     /// 内置调试叠加层的开关。
     debug: DebugDraw,
+    /// UI 状态：字体、字形图集、本帧的绘制列表。
+    ui: Ui,
 }
 
 /// 应用。装载插件、注册系统，然后接管主循环。
@@ -261,6 +264,7 @@ impl App {
                 audio: &runtime.audio,
                 script_events: &runtime.script_events,
                 debug: &mut runtime.debug,
+                ui: &mut runtime.ui,
                 exit_requested: &mut exit_requested,
             };
             system(&mut context);
@@ -303,6 +307,7 @@ impl App {
                 audio: &runtime.audio,
                 script_events: &runtime.script_events,
                 debug: &mut runtime.debug,
+                ui: &mut runtime.ui,
                 exit_requested: &mut exit_requested,
             };
             callback(plugin, &mut context);
@@ -342,6 +347,7 @@ impl AppHandler for App {
             scripts: ScriptRuntime::new(),
             script_events: Vec::new(),
             debug: DebugDraw::none(),
+            ui: Ui::new(),
         });
 
         // 看门人要在资源管理器建好之后再建，它一上来就要把现有资源的
@@ -395,6 +401,20 @@ impl AppHandler for App {
                 runtime
                     .scripts
                     .process(&mut runtime.scene, &runtime.resources, dt, elapsed);
+        }
+
+        // UI 开一帧。**必须排在插件 `update` 之前**——它们要往里画东西，
+        // 排在后面的话这一帧画的全被清掉，屏幕上一个 UI 图元都没有。
+        if let Some(runtime) = self.runtime.as_mut() {
+            let size = runtime.window.inner_size();
+            let scale = runtime.window.scale_factor() as f32;
+            runtime.ui.begin_frame(
+                kmath::Vec2::new(
+                    size.width as f32 / scale.max(0.01),
+                    size.height as f32 / scale.max(0.01),
+                ),
+                scale,
+            );
         }
 
         // ── Input / Update / PostUpdate ──
@@ -476,7 +496,11 @@ impl AppHandler for App {
         runtime.scene.debug_draw(debug.scene);
         runtime.scene.debug_draw_physics(debug.physics);
 
-        match runtime.renderer.render(&runtime.scene) {
+        // UI 一帧的收尾。插件在 `update` 里画，这里封口——
+        // 不封的话最后一批图元会静默丢失。
+        runtime.ui.end_frame();
+
+        match runtime.renderer.render(&runtime.scene, &runtime.ui) {
             RenderOutcome::Ok | RenderOutcome::Skip => {}
             RenderOutcome::Reconfigure => {
                 let size = runtime.renderer.size();

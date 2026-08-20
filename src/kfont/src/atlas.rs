@@ -88,6 +88,26 @@ impl GlyphEntry {
     }
 }
 
+/// 一个刚光栅化出来的字形：位图加度量。
+///
+/// 打包成一个结构体而不是七个参数——参数一多，调用点上
+/// `bearing_x` 和 `bearing_y` 传反了编译器是不会说话的。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GlyphImage {
+    /// 覆盖率位图，`width × height`，行优先。空白字形为空。
+    pub coverage: Vec<u8>,
+    /// 位图宽。
+    pub width: u32,
+    /// 位图高。
+    pub height: u32,
+    /// 相对笔位置的左偏移（像素）。
+    pub bearing_x: f32,
+    /// 相对基线的**上**偏移（像素，向上为正）。
+    pub bearing_y: f32,
+    /// 画完之后笔要前进多少像素。
+    pub advance: f32,
+}
+
 /// 一层货架。
 #[derive(Debug, Clone, Copy)]
 struct Shelf {
@@ -228,16 +248,17 @@ impl GlyphAtlas {
     /// `coverage` 是 `width × height` 的单通道位图，行优先。
     /// 宽或高为 0 表示空白字形（空格），仍然会记条目——
     /// 不记的话每帧都会重新光栅化一次空格。
-    pub fn insert(
-        &mut self,
-        key: GlyphKey,
-        width: u32,
-        height: u32,
-        coverage: &[u8],
-        bearing_x: f32,
-        bearing_y: f32,
-        advance: f32,
-    ) -> Result<GlyphEntry, AtlasError> {
+    pub fn insert(&mut self, key: GlyphKey, image: &GlyphImage) -> Result<GlyphEntry, AtlasError> {
+        let GlyphImage {
+            width,
+            height,
+            bearing_x,
+            bearing_y,
+            advance,
+            ..
+        } = *image;
+        let coverage = &image.coverage;
+
         if width == 0 || height == 0 {
             let entry = GlyphEntry {
                 rect: [0, 0, 0, 0],
@@ -468,16 +489,19 @@ mod tests {
         vec![value; (w * h) as usize]
     }
 
+    fn image(w: u32, h: u32, value: u8, advance: f32) -> GlyphImage {
+        GlyphImage {
+            coverage: glyph(w, h, value),
+            width: w,
+            height: h,
+            bearing_x: 0.0,
+            bearing_y: 0.0,
+            advance,
+        }
+    }
+
     fn insert(atlas: &mut GlyphAtlas, id: u16, w: u32, h: u32) -> Result<GlyphEntry, AtlasError> {
-        atlas.insert(
-            GlyphKey::new(0, id, 16.0),
-            w,
-            h,
-            &glyph(w, h, 255),
-            0.0,
-            0.0,
-            w as f32,
-        )
+        atlas.insert(GlyphKey::new(0, id, 16.0), &image(w, h, 255, w as f32))
     }
 
     #[test]
@@ -485,7 +509,17 @@ mod tests {
         let mut atlas = GlyphAtlas::new(64);
         let key = GlyphKey::new(0, 42, 16.0);
         atlas
-            .insert(key, 8, 12, &glyph(8, 12, 200), 1.0, 10.0, 9.0)
+            .insert(
+                key,
+                &GlyphImage {
+                    coverage: glyph(8, 12, 200),
+                    width: 8,
+                    height: 12,
+                    bearing_x: 1.0,
+                    bearing_y: 10.0,
+                    advance: 9.0,
+                },
+            )
             .expect("应当装得下");
 
         let entry = atlas.get(&key).expect("刚插进去的应当查得到");
@@ -499,7 +533,7 @@ mod tests {
         let mut atlas = GlyphAtlas::new(32);
         let key = GlyphKey::new(0, 1, 16.0);
         let entry = atlas
-            .insert(key, 4, 4, &glyph(4, 4, 128), 0.0, 0.0, 4.0)
+            .insert(key, &image(4, 4, 128, 4.0))
             .expect("应当装得下");
 
         let x = entry.rect[0];
@@ -553,9 +587,7 @@ mod tests {
         let large = GlyphKey::new(0, 7, 48.0);
         assert_ne!(small, large);
 
-        atlas
-            .insert(small, 6, 8, &glyph(6, 8, 255), 0.0, 0.0, 6.0)
-            .unwrap();
+        atlas.insert(small, &image(6, 8, 255, 6.0)).unwrap();
         assert!(atlas.peek(&large).is_none());
     }
 
@@ -571,7 +603,13 @@ mod tests {
         let mut atlas = GlyphAtlas::new(32);
         let key = GlyphKey::new(0, 3, 16.0);
         let entry = atlas
-            .insert(key, 0, 0, &[], 0.0, 0.0, 5.0)
+            .insert(
+                key,
+                &GlyphImage {
+                    advance: 5.0,
+                    ..Default::default()
+                },
+            )
             .expect("空白字形也该被接受");
 
         assert!(entry.is_blank());
@@ -621,9 +659,7 @@ mod tests {
     fn recently_used_glyphs_survive_eviction() {
         let mut atlas = GlyphAtlas::new(32);
         let hot = GlyphKey::new(0, 999, 16.0);
-        atlas
-            .insert(hot, 6, 6, &glyph(6, 6, 255), 0.0, 0.0, 6.0)
-            .unwrap();
+        atlas.insert(hot, &image(6, 6, 255, 6.0)).unwrap();
 
         for id in 0..40u16 {
             atlas.begin_frame();
@@ -708,7 +744,11 @@ mod tests {
         );
 
         atlas.clear();
-        assert_eq!(atlas.pixels()[(y * 64 + x) as usize], 255, "清空后白块没补回来");
+        assert_eq!(
+            atlas.pixels()[(y * 64 + x) as usize],
+            255,
+            "清空后白块没补回来"
+        );
     }
 
     #[test]

@@ -1703,9 +1703,11 @@ dependencies = [
  "kaudio",
  "kinput",
  "klog",
+ "kmath",
  "krender",
  "kscene",
  "kscript",
+ "kui",
  "kwinit",
  "pollster",
  "winit",
@@ -1805,6 +1807,7 @@ dependencies = [
  "ksprite",
  "ktask",
  "ktexture",
+ "kui",
  "kwinit",
  "winit",
 ]
@@ -1973,6 +1976,7 @@ dependencies = [
  "kscene",
  "kshader",
  "ktexture",
+ "kui",
  "naga",
  "wgpu",
  "winit",
@@ -2055,6 +2059,18 @@ dependencies = [
  "kcore",
  "klog",
  "kmath",
+]
+
+[[package]]
+name = "kui"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "kcore",
+ "kfont",
+ "kmath",
+ "ktexture",
+ "naga",
 ]
 
 [[package]]

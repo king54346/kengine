@@ -16,6 +16,7 @@ kparticle = { path = "../kparticle" }
 kpbr = { path = "../kpbr" }
 kscene = { path = "../kscene" }
 ktexture = { path = "../ktexture" }
+kui = { path = "../kui" }
 bytemuck = { version = "1.25.2", features = ["derive"] }
 # 每帧要按网格/贴图查几万次缓存，标准库默认的 SipHash 在这里太重。
 fxhash = "0.2"

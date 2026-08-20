@@ -11,17 +11,20 @@
 mod gizmo;
 mod particle;
 mod post;
+mod ui;
 mod tonemap;
 
 pub use post::PostSettings;
 pub use tonemap::ToneMapping;
 
 use gizmo::GizmoResources;
+use ui::UiResources;
 use kcamera::{Camera, Frustum};
 use klight::{GpuLight, MAX_LIGHTS, shadow::ShadowSettings};
 use kmesh::{MorphDelta, SkinVertex, Vertex};
 use kparticle::GpuParticle;
 use kscene::Scene;
+use kui::Ui;
 use particle::ParticleResources;
 use post::PostProcess;
 
@@ -207,6 +210,8 @@ pub struct RenderStats {
     pub particles: u32,
     /// 本帧的调试线顶点数，两个一组构成一条线段。
     pub gizmo_vertices: u32,
+    /// 本帧的 UI 顶点数。
+    pub ui_vertices: u32,
     /// 视锥剔除耗时（微秒）。
     pub cull_micros: u32,
     /// CPU 端准备一帧的总耗时（微秒）：剔除 + 收集 + 分批 + 上传。
@@ -336,6 +341,10 @@ pub struct Renderer {
     particle_scratch: Vec<GpuParticle>,
     /// 调试线 pass 的资源。
     gizmos: GizmoResources,
+    /// UI pass 的资源。
+    ui: UiResources,
+    /// 上一次上传的字形图集版本号。
+    ui_atlas_version: u64,
 
     sky_pipeline: wgpu::RenderPipeline,
     sky_buffer: wgpu::Buffer,
@@ -762,6 +771,8 @@ impl Renderer {
         // 调试线同样画在主 pass 里，格式必须一致。
         let gizmos =
             GizmoResources::new(&device, post::HDR_FORMAT, wgpu::TextureFormat::Depth32Float);
+        // UI 画在后处理**之后**，目标是交换链，所以用交换链的格式。
+        let ui_resources = UiResources::new(&device, config.format);
 
         Self {
             surface,
@@ -793,6 +804,8 @@ impl Renderer {
             particles,
             particle_scratch: Vec::new(),
             gizmos,
+            ui: ui_resources,
+            ui_atlas_version: u64::MAX,
             sky_pipeline,
             sky_buffer,
             sky_bind_group,
@@ -803,6 +816,15 @@ impl Renderer {
             meshes: FxHashMap::default(),
             stats: RenderStats::default(),
         }
+    }
+
+    /// 登记一张给 UI 用的贴图。
+    ///
+    /// `DrawList::image` 只带一个 id，渲染器得先见过这张贴图才画得出来；
+    /// 没登记过的批次会被**跳过**（而不是用字形图集顶替——那会在界面上
+    /// 印出一片字形）。
+    pub fn register_ui_texture(&mut self, texture: &ktexture::Texture) {
+        self.ui.upload_image(&self.device, &self.queue, texture);
     }
 
     /// 当前渲染目标尺寸。
@@ -841,7 +863,7 @@ impl Renderer {
     }
 
     /// 绘制一帧。
-    pub fn render(&mut self, scene: &Scene) -> RenderOutcome {
+    pub fn render(&mut self, scene: &Scene, ui: &Ui) -> RenderOutcome {
         // 相机：取场景里第一个启用的；没有就用一个看向原点的默认视角。
         let (camera_to_world, camera) = scene.active_camera().unwrap_or_else(|| {
             let eye = Vec3::new(0.0, 1.5, 3.0);
@@ -1145,6 +1167,25 @@ impl Renderer {
         stats.draw_calls += particle_batches.len() as u32;
         self.particle_scratch = scratch;
 
+        // ── UI：几何与图集 ──
+        // 图集只在版本号变了之后才重传：1024² 展开成 RGBA 是 4 MB，
+        // 而绝大多数帧里图集是不动的。
+        let ui_list = ui.draw_list();
+        if ui.atlas_version() != self.ui_atlas_version {
+            let texture = ui.atlas_texture();
+            self.ui
+                .prepare_atlas(&self.device, &self.queue, &texture);
+            self.ui_atlas_version = ui.atlas_version();
+        }
+        self.ui.prepare(
+            &self.device,
+            &self.queue,
+            ui_list,
+            [ui.screen().x, ui.screen().y],
+        );
+        stats.ui_vertices = ui_list.vertices().len() as u32;
+        stats.draw_calls += ui_list.batches().len() as u32;
+
         // ── 调试线：整帧攒下来的线段一次传上去 ──
         let gizmo_draw = self
             .gizmos
@@ -1426,6 +1467,35 @@ impl Renderer {
 
         // 后处理：Bloom + 色调映射，最终写入交换链。
         self.post.run(&self.queue, &mut encoder, &surface_view);
+
+        // ── UI ──
+        // 画在后处理之后：UI 的颜色是设计好的，过一遍色调映射会被整体压暗，
+        // 白色不再是白色。代价是 UI 拿不到 bloom。
+        if !ui_list.is_empty() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("kengine ui pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &surface_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        // 保留后处理的输出，UI 叠在上面。
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.ui.draw(
+                &mut pass,
+                ui_list,
+                [self.config.width, self.config.height],
+                ui.scale(),
+            );
+        }
 
         self.queue.submit(std::iter::once(encoder.finish()));
         self.queue.present(output);

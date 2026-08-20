@@ -9,7 +9,9 @@ kaudio = { path = "../kaudio" }
 kinput = { path = "../kinput" }
 klog = { path = "../klog" }
 krender = { path = "../krender" }
+kmath = { path = "../kmath" }
 kscene = { path = "../kscene" }
+kui = { path = "../kui" }
 kscript = { path = "../kscript" }
 kwinit = { path = "../kwinit" }
 pollster = "1.0.1"

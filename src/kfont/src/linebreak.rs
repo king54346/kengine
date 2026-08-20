@@ -247,7 +247,11 @@ mod tests {
         // 偏移落在多字节字符中间的话，切片会直接 panic。
         let text = "中文 mixed 排版。测试";
         for b in break_opportunities(text) {
-            assert!(text.is_char_boundary(b.offset), "偏移 {} 不在字符边界", b.offset);
+            assert!(
+                text.is_char_boundary(b.offset),
+                "偏移 {} 不在字符边界",
+                b.offset
+            );
         }
     }
 
@@ -255,6 +259,10 @@ mod tests {
     fn no_opportunity_at_the_start() {
         // 位置 0 是行首，不是断点；混进去会产生一个空行。
         assert!(break_opportunities("中文").iter().all(|b| b.offset > 0));
-        assert!(break_opportunities(" 前导空格").iter().all(|b| b.offset > 0));
+        assert!(
+            break_opportunities(" 前导空格")
+                .iter()
+                .all(|b| b.offset > 0)
+        );
     }
 }

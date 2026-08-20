@@ -61,6 +61,7 @@ pub use kasset;
 pub use kaudio;
 pub use kcamera;
 pub use kcore;
+pub use kfont;
 pub use kgizmo;
 pub use kgltf;
 pub use kinput;
@@ -79,6 +80,7 @@ pub use kshader;
 pub use ksprite;
 pub use ktask;
 pub use ktexture;
+pub use kui;
 pub use kwinit;
 
 mod task;
@@ -122,7 +124,9 @@ pub mod prelude {
         JointDesc, JointHandle, JointKind, PhysicsDebugOptions, PhysicsWorld, RayCastOptions,
         RayHit, RigidBodyDesc, RigidBodyType, ShapeCastOptions, SphericalLimits,
     };
+    pub use kfont::{Align as TextAlign, Font, TextStyle, Wrap as TextWrap};
     pub use krender::RenderStats;
+    pub use kui::{Rect as UiRect, Ui};
     pub use kscene::{
         AnimationPlayer, Cell, Collider, Joint, LimbDesc, Node, Ragdoll, RagdollBuilder,
         RagdollLimb, RigidBody, Scene, SceneDebugOptions, SceneRayHit, ScriptSlot, Skin,

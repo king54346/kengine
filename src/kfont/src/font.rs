@@ -15,7 +15,7 @@
 //! [`FontStack`] 按顺序试每个字体，谁有这个字形就用谁的。
 //! 这是中英混排的实际需要：拉丁字体没有汉字，中文字体的拉丁字形又往往难看。
 
-use crate::atlas::{AtlasError, GlyphAtlas, GlyphEntry, GlyphKey};
+use crate::atlas::{AtlasError, GlyphAtlas, GlyphEntry, GlyphImage, GlyphKey};
 use crate::layout::Metrics;
 use ab_glyph::{Font as _, ScaleFont as _};
 
@@ -47,8 +47,8 @@ impl std::error::Error for FontError {}
 impl Font {
     /// 从 TTF / OTF 字节加载。
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, FontError> {
-        let inner = ab_glyph::FontVec::try_from_vec(bytes)
-            .map_err(|e| FontError(format!("{e:?}")))?;
+        let inner =
+            ab_glyph::FontVec::try_from_vec(bytes).map_err(|e| FontError(format!("{e:?}")))?;
         Ok(Self { inner, id: 0 })
     }
 
@@ -67,10 +67,10 @@ impl Font {
         self.inner.glyph_id(c).0 != 0
     }
 
-    /// 光栅化一个字形，返回 `(覆盖率位图, 宽, 高, 左偏移, 上偏移, 步进)`。
+    /// 光栅化一个字形。
     ///
     /// 空白字形（空格）返回零尺寸的位图，但步进仍然有效。
-    fn rasterize(&self, c: char, size_px: f32) -> RasterizedGlyph {
+    fn rasterize(&self, c: char, size_px: f32) -> GlyphImage {
         let scaled = self.inner.as_scaled(size_px);
         let glyph_id = self.inner.glyph_id(c);
         let advance = scaled.h_advance(glyph_id);
@@ -78,13 +78,9 @@ impl Font {
         let glyph = glyph_id.with_scale(size_px);
         let Some(outlined) = self.inner.outline_glyph(glyph) else {
             // 没有轮廓 = 空白字形。步进照样要给，不然空格会没有宽度。
-            return RasterizedGlyph {
-                coverage: Vec::new(),
-                width: 0,
-                height: 0,
-                bearing_x: 0.0,
-                bearing_y: 0.0,
+            return GlyphImage {
                 advance,
+                ..Default::default()
             };
         };
 
@@ -101,7 +97,7 @@ impl Font {
             }
         });
 
-        RasterizedGlyph {
+        GlyphImage {
             coverage,
             width,
             height,
@@ -111,15 +107,6 @@ impl Font {
             advance,
         }
     }
-}
-
-struct RasterizedGlyph {
-    coverage: Vec<u8>,
-    width: u32,
-    height: u32,
-    bearing_x: f32,
-    bearing_y: f32,
-    advance: f32,
 }
 
 /// 一组字体，按顺序回退。
@@ -164,6 +151,16 @@ impl FontStack {
             .or_else(|| self.fonts.first())
     }
 
+    /// 一个字符在图集里的键。字体栈为空时返回 `None`。
+    ///
+    /// 绘制时手上只有字符，图集的键却是**字形号**——这个方法是两者之间
+    /// 唯一的桥。绕过它自己拿 `c as u16` 当字形号的话，取到的是别的字，
+    /// 画出来是一片乱码，而且不报任何错。
+    pub fn glyph_key(&self, c: char, size_px: f32) -> Option<GlyphKey> {
+        let font = self.resolve(c)?;
+        Some(GlyphKey::new(font.id, font.inner.glyph_id(c).0, size_px))
+    }
+
     /// 按某个字号取一份度量，交给排版。
     pub fn metrics(&self, size_px: f32) -> StackMetrics<'_> {
         StackMetrics {
@@ -188,16 +185,7 @@ impl FontStack {
             return Ok((key, entry));
         }
 
-        let raster = font.rasterize(c, size_px);
-        let entry = atlas.insert(
-            key,
-            raster.width,
-            raster.height,
-            &raster.coverage,
-            raster.bearing_x,
-            raster.bearing_y,
-            raster.advance,
-        )?;
+        let entry = atlas.insert(key, &font.rasterize(c, size_px))?;
         Ok((key, entry))
     }
 }
@@ -366,9 +354,7 @@ mod tests {
 
         assert!(!entry.is_blank());
         let ink: u32 = (0..entry.rect[3])
-            .flat_map(|row| {
-                (0..entry.rect[2]).map(move |col| (row, col))
-            })
+            .flat_map(|row| (0..entry.rect[2]).map(move |col| (row, col)))
             .map(|(row, col)| {
                 let index = ((entry.rect[1] + row) * atlas.size() + entry.rect[0] + col) as usize;
                 u32::from(atlas.pixels()[index])

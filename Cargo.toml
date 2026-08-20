@@ -22,6 +22,7 @@ members = [
     "src/kscene",
     "src/kwinit",
     "src/kmath",
+    "src/kui",
     "src/kscript",
     "src/kshader",
     "src/ksprite",
@@ -60,6 +61,7 @@ kshader = { path = "src/kshader" }
 ksprite = { path = "src/ksprite" }
 ktask = { path = "src/ktask" }
 ktexture = { path = "src/ktexture" }
+kui = { path = "src/kui" }
 kwinit = { path = "src/kwinit" }
 winit = "0.30.13"
 
