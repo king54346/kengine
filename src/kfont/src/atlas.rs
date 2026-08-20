@@ -135,10 +135,17 @@ impl GlyphAtlas {
     /// 别的字的残影，字号越小越明显。
     const PADDING: u32 = 1;
 
+    /// 白色像素在图集左上角占的方块边长。
+    ///
+    /// 留一块纯白，UI 的纯色矩形就能采样它，于是**纯色和文字共用一张纹理**，
+    /// 一整个界面一次绘制就能画完。取 2×2 而不是 1×1：线性过滤会在
+    /// 单像素的边上把邻居的 0 采进来，纯色块的边缘会发虚。
+    pub const WHITE_TEXEL: u32 = 2;
+
     /// 建一张 `size × size` 的图集。
     pub fn new(size: u32) -> Self {
         let size = size.max(1);
-        Self {
+        let mut atlas = Self {
             size,
             pixels: vec![0; (size * size) as usize],
             shelves: Vec::new(),
@@ -147,7 +154,30 @@ impl GlyphAtlas {
             version: 0,
             evictions: 0,
             holes: 0,
+        };
+        atlas.reserve_white_texel();
+        atlas
+    }
+
+    /// 纯白方块的 UV 中心。纯色绘制采样这一点。
+    pub fn white_uv(&self) -> [f32; 2] {
+        let half = Self::WHITE_TEXEL as f32 * 0.5 / self.size as f32;
+        [half, half]
+    }
+
+    /// 在左上角占一块纯白，并开一条对应的货架把它挡住。
+    fn reserve_white_texel(&mut self) {
+        let n = Self::WHITE_TEXEL.min(self.size);
+        for row in 0..n {
+            let start = (row * self.size) as usize;
+            self.pixels[start..start + n as usize].fill(255);
         }
+        // 开一条恰好这么高的货架并把这块宽度占掉，字形就不会覆盖它。
+        self.shelves.push(Shelf {
+            y: 0,
+            height: n,
+            used: n,
+        });
     }
 
     /// 边长。
@@ -290,6 +320,8 @@ impl GlyphAtlas {
         self.shelves.clear();
         self.entries.clear();
         self.holes = 0;
+        // 白块要重新占上——清完不补的话，纯色矩形会突然变透明。
+        self.reserve_white_texel();
         self.version += 1;
     }
 
@@ -401,6 +433,7 @@ impl GlyphAtlas {
         self.shelves.clear();
         self.entries.clear();
         self.holes = 0;
+        self.reserve_white_texel();
 
         for (key, mut entry) in alive {
             if entry.is_blank() {
@@ -655,6 +688,30 @@ mod tests {
     }
 
     #[test]
+    fn the_white_texel_is_reserved_and_stays_white() {
+        // 纯色矩形靠采样这一块出颜色。被字形覆盖或者被清空之后不补，
+        // 界面上所有纯色块会一起变透明。
+        let mut atlas = GlyphAtlas::new(64);
+        let uv = atlas.white_uv();
+        let x = (uv[0] * 64.0) as u32;
+        let y = (uv[1] * 64.0) as u32;
+        assert_eq!(atlas.pixels()[(y * 64 + x) as usize], 255);
+
+        for id in 0..40u16 {
+            atlas.begin_frame();
+            let _ = insert(&mut atlas, id, 6, 6);
+        }
+        assert_eq!(
+            atlas.pixels()[(y * 64 + x) as usize],
+            255,
+            "白块被字形盖掉了"
+        );
+
+        atlas.clear();
+        assert_eq!(atlas.pixels()[(y * 64 + x) as usize], 255, "清空后白块没补回来");
+    }
+
+    #[test]
     fn clear_wipes_everything() {
         let mut atlas = GlyphAtlas::new(32);
         insert(&mut atlas, 1, 6, 6).unwrap();
@@ -663,7 +720,16 @@ mod tests {
         atlas.clear();
 
         assert!(atlas.is_empty());
-        assert!(atlas.pixels().iter().all(|p| *p == 0));
+        // 白块是保留区，不算「内容」——除它之外应当全零。
+        let white = GlyphAtlas::WHITE_TEXEL;
+        for y in 0..atlas.size() {
+            for x in 0..atlas.size() {
+                if x < white && y < white {
+                    continue;
+                }
+                assert_eq!(atlas.pixels()[(y * atlas.size() + x) as usize], 0);
+            }
+        }
         assert!(atlas.version() > version);
     }
 }

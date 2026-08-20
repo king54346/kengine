@@ -16,7 +16,7 @@
 //! 这对拉丁文和 CJK 是对的，对**阿拉伯文、天城文**是错的——那些书写系统
 //! 需要按上下文替换字形。要支持它们得接 rustybuzz，那是另一个量级的工作。
 
-use crate::linebreak::{BreakClass, break_class, break_opportunities};
+use crate::linebreak::{BreakClass, BreakOpportunity, break_class, break_opportunities};
 use kmath::Vec2;
 
 /// 排版需要从字体那里知道的全部信息。
@@ -166,138 +166,80 @@ const ELLIPSIS: char = '…';
 /// 把一段文本排成若干行。
 ///
 /// `max_width` 为 `None` 表示不限宽（等价于 [`Wrap::None`]）。
-pub fn layout(text: &str, style: &TextStyle, metrics: &dyn Metrics, max_width: Option<f32>) -> TextLayout {
+pub fn layout(
+    text: &str,
+    style: &TextStyle,
+    metrics: &dyn Metrics,
+    max_width: Option<f32>,
+) -> TextLayout {
     let mut out = TextLayout::default();
     if text.is_empty() {
         return out;
     }
 
     let line_height = metrics.line_height() * style.line_height;
-    let space = metrics.advance(' ');
-    let tab_width = space * style.tab_size.max(1) as f32;
-
+    let tab_width = metrics.advance(' ') * style.tab_size.max(1) as f32;
     // 只有 Word 模式才真的按宽度断。
-    let wrap_width = match style.wrap {
+    let limit = match style.wrap {
         Wrap::Word => max_width,
         Wrap::None | Wrap::Ellipsis => None,
     };
-    let opportunities = break_opportunities(text);
 
-    let mut line_start = 0usize;
-    let mut pen = 0.0f32;
-    let mut previous: Option<char> = None;
-    // 最近一个可断点：(字节偏移, 断点处的笔位置, 该断点在 glyphs 里的下标)
-    let mut last_break: Option<(usize, f32, usize)> = None;
-    let mut line_index = 0usize;
+    let mut cursor = Cursor {
+        line: 0,
+        line_start: 0,
+        pen: 0.0,
+        previous: None,
+        line_height,
+        tab_width,
+    };
 
-    for (offset, c) in text.char_indices() {
-        // 强制换行。
-        if c == '\n' {
-            finish_line(&mut out, line_start, pen, line_index, line_height);
-            line_start = out.glyphs.len();
-            line_index += 1;
-            pen = 0.0;
-            previous = None;
-            last_break = None;
-            continue;
-        }
-        if c == '\r' {
-            continue;
+    // 先把文本按断行机会切成一个个**段**，再贪心地往行里装。
+    //
+    // 早先的写法是「先摆字形，超宽了再回头把尾巴搬到下一行」——
+    // 搬运时要同步修 x、y、行号、笔位置四样东西，漏一样就错，而且错法
+    // 各不相同（楼梯状下滑、包围盒对不上、一个字一行）。切段之后
+    // 「装不下就换行」是一次判断，没有回溯。
+    for segment in segments(text) {
+        if segment.mandatory_break {
+            finish_line(&mut out, &mut cursor);
         }
 
-        // 走到一个断点上，记下来备用。
-        if let Some(b) = opportunities.iter().find(|b| b.offset == offset)
-            && !b.mandatory
+        // 判断能否装下时**不算行尾空白**：一行末尾的空格不该把词挤到下一行。
+        let visible = measure(text, segment.visible(), metrics, &cursor);
+        let fits = limit.is_none_or(|w| cursor.pen + visible <= w);
+        let line_empty = out.glyphs.len() == cursor.line_start;
+
+        if !fits && !line_empty {
+            finish_line(&mut out, &mut cursor);
+        }
+
+        // 一个段自己就比整行还宽（超长的词、或者根本没有断点的一串字符），
+        // 只能逐字硬断。不硬断的话它会一路画到容器外面去。
+        if let Some(w) = limit
+            && visible > w
         {
-            last_break = Some((offset, pen, out.glyphs.len()));
-        }
-
-        let kern = previous.map_or(0.0, |p| metrics.kern(p, c));
-        let advance = match c {
-            '\t' => {
-                // 制表符跳到下一个制表位，而不是固定加几个空格宽。
-                let next = ((pen / tab_width).floor() + 1.0) * tab_width;
-                let width = next - pen;
-                pen = next;
-                previous = Some(c);
-                let _ = width;
-                continue;
-            }
-            _ => metrics.advance(c) + kern,
-        };
-
-        // 该换行了吗？
-        if let Some(limit) = wrap_width
-            && pen + advance > limit
-            && !out.glyphs.is_empty()
-            && break_class(c) != BreakClass::Space
-        {
-            match last_break {
-                // 有可断点：把断点之后的字形挪到新行。
-                Some((_, break_pen, break_glyph)) if break_glyph > line_start => {
-                    let moved: Vec<_> = out.glyphs[break_glyph..].to_vec();
-                    out.glyphs.truncate(break_glyph);
-                    finish_line(&mut out, line_start, break_pen, line_index, line_height);
-                    line_start = out.glyphs.len();
-                    line_index += 1;
-
-                    // 重排被挪走的那批：它们的 x 要整体左移，y 要下移一行。
-                    let shift = moved.first().map_or(0.0, |g| g.x);
-                    pen = 0.0;
-                    for mut g in moved {
-                        g.x -= shift;
-                        g.y = baseline_of(line_index, line_height, metrics);
-                        g.line = line_index;
-                        pen = g.x;
-                        out.glyphs.push(g);
-                    }
-                    // pen 要指向最后一个字形之后，而不是它的起点。
-                    pen = out
-                        .glyphs
-                        .last()
-                        .map_or(0.0, |g| g.x + metrics.advance(g.c));
+            for (offset, c) in text[segment.range()].char_indices() {
+                let offset = segment.start + offset;
+                let advance = cursor.advance_of(c, metrics);
+                if cursor.pen + advance > w && out.glyphs.len() > cursor.line_start {
+                    finish_line(&mut out, &mut cursor);
                 }
-                // 没有可断点：一个超长的词，只能硬断。
-                // 不硬断的话它会一路画出容器外面。
-                _ => {
-                    finish_line(&mut out, line_start, pen, line_index, line_height);
-                    line_start = out.glyphs.len();
-                    line_index += 1;
-                    pen = 0.0;
-                }
+                cursor.place(&mut out, c, offset, metrics);
             }
-            last_break = None;
-            previous = None;
-        }
-
-        // 空白不进字形表——它没有位图，进去只会让图集多一堆空条目。
-        // 但笔照样要前进。
-        if break_class(c) == BreakClass::Space {
-            // 行首的空白直接吃掉，否则换行后每行都缩进一格。
-            if pen > 0.0 {
-                pen += advance;
-            }
-            previous = Some(c);
             continue;
         }
 
-        out.glyphs.push(PositionedGlyph {
-            c,
-            x: pen,
-            y: baseline_of(line_index, line_height, metrics),
-            offset,
-            line: line_index,
-        });
-        pen += advance;
-        previous = Some(c);
+        for (offset, c) in text[segment.range()].char_indices() {
+            cursor.place(&mut out, c, segment.start + offset, metrics);
+        }
     }
-
-    finish_line(&mut out, line_start, pen, line_index, line_height);
+    finish_line(&mut out, &mut cursor);
 
     if style.wrap == Wrap::Ellipsis
-        && let Some(limit) = max_width
+        && let Some(w) = max_width
     {
-        truncate_with_ellipsis(&mut out, limit, metrics);
+        truncate_with_ellipsis(&mut out, w, metrics);
     }
 
     let width = out.lines.iter().fold(0.0f32, |w, l| w.max(l.width));
@@ -306,26 +248,139 @@ pub fn layout(text: &str, style: &TextStyle, metrics: &dyn Metrics, max_width: O
     out
 }
 
-/// 第 `line` 行的基线 y。
-fn baseline_of(line: usize, line_height: f32, metrics: &dyn Metrics) -> f32 {
-    // 基线不是行顶：字形要挂在基线上，行顶到基线的距离是 ascent。
-    // 直接用行顶的话，所有字会整体偏上一个 ascent，字号越大偏得越多。
-    line as f32 * line_height + metrics.ascent()
+/// 排版过程中的游标状态。
+struct Cursor {
+    line: usize,
+    /// 当前行的第一个字形在 `glyphs` 里的下标。
+    line_start: usize,
+    /// 笔的水平位置。
+    pen: f32,
+    /// 上一个字符，用来查紧排。
+    previous: Option<char>,
+    line_height: f32,
+    tab_width: f32,
 }
 
-/// 收一行。
-fn finish_line(
-    out: &mut TextLayout,
+impl Cursor {
+    /// 一个字符要占多宽（含紧排与制表位）。
+    fn advance_of(&self, c: char, metrics: &dyn Metrics) -> f32 {
+        if c == '\t' {
+            // 制表符是「跳到下一个制表位」，不是「加固定几个空格宽」。
+            // 后者会让对齐的列在不同起点下错开。
+            return ((self.pen / self.tab_width).floor() + 1.0) * self.tab_width - self.pen;
+        }
+        let kern = self.previous.map_or(0.0, |p| metrics.kern(p, c));
+        metrics.advance(c) + kern
+    }
+
+    /// 放一个字符。空白与换行不产生字形，但笔照样前进。
+    fn place(&mut self, out: &mut TextLayout, c: char, offset: usize, metrics: &dyn Metrics) {
+        if c == '\n' || c == '\r' {
+            // 换行符本身不占位；换行动作由段的 `mandatory_break` 触发。
+            return;
+        }
+
+        let advance = self.advance_of(c, metrics);
+        if break_class(c) == BreakClass::Space || c == '\t' {
+            // 行首的空白直接吃掉，否则换行之后每行都缩进一格。
+            if self.pen > 0.0 {
+                self.pen += advance;
+            }
+            self.previous = Some(c);
+            return;
+        }
+
+        out.glyphs.push(PositionedGlyph {
+            c,
+            x: self.pen,
+            y: self.line as f32 * self.line_height + metrics.ascent(),
+            offset,
+            line: self.line,
+        });
+        self.pen += advance;
+        self.previous = Some(c);
+    }
+}
+
+/// 一个段：两个断行机会之间的一截文本。
+struct Segment {
     start: usize,
-    width: f32,
-    line: usize,
-    line_height: f32,
-) {
+    end: usize,
+    /// 可见部分的结束位置（去掉行尾空白）。
+    visible_end: usize,
+    /// 这个段之前有没有强制换行。
+    mandatory_break: bool,
+}
+
+impl Segment {
+    fn range(&self) -> std::ops::Range<usize> {
+        self.start..self.end
+    }
+    fn visible(&self) -> std::ops::Range<usize> {
+        self.start..self.visible_end
+    }
+}
+
+/// 按断行机会把文本切成段。
+fn segments(text: &str) -> Vec<Segment> {
+    let breaks = break_opportunities(text);
+    let mut out = Vec::with_capacity(breaks.len() + 1);
+    let mut start = 0usize;
+    let mut mandatory = false;
+
+    for b in breaks.iter().chain(std::iter::once(&BreakOpportunity {
+        offset: text.len(),
+        mandatory: false,
+    })) {
+        if b.offset <= start {
+            continue;
+        }
+        let chunk = &text[start..b.offset];
+        // 行尾空白不计入宽度：一行末尾的空格不该把下一个词挤到下一行。
+        let visible_end = start + chunk.trim_end().len();
+        out.push(Segment {
+            start,
+            end: b.offset,
+            visible_end,
+            mandatory_break: mandatory,
+        });
+        start = b.offset;
+        mandatory = b.mandatory;
+    }
+    out
+}
+
+/// 量一段文本的宽度。
+fn measure(text: &str, range: std::ops::Range<usize>, metrics: &dyn Metrics, cursor: &Cursor) -> f32 {
+    let mut width = 0.0;
+    let mut previous = cursor.previous;
+    for c in text[range].chars() {
+        if c == '\n' || c == '\r' {
+            continue;
+        }
+        if c == '\t' {
+            let at = cursor.pen + width;
+            width += ((at / cursor.tab_width).floor() + 1.0) * cursor.tab_width - at;
+            previous = Some(c);
+            continue;
+        }
+        width += metrics.advance(c) + previous.map_or(0.0, |p| metrics.kern(p, c));
+        previous = Some(c);
+    }
+    width
+}
+
+/// 收一行，游标移到下一行行首。
+fn finish_line(out: &mut TextLayout, cursor: &mut Cursor) {
     out.lines.push(LineInfo {
-        range: (start, out.glyphs.len()),
-        width,
-        baseline: line as f32 * line_height,
+        range: (cursor.line_start, out.glyphs.len()),
+        width: cursor.pen,
+        baseline: cursor.line as f32 * cursor.line_height,
     });
+    cursor.line += 1;
+    cursor.line_start = out.glyphs.len();
+    cursor.pen = 0.0;
+    cursor.previous = None;
 }
 
 /// 按对齐方式整体平移每一行。
@@ -357,21 +412,23 @@ fn truncate_with_ellipsis(out: &mut TextLayout, limit: f32, metrics: &dyn Metric
         }
 
         // 从后往前退，直到省略号也放得下。
+        //
+        // 判据是省略号的**右边缘**，不是最后一个字形的起点——按起点判的话
+        // 省略号总会右溢一个字宽，截断后照样超出容器。
         let mut cut = line.range.1;
-        while cut > line.range.0 {
-            let last = out.glyphs[cut - 1];
-            if last.x + ellipsis_width <= limit {
-                break;
+        let x = loop {
+            // 一个字都放不下时也要留省略号：宁可显示「…」，
+            // 也不要留一片空白让人以为是加载失败。
+            let x = if cut > line.range.0 {
+                let last = out.glyphs[cut - 1];
+                last.x + metrics.advance(last.c)
+            } else {
+                0.0
+            };
+            if x + ellipsis_width <= limit || cut == line.range.0 {
+                break x;
             }
             cut -= 1;
-        }
-
-        // 一个字都放不下时也要留省略号：宁可显示「…」，
-        // 也不要显示一个空框让人以为是加载失败。
-        let x = if cut > line.range.0 {
-            out.glyphs[cut - 1].x + metrics.advance(out.glyphs[cut - 1].c)
-        } else {
-            0.0
         };
 
         let ellipsis = PositionedGlyph {
@@ -553,7 +610,11 @@ mod tests {
 
         let text: String = layout.glyphs.iter().map(|g| g.c).collect();
         assert!(text.ends_with('…'), "截断后应当以省略号结尾：{text:?}");
-        assert!(layout.lines[0].width <= 50.0, "截断后仍然超宽");
+        assert!(
+            layout.lines[0].width <= 50.0,
+            "截断后仍然超宽：{} / 文本 {text:?}",
+            layout.lines[0].width
+        );
     }
 
     #[test]
@@ -662,10 +723,13 @@ mod tests {
         let layout = layout("中文 mixed\n第二行", &plain(), &FakeFont, Some(200.0));
         for g in &layout.glyphs {
             assert!(g.x >= 0.0);
+            // 用这个字形自己的宽度，不是固定值——拉丁 10、CJK 20。
+            let right = g.x + FakeFont.advance(g.c);
             assert!(
-                g.x + 20.0 <= layout.size.x + 1e-3,
-                "字形 {:?} 跑到包围盒外面了",
-                g.c
+                right <= layout.size.x + 1e-3,
+                "字形 {:?} 的右边缘 {right} 超出了包围盒 {}",
+                g.c,
+                layout.size.x
             );
         }
     }
