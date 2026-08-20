@@ -1,0 +1,9 @@
+[package]
+name = "kterrain"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kmath = { path = "../kmath" }
+kmesh = { path = "../kmesh" }
+kphysics = { path = "../kphysics" }

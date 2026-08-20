@@ -27,6 +27,7 @@ members = [
     "src/kshader",
     "src/ksprite",
     "src/ktask",
+    "src/kterrain",
     "src/ktexture",
 ]
 
@@ -60,6 +61,7 @@ kscript = { path = "src/kscript" }
 kshader = { path = "src/kshader" }
 ksprite = { path = "src/ksprite" }
 ktask = { path = "src/ktask" }
+kterrain = { path = "src/kterrain" }
 ktexture = { path = "src/ktexture" }
 kui = { path = "src/kui" }
 kwinit = { path = "src/kwinit" }

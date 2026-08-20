@@ -1806,6 +1806,7 @@ dependencies = [
  "kshader",
  "ksprite",
  "ktask",
+ "kterrain",
  "ktexture",
  "kui",
  "kwinit",
@@ -2003,6 +2004,7 @@ dependencies = [
  "kpbr",
  "kphysics",
  "ktask",
+ "kterrain",
 ]
 
 [[package]]
@@ -2048,6 +2050,15 @@ dependencies = [
  "concurrent-queue",
  "derive_more",
  "futures-lite",
+]
+
+[[package]]
+name = "kterrain"
+version = "0.1.0"
+dependencies = [
+ "kmath",
+ "kmesh",
+ "kphysics",
 ]
 
 [[package]]
