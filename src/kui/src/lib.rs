@@ -32,9 +32,13 @@
 
 mod context;
 pub mod draw;
+pub mod layout;
 
 pub use context::Ui;
 pub use draw::{DrawBatch, DrawList, Rect, UiVertex};
+pub use layout::{
+    AlignCross, Direction, Edges, Id, Justify, LayoutNode, Length, Solved, Style, solve,
+};
 
 /// UI 着色器源码，由 `krender` 编译。
 pub const UI_WGSL: &str = include_str!("ui.wgsl");
