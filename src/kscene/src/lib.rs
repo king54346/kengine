@@ -35,6 +35,7 @@ pub use kphysics::{
     JointDesc, JointHandle, JointKind, PhysicsWorld, RayCastOptions, RayHit, RigidBodyDesc,
     RigidBodyType, ShapeCastOptions, SphericalLimits,
 };
+pub use ksprite::{SortMode, SpriteInstance, SpriteRegion};
 pub use kterrain::{Brush, Terrain};
 pub use node::Node;
 pub use physics::{Collider, Joint, RigidBody};
@@ -131,6 +132,18 @@ pub struct Scene {
     index: NodeIndex,
     /// 物理世界。场景节点上的刚体 / 碰撞体 / 关节都在这里有一个对应物。
     physics: PhysicsWorld,
+    /// 本帧的 2D 精灵。
+    ///
+    /// 和调试线同一个模式：即时模式，每帧重新提交，渲染器读走后清空。
+    /// 走这条路的精灵享受专用的 2D 批处理；挂在节点上的 `Sprite`
+    /// 走的仍然是 3D 管线（一个贴了图的方片）。
+    sprites: Vec<ksprite::SpriteInstance>,
+    /// 2D 精灵用到的贴图。
+    ///
+    /// 精灵实例只带一个纹理 id，渲染器得先见过贴图本身才画得出来。
+    /// 存在场景上而不是让调用方直接找渲染器——插件拿得到场景，
+    /// 拿不到渲染器。
+    sprite_textures: Vec<ktexture::Texture>,
     /// 本帧的调试线。
     ///
     /// 放在场景上而不是渲染器上，是因为想画调试线的代码（游戏逻辑、
@@ -199,6 +212,8 @@ impl Scene {
             index: NodeIndex::default(),
             physics: PhysicsWorld::new(),
             gizmos: Gizmos::new(),
+            sprites: Vec::new(),
+            sprite_textures: Vec::new(),
         }
     }
 
@@ -219,6 +234,8 @@ impl Scene {
             index: NodeIndex::default(),
             physics: PhysicsWorld::new(),
             gizmos: Gizmos::new(),
+            sprites: Vec::new(),
+            sprite_textures: Vec::new(),
         }
     }
 
@@ -1191,6 +1208,43 @@ impl Scene {
     /// 物理世界的可变引用，用来改重力、求解器参数。
     pub fn physics_mut(&mut self) -> &mut PhysicsWorld {
         &mut self.physics
+    }
+
+    /// 本帧提交的 2D 精灵。
+    pub fn sprites(&self) -> &[ksprite::SpriteInstance] {
+        &self.sprites
+    }
+
+    /// 提交一个 2D 精灵。渲染器每帧画完会清空。
+    ///
+    /// 走这条路的精灵会经过专用的 2D 批处理（排序 + 合批 + 实例化）；
+    /// 挂在节点上的精灵走的仍然是 3D 管线。几万个精灵时差别很大。
+    pub fn push_sprite(&mut self, sprite: ksprite::SpriteInstance) {
+        self.sprites.push(sprite);
+    }
+
+    /// 清空本帧的精灵。由引擎在帧末调用。
+    ///
+    /// **只清实例，不清贴图**：贴图是长期资源，每帧重传的话
+    /// 一张 1024² 的图集每帧要走 4 MB 带宽。
+    pub fn clear_sprites(&mut self) {
+        self.sprites.clear();
+    }
+
+    /// 登记一张 2D 精灵用的贴图。
+    ///
+    /// 没登记过的纹理 id，渲染器会**跳过**那一批——而不是用别的顶替
+    /// （顶替会在画面上印出完全不相干的图）。
+    pub fn register_sprite_texture(&mut self, texture: ktexture::Texture) {
+        if self.sprite_textures.iter().any(|t| t.id() == texture.id()) {
+            return;
+        }
+        self.sprite_textures.push(texture);
+    }
+
+    /// 已登记的精灵贴图。渲染器每帧扫一遍，新的就上传。
+    pub fn sprite_textures(&self) -> &[ktexture::Texture] {
+        &self.sprite_textures
     }
 
     /// 本帧的调试线缓冲。

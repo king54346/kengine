@@ -28,6 +28,19 @@ use kcore::visitor::{Visit, VisitResult, Visitor};
 use kmath::{Vec2, Vec3, Vec4};
 use kmesh::{Mesh, Vertex};
 
+pub mod batch;
+pub mod nine_slice;
+pub mod packer;
+pub mod tilemap;
+
+pub use batch::{Batch, GpuSprite, SortMode, SpriteInstance, cull, sort_and_batch};
+
+/// 2D 精灵着色器源码，由 `krender` 编译。
+pub const SPRITE2D_WGSL: &str = include_str!("sprite2d.wgsl");
+pub use nine_slice::Slices;
+pub use packer::{Entry as PackEntry, Options as PackOptions, Packed, pack};
+pub use tilemap::TileMap;
+
 /// 常用类型的集中导出。
 pub mod prelude {
     pub use crate::{Anchor, Atlas, PlayMode, Sprite, SpriteAnimation, SpriteRegion};

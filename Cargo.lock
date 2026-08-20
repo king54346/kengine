@@ -1976,6 +1976,7 @@ dependencies = [
  "kpbr",
  "kscene",
  "kshader",
+ "ksprite",
  "ktexture",
  "kui",
  "naga",
@@ -2003,8 +2004,10 @@ dependencies = [
  "kparticle",
  "kpbr",
  "kphysics",
+ "ksprite",
  "ktask",
  "kterrain",
+ "ktexture",
 ]
 
 [[package]]
@@ -2035,9 +2038,12 @@ dependencies = [
 name = "ksprite"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "kcore",
  "kmath",
  "kmesh",
+ "ktexture",
+ "naga",
 ]
 
 [[package]]

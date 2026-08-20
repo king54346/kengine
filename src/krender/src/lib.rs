@@ -11,6 +11,7 @@
 mod gizmo;
 mod particle;
 mod post;
+mod sprite2d;
 mod tonemap;
 mod ui;
 
@@ -26,6 +27,7 @@ use kscene::Scene;
 use kui::Ui;
 use particle::ParticleResources;
 use post::PostProcess;
+use sprite2d::SpriteResources;
 use ui::UiResources;
 
 /// 顶点属性布局。字段顺序必须与 [`Vertex`] 及着色器的 `@location` 一致。
@@ -212,6 +214,8 @@ pub struct RenderStats {
     pub gizmo_vertices: u32,
     /// 本帧的 UI 顶点数。
     pub ui_vertices: u32,
+    /// 本帧走 2D 批处理管线的精灵数。
+    pub sprites: u32,
     /// 视锥剔除耗时（微秒）。
     pub cull_micros: u32,
     /// CPU 端准备一帧的总耗时（微秒）：剔除 + 收集 + 分批 + 上传。
@@ -341,6 +345,10 @@ pub struct Renderer {
     particle_scratch: Vec<GpuParticle>,
     /// 调试线 pass 的资源。
     gizmos: GizmoResources,
+    /// 2D 精灵 pass 的资源。
+    sprites: SpriteResources,
+    /// 逐帧复用的精灵暂存区。
+    sprite_scratch: Vec<kscene::SpriteInstance>,
     /// UI pass 的资源。
     ui: UiResources,
     /// 上一次上传的字形图集版本号。
@@ -771,6 +779,9 @@ impl Renderer {
         // 调试线同样画在主 pass 里，格式必须一致。
         let gizmos =
             GizmoResources::new(&device, post::HDR_FORMAT, wgpu::TextureFormat::Depth32Float);
+        // 2D 精灵画在主 pass 里，格式与主 pass 一致。
+        let sprite_resources =
+            SpriteResources::new(&device, post::HDR_FORMAT, wgpu::TextureFormat::Depth32Float);
         // UI 画在后处理**之后**，目标是交换链，所以用交换链的格式。
         let ui_resources = UiResources::new(&device, config.format);
 
@@ -804,6 +815,8 @@ impl Renderer {
             particles,
             particle_scratch: Vec::new(),
             gizmos,
+            sprites: sprite_resources,
+            sprite_scratch: Vec::new(),
             ui: ui_resources,
             ui_atlas_version: u64::MAX,
             sky_pipeline,
@@ -1167,6 +1180,24 @@ impl Renderer {
         stats.draw_calls += particle_batches.len() as u32;
         self.particle_scratch = scratch;
 
+        // ── 2D 精灵：排序、合批、上传 ──
+        // 先把新登记的贴图传上去。`upload` 内部会跳过已经见过的，
+        // 所以每帧扫一遍很便宜。
+        for texture in scene.sprite_textures() {
+            self.sprites.upload(&self.device, &self.queue, texture);
+        }
+        // 排序必须在 CPU 上做：精灵全在同一平面，深度缓冲帮不上忙。
+        let mut sprite_scratch = std::mem::take(&mut self.sprite_scratch);
+        sprite_scratch.clear();
+        sprite_scratch.extend_from_slice(scene.sprites());
+        let sprite_batches =
+            ksprite::sort_and_batch(&mut sprite_scratch, ksprite::SortMode::YDescending);
+        self.sprites
+            .prepare(&self.device, &self.queue, &sprite_scratch, view_proj);
+        stats.sprites = sprite_scratch.len() as u32;
+        stats.draw_calls += sprite_batches.len() as u32;
+        self.sprite_scratch = sprite_scratch;
+
         // ── UI：几何与图集 ──
         // 图集只在版本号变了之后才重传：1024² 展开成 RGBA 是 4 MB，
         // 而绝大多数帧里图集是不动的。
@@ -1454,6 +1485,10 @@ impl Renderer {
             pass.set_pipeline(&self.sky_pipeline);
             pass.set_bind_group(0, &self.sky_bind_group, &[]);
             pass.draw(0..3, 0..1);
+
+            // 2D 精灵画在天空之后、粒子之前：精灵半透明，要在不透明物体
+            // 之后画；但它又该被粒子盖住（粒子通常是特效）。
+            self.sprites.draw(&mut pass, &sprite_batches);
 
             // 粒子最后画：它们半透明且不写深度，任何在它们之后画的不透明物体
             // 都会把它们盖掉——包括天空。

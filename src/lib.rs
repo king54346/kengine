@@ -129,12 +129,14 @@ pub mod prelude {
     pub use krender::RenderStats;
     pub use kscene::{
         AnimationPlayer, Cell, Collider, Joint, LimbDesc, Node, Ragdoll, RagdollBuilder,
-        RagdollLimb, RigidBody, Scene, SceneDebugOptions, SceneRayHit, ScriptSlot, Skin,
-        SoundSource, Streaming, Terrain, Transform, hinge_limits,
+        RagdollLimb, RigidBody, Scene, SceneDebugOptions, SceneRayHit, ScriptSlot, Skin, SortMode,
+        SoundSource, SpriteInstance, Streaming, Terrain, Transform, hinge_limits,
     };
     pub use kscript::{Script, ScriptLoader, ScriptRuntime, ScriptStats, Signal};
     pub use kshader::{Shader, ShaderLoader};
-    pub use ksprite::{Anchor, Atlas, PlayMode, Sprite, SpriteAnimation, SpriteRegion};
+    pub use ksprite::{
+        Anchor, Atlas, PlayMode, Slices, Sprite, SpriteAnimation, SpriteRegion, TileMap,
+    };
     pub use ktexture::{Sampler, Texture, TextureLoader};
     pub use kui::{
         Rect as UiRect, Theme as UiTheme, Ui, UiInput, WidgetUi,

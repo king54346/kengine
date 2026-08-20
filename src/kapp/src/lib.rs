@@ -598,6 +598,8 @@ impl AppHandler for App {
             // 调试线是即时模式的：渲染器已经读走，这一帧的到此为止。
             // 不清的话线段会一帧帧累积，几秒钟就把顶点缓冲撑爆。
             runtime.scene.gizmos_mut().clear();
+            // 2D 精灵同理。
+            runtime.scene.clear_sprites();
 
             // 热重载排在帧末：这一帧的逻辑与渲染已经用完了旧数据，
             // 换在这里最不容易撞上「用到一半资源被换掉」。

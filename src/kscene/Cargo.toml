@@ -19,7 +19,9 @@ kmesh = { path = "../kmesh" }
 kparticle = { path = "../kparticle" }
 kphysics = { path = "../kphysics" }
 kpbr = { path = "../kpbr" }
+ksprite = { path = "../ksprite" }
 kterrain = { path = "../kterrain" }
+ktexture = { path = "../ktexture" }
 # 剔除分片并行要用线程池，因此必须开多线程实现。
 ktask = { path = "../ktask", features = ["multi_threaded"] }
 fxhash = "0.2.1"
