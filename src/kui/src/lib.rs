@@ -39,10 +39,10 @@ pub mod widgets;
 pub use context::Ui;
 pub use draw::{DrawBatch, DrawList, Rect, UiVertex};
 pub use interact::{Interaction, PointerButton, Response, UiInput};
-pub use widgets::{Theme, WidgetUi};
 pub use layout::{
     AlignCross, Direction, Edges, Id, Justify, LayoutNode, Length, MAX_DEPTH, Solved, Style, solve,
 };
+pub use widgets::{Theme, WidgetUi};
 
 /// UI 着色器源码，由 `krender` 编译。
 pub const UI_WGSL: &str = include_str!("ui.wgsl");

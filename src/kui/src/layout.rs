@@ -542,7 +542,6 @@ fn collect(taffy: &TaffyTree<()>, taffy_root: NodeId, root: &LayoutNode, out: &m
 mod tests {
     use super::*;
 
-
     fn id(name: &str) -> Id {
         Id::new(name)
     }
@@ -580,7 +579,10 @@ mod tests {
         );
         let solved = solve(&root, Vec2::new(800.0, 600.0));
 
-        assert_eq!(solved.rect(id("root")).unwrap().size(), Vec2::new(200.0, 100.0));
+        assert_eq!(
+            solved.rect(id("root")).unwrap().size(),
+            Vec2::new(200.0, 100.0)
+        );
     }
 
     #[test]
@@ -799,7 +801,9 @@ mod tests {
     fn the_traversal_order_is_preorder() {
         // 绘制顺序要和这个一致：父容器先画，子控件叠在上面。
         let root = LayoutNode::new(id("root"), Style::default())
-            .with_child(LayoutNode::new(id("a"), Style::default()).with_child(fixed("a1", 5.0, 5.0)))
+            .with_child(
+                LayoutNode::new(id("a"), Style::default()).with_child(fixed("a1", 5.0, 5.0)),
+            )
             .with_child(fixed("b", 5.0, 5.0));
 
         let solved = solve(&root, Vec2::new(800.0, 600.0));
@@ -830,7 +834,10 @@ mod tests {
 
     #[test]
     fn an_empty_tree_solves_to_one_node() {
-        let solved = solve(&LayoutNode::new(id("only"), Style::default()), Vec2::new(100.0, 100.0));
+        let solved = solve(
+            &LayoutNode::new(id("only"), Style::default()),
+            Vec2::new(100.0, 100.0),
+        );
         assert_eq!(solved.len(), 1);
     }
 

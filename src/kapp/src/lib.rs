@@ -148,13 +148,12 @@ fn translate_ui_input(input: &Input, scale: f32, out: &mut UiInput) {
 
     if input.key_just_pressed(KeyCode::Tab) {
         // Shift+Tab 往回走，和所有桌面 UI 一致。
-        out.focus_step = if input.key_pressed(KeyCode::ShiftLeft)
-            || input.key_pressed(KeyCode::ShiftRight)
-        {
-            -1
-        } else {
-            1
-        };
+        out.focus_step =
+            if input.key_pressed(KeyCode::ShiftLeft) || input.key_pressed(KeyCode::ShiftRight) {
+                -1
+            } else {
+                1
+            };
     }
 }
 

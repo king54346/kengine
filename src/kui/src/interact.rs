@@ -437,6 +437,10 @@ mod tests {
         assert!(input.text.is_empty());
         assert_eq!(input.scroll, Vec2::ZERO);
         assert_eq!(input.focus_step, 0);
-        assert_eq!(input.pointer, Some(Vec2::new(10.0, 10.0)), "指针位置是持续量");
+        assert_eq!(
+            input.pointer,
+            Some(Vec2::new(10.0, 10.0)),
+            "指针位置是持续量"
+        );
     }
 }

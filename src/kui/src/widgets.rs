@@ -81,7 +81,11 @@ enum Widget {
     /// 纯容器，只画底色。
     Panel { color: Vec4, radius: f32 },
     /// 一段文字。
-    Label { text: String, color: Vec4, size: f32 },
+    Label {
+        text: String,
+        color: Vec4,
+        size: f32,
+    },
     /// 按钮。
     Button { text: String },
     /// 复选框。
@@ -370,10 +374,7 @@ impl WidgetUi {
                     let box_size = theme.row_height * 0.6;
                     let box_rect = Rect {
                         min: Vec2::new(rect.min.x, rect.center().y - box_size * 0.5),
-                        max: Vec2::new(
-                            rect.min.x + box_size,
-                            rect.center().y + box_size * 0.5,
-                        ),
+                        max: Vec2::new(rect.min.x + box_size, rect.center().y + box_size * 0.5),
                     };
                     let fill = if *checked {
                         theme.accent
@@ -418,10 +419,7 @@ impl WidgetUi {
 
                     let filled = Rect {
                         min: track.min,
-                        max: Vec2::new(
-                            track.min.x + track.size().x * value,
-                            track.max.y,
-                        ),
+                        max: Vec2::new(track.min.x + track.size().x * value, track.max.y),
                     };
                     ui.rounded_rect(filled, track_height * 0.5, theme.accent);
 

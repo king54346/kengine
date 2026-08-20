@@ -4,7 +4,7 @@
 //! cargo run --example ui_text
 //! ```
 //!
-//! 左右方向键改字号，空格切换换行策略。
+//! 上面几个控件是**能点的**；左右方向键改字号。
 //!
 //! 上半屏是**能点的控件**（taffy 布局 + 事件路由）；
 //! 下半屏是手摆坐标的文字排版展示。
@@ -25,8 +25,6 @@ use kengine::prelude::*;
 
 /// 面板背景。
 const PANEL: Vec4 = Vec4::new(0.10, 0.11, 0.14, 0.92);
-/// 主色。
-const ACCENT: Vec4 = Vec4::new(0.25, 0.55, 1.0, 1.0);
 /// 正文颜色。
 const TEXT: Vec4 = Vec4::new(0.92, 0.93, 0.96, 1.0);
 /// 次要文字。
@@ -71,7 +69,6 @@ impl UiDemo {
             ..Default::default()
         }
     }
-
 }
 
 impl Plugin for UiDemo {
@@ -113,7 +110,7 @@ impl Plugin for UiDemo {
             None => klog::error!("本机找不到可用的系统字体，界面上不会有文字"),
         }
 
-        klog::info!("← → 改字号，空格切换换行策略，Esc 退出");
+        klog::info!("← → 改字号，Tab 切焦点，鼠标点控件，Esc 退出");
     }
 
     fn update(&mut self, ctx: &mut Context) {
@@ -149,9 +146,7 @@ impl Plugin for UiDemo {
 
         let toggle = self.widgets.button("toggle", "切换换行策略");
         let reset = self.widgets.button("reset", "重置字号");
-        let body_box = self
-            .widgets
-            .checkbox("body", "显示正文", self.show_body);
+        let body_box = self.widgets.checkbox("body", "显示正文", self.show_body);
         let volume = self.widgets.slider("volume", self.volume);
 
         self.widgets.finish(ctx.ui, ctx.ui_input);
