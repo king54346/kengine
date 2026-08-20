@@ -6,11 +6,14 @@
 //!
 //! 左右方向键改字号，空格切换换行策略。
 //!
-//! # 目前有什么
+//! 上半屏是**能点的控件**（taffy 布局 + 事件路由）；
+//! 下半屏是手摆坐标的文字排版展示。
 //!
-//! 即时模式的**绘制层**：矩形、圆角、边框、裁剪、文字。
-//! 布局（taffy）、事件路由、控件**还没做**——所以这个例子里的「按钮」
-//! 是手摆坐标画出来的，点不了。
+//! # 控件为什么滞后一帧
+//!
+//! 一个按钮是不是「悬停」取决于它的矩形，而矩形要等整棵树排完才知道。
+//! 所以流程是「声明 → 求解 → 绘制」，`response()` 查到的是上一次
+//! `finish()` 之后的结果。对 HUD 与菜单看不出来。
 //!
 //! # 引擎不自带字体
 //!
@@ -37,6 +40,12 @@ struct UiDemo {
     size: f32,
     wrap: TextWrap,
     ready: bool,
+    /// 控件层。跨帧保存交互状态（悬停、按下、焦点）。
+    widgets: WidgetUi,
+    /// 控件的状态由调用方保存——控件自己不存，见 `WidgetUi::checkbox`。
+    show_body: bool,
+    volume: f32,
+    clicks: u32,
 }
 
 impl Default for UiDemo {
@@ -45,6 +54,10 @@ impl Default for UiDemo {
             size: 18.0,
             wrap: TextWrap::Word,
             ready: false,
+            widgets: WidgetUi::default(),
+            show_body: true,
+            volume: 0.7,
+            clicks: 0,
         }
     }
 }
@@ -59,28 +72,6 @@ impl UiDemo {
         }
     }
 
-    /// 画一个**看起来像**按钮的东西。
-    ///
-    /// 只是画，点不了——事件路由还没做。写在这里是为了让圆角、边框、
-    /// 居中文字这几样一起过一遍。
-    fn fake_button(&self, ui: &mut Ui, rect: UiRect, label: &str, active: bool) {
-        let (fill, text) = if active {
-            (ACCENT, Vec4::ONE)
-        } else {
-            (Vec4::new(0.18, 0.19, 0.24, 1.0), DIM)
-        };
-        ui.rounded_rect(rect, 6.0, fill);
-        ui.border(rect, 6.0, 1.0, Vec4::new(1.0, 1.0, 1.0, 0.15));
-        ui.text_centered(
-            rect,
-            label,
-            &TextStyle {
-                size: 15.0,
-                ..Default::default()
-            },
-            text,
-        );
-    }
 }
 
 impl Plugin for UiDemo {
@@ -147,60 +138,75 @@ impl Plugin for UiDemo {
             return;
         }
 
-        let screen = ctx.ui.screen();
-        let panel = UiRect::new(24.0, 24.0, (screen.x - 48.0).min(560.0), 300.0);
+        // ── 上半屏：能点的控件 ──
+        //
+        // 声明 → 求解 → 绘制。`finish` 里一次性排版、判交互、出几何。
+        self.widgets.begin();
 
+        self.widgets.label("title", "kengine UI");
+        self.widgets
+            .dim_label("hint", format!("按钮被点了 {} 次", self.clicks));
+
+        let toggle = self.widgets.button("toggle", "切换换行策略");
+        let reset = self.widgets.button("reset", "重置字号");
+        let body_box = self
+            .widgets
+            .checkbox("body", "显示正文", self.show_body);
+        let volume = self.widgets.slider("volume", self.volume);
+
+        self.widgets.finish(ctx.ui, ctx.ui_input);
+
+        // 读上一帧的交互结果。
+        if self.widgets.response(toggle).clicked {
+            self.clicks += 1;
+            self.wrap = match self.wrap {
+                TextWrap::Word => TextWrap::Ellipsis,
+                TextWrap::Ellipsis => TextWrap::None,
+                TextWrap::None => TextWrap::Word,
+            };
+        }
+        if self.widgets.response(reset).clicked {
+            self.clicks += 1;
+            self.size = 18.0;
+        }
+        if self.widgets.response(body_box).clicked {
+            self.show_body = !self.show_body;
+        }
+        // 滑条不存状态，拖动量要自己折算成值。
+        let slider = self.widgets.response(volume);
+        if slider.held && slider.rect.size().x > 0.0 {
+            self.volume = (self.volume + slider.drag.x / slider.rect.size().x).clamp(0.0, 1.0);
+        }
+
+        // ── 下半屏：文字排版 ──
+        if !self.show_body {
+            return;
+        }
+        let screen = ctx.ui.screen();
+        let panel = UiRect::new(
+            24.0,
+            screen.y * 0.5,
+            (screen.x - 48.0).min(560.0),
+            screen.y * 0.5 - 24.0,
+        );
         ctx.ui.rounded_rect(panel, 10.0, PANEL);
         ctx.ui
             .border(panel, 10.0, 1.0, Vec4::new(1.0, 1.0, 1.0, 0.12));
 
         let inner = panel.shrink(18.0);
-        let title = ctx.ui.text(
-            inner.min,
-            "kengine 文字渲染",
-            &TextStyle {
-                size: 22.0,
-                ..Default::default()
-            },
-            TEXT,
-            None,
-        );
-
-        // 正文限宽在面板内。裁剪是必须的：换行策略切到 None 时，
-        // 这段文字会一路画出面板外面去。
-        let body_top = inner.min.y + title.size.y + 12.0;
-        let body = UiRect::from_corners(
-            Vec2::new(inner.min.x, body_top),
-            Vec2::new(inner.max.x, inner.max.y - 44.0),
-        );
-        ctx.ui.push_clip(body);
+        // 裁剪是必须的：换行策略切到「不换行」时，这段文字会一路画到
+        // 面板外面去。
+        ctx.ui.push_clip(inner);
         ctx.ui
-            .text(body.min, SAMPLE, &self.style(), TEXT, Some(body.size().x));
+            .text(inner.min, SAMPLE, &self.style(), TEXT, Some(inner.size().x));
         ctx.ui.pop_clip();
 
-        // 底部一排「按钮」，展示圆角与居中文字。
-        let labels = ["换行", "省略号", "不换行"];
-        let current = match self.wrap {
-            TextWrap::Word => 0,
-            TextWrap::Ellipsis => 1,
-            TextWrap::None => 2,
-        };
-        for (i, label) in labels.iter().enumerate() {
-            let rect = UiRect::new(
-                inner.min.x + i as f32 * 96.0,
-                inner.max.y - 32.0,
-                88.0,
-                32.0,
-            );
-            self.fake_button(ctx.ui, rect, label, i == current);
-        }
-
-        // 右上角的状态行。
+        // 右上角状态行。
         let status = format!(
-            "{:.0} px · UI {} 顶点 · 图集版本 {}",
+            "{:.0} px · 音量 {:.0}% · UI {} 顶点",
             self.size,
+            self.volume * 100.0,
             ctx.stats.ui_vertices,
-            ctx.ui.atlas_version(),
         );
         let style = TextStyle {
             size: 13.0,

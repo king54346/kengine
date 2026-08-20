@@ -22,6 +22,20 @@ use crate::Rect;
 use kmath::Vec2;
 use taffy::prelude::*;
 
+/// 允许的最大嵌套深度。
+///
+/// **超过就整棵树不布局**，而不是让它崩掉。
+///
+/// 这个上限来自 taffy：它的 `compute_layout` 是递归的，而 debug 构建的
+/// 栈帧很大——实测 20~25 层就爆栈，表现为**整个进程直接消失**，
+/// 没有 panic、没有日志、没有退出码可查。一个界面嵌套太深是显示问题，
+/// 不该把游戏带走。
+///
+/// 24 对真实界面是够的：面板套列表套行套按钮套文字通常在 10 层以内。
+/// release 构建能扛的远不止这个数，但上限按最紧的那个定，
+/// 免得「debug 能跑 release 崩」或者反过来。
+pub const MAX_DEPTH: usize = 24;
+
 /// 主轴方向。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Direction {
@@ -316,7 +330,31 @@ impl LayoutNode {
 
     /// 这棵树里一共多少个节点。
     pub fn count(&self) -> usize {
-        1 + self.children.iter().map(Self::count).sum::<usize>()
+        let mut count = 0;
+        let mut stack = vec![self];
+        while let Some(node) = stack.pop() {
+            count += 1;
+            stack.extend(node.children.iter());
+        }
+        count
+    }
+
+    /// 树高，根算 1 层。
+    ///
+    /// 迭代实现：递归版本在深树上会先于 taffy 爆栈，那样连
+    /// 「深度超限」这个错误都报不出来。
+    pub fn depth(&self) -> usize {
+        let mut deepest = 0;
+        let mut stack = vec![(self, 1usize)];
+        while let Some((node, depth)) = stack.pop() {
+            deepest = deepest.max(depth);
+            // 已经超了就没必要继续走——深树本身可能非常大。
+            if deepest > MAX_DEPTH {
+                return deepest;
+            }
+            stack.extend(node.children.iter().map(|c| (c, depth + 1)));
+        }
+        deepest
     }
 }
 
@@ -382,9 +420,15 @@ impl Solved {
 
 /// 求解一棵树。`available` 是根节点可用的空间（通常是屏幕尺寸）。
 ///
-/// taffy 出错时返回空结果而不是 panic：布局算不出来是个显示问题，
-/// 不该把整个游戏带崩。
+/// 出错时返回空结果而不是 panic：布局算不出来是个显示问题，
+/// 不该把整个游戏带崩。两种出错：
+///
+/// - 嵌套超过 [`MAX_DEPTH`]（见那里的说明）；
+/// - taffy 自己报错。
 pub fn solve(root: &LayoutNode, available: Vec2) -> Solved {
+    if root.depth() > MAX_DEPTH {
+        return Solved::default();
+    }
     let mut taffy: TaffyTree<()> = TaffyTree::new();
     let Ok(taffy_root) = build(&mut taffy, root) else {
         return Solved::default();
@@ -399,14 +443,58 @@ pub fn solve(root: &LayoutNode, available: Vec2) -> Solved {
     }
 
     let mut solved = Solved::default();
-    collect(&taffy, taffy_root, root, Vec2::ZERO, &mut solved);
+    collect(&taffy, taffy_root, root, &mut solved);
     solved
 }
 
 /// 把声明树搬进 taffy。
-fn build(taffy: &mut TaffyTree<()>, node: &LayoutNode) -> Result<NodeId, taffy::TaffyError> {
-    let mut style = node.style.to_taffy();
+///
+/// **迭代而不是递归。** 递归版本在 debug 构建下**二十来层就爆栈**——
+/// 而嵌套的面板套列表套行很容易到这个深度，症状是整个进程直接消失，
+/// 没有 panic、没有日志。这里用显式栈：先把整棵树按前序压平，
+/// 再倒着建（保证建父节点时子节点已经就位）。
+fn build(taffy: &mut TaffyTree<()>, root: &LayoutNode) -> Result<NodeId, taffy::TaffyError> {
+    // 前序压平：`flat[i]` 的子节点在 `flat` 里的下标记在 `child_slots` 里。
+    let mut flat: Vec<&LayoutNode> = Vec::new();
+    let mut child_slots: Vec<Vec<usize>> = Vec::new();
+    let mut stack = vec![(root, usize::MAX)];
 
+    while let Some((node, parent)) = stack.pop() {
+        let index = flat.len();
+        flat.push(node);
+        child_slots.push(Vec::new());
+        if parent != usize::MAX {
+            child_slots[parent].push(index);
+        }
+        // 倒着压，弹出来才是原顺序——顺序错了整个界面的子元素会反向排列。
+        for child in node.children.iter().rev() {
+            stack.push((child, index));
+        }
+    }
+
+    // 倒着建：下标大的一定是下标小的后代，所以建到父节点时子节点已经有了。
+    let mut ids: Vec<Option<NodeId>> = vec![None; flat.len()];
+    for index in (0..flat.len()).rev() {
+        let node = flat[index];
+        let style = taffy_style_of(node);
+        let id = if child_slots[index].is_empty() {
+            taffy.new_leaf(style)?
+        } else {
+            let children: Vec<NodeId> = child_slots[index]
+                .iter()
+                .map(|c| ids[*c].expect("子节点先于父节点建好"))
+                .collect();
+            taffy.new_with_children(style, &children)?
+        };
+        ids[index] = Some(id);
+    }
+
+    Ok(ids[0].expect("根节点一定建了"))
+}
+
+/// 节点的 taffy 样式，含固有尺寸的处理。
+fn taffy_style_of(node: &LayoutNode) -> taffy::Style {
+    let mut style = node.style.to_taffy();
     // 叶子的固有尺寸：宽高是 Auto 时用测量值顶上。
     //
     // 不给的话 flexbox 会认为这个节点零尺寸——一段文字所在的行会整个塌陷，
@@ -419,46 +507,41 @@ fn build(taffy: &mut TaffyTree<()>, node: &LayoutNode) -> Result<NodeId, taffy::
             style.size.height = length(content.y);
         }
     }
-
-    if node.children.is_empty() {
-        return taffy.new_leaf(style);
-    }
-
-    let children: Result<Vec<_>, _> = node.children.iter().map(|c| build(taffy, c)).collect();
-    taffy.new_with_children(style, &children?)
+    style
 }
 
-/// 把 taffy 的相对坐标累加成绝对坐标。
-fn collect(
-    taffy: &TaffyTree<()>,
-    taffy_node: NodeId,
-    node: &LayoutNode,
-    origin: Vec2,
-    out: &mut Solved,
-) {
-    let Ok(layout) = taffy.layout(taffy_node) else {
-        return;
-    };
-    // taffy 给的 location 是**相对父节点**的。不累加的话所有节点都会
-    // 挤在各自父容器的左上角——嵌套一深就全叠在一起了。
-    let min = origin + Vec2::new(layout.location.x, layout.location.y);
-    let rect = Rect {
-        min,
-        max: min + Vec2::new(layout.size.width, layout.size.height),
-    };
-    out.entries.push((node.id, rect));
+/// 把 taffy 的相对坐标累加成绝对坐标。同样是迭代的。
+fn collect(taffy: &TaffyTree<()>, taffy_root: NodeId, root: &LayoutNode, out: &mut Solved) {
+    // 前序遍历，用显式栈。压栈时倒序，弹出来才是原顺序。
+    let mut stack = vec![(taffy_root, root, Vec2::ZERO)];
+    while let Some((taffy_node, node, origin)) = stack.pop() {
+        let Ok(layout) = taffy.layout(taffy_node) else {
+            continue;
+        };
+        // taffy 给的 location 是**相对父节点**的。不累加的话所有节点都会
+        // 挤在各自父容器的左上角——嵌套一深就全叠在一起了。
+        let min = origin + Vec2::new(layout.location.x, layout.location.y);
+        out.entries.push((
+            node.id,
+            Rect {
+                min,
+                max: min + Vec2::new(layout.size.width, layout.size.height),
+            },
+        ));
 
-    let Ok(children) = taffy.children(taffy_node) else {
-        return;
-    };
-    for (taffy_child, child) in children.iter().zip(&node.children) {
-        collect(taffy, *taffy_child, child, min, out);
+        let Ok(children) = taffy.children(taffy_node) else {
+            continue;
+        };
+        for (taffy_child, child) in children.iter().zip(&node.children).rev() {
+            stack.push((*taffy_child, child, min));
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
 
     fn id(name: &str) -> Id {
         Id::new(name)
@@ -751,15 +834,45 @@ mod tests {
         assert_eq!(solved.len(), 1);
     }
 
-    #[test]
-    fn deep_nesting_does_not_blow_up() {
-        // 一百层嵌套：递归实现要么撑住，要么就得改成迭代。
+    /// 造一棵 `depth` 层深的链。
+    fn chain(depth: usize) -> LayoutNode {
         let mut node = fixed("leaf", 10.0, 10.0);
-        for i in 0..100 {
+        for i in 0..depth.saturating_sub(1) {
             node = LayoutNode::new(Id::new(&format!("n{i}")), Style::default()).with_child(node);
         }
-        let solved = solve(&node, Vec2::new(800.0, 600.0));
-        assert_eq!(solved.len(), 101);
+        node
+    }
+
+    #[test]
+    fn realistic_nesting_works() {
+        // 真实界面：面板套列表套行套按钮套文字，十来层顶天了。
+        let root = chain(16);
+        let solved = solve(&root, Vec2::new(800.0, 600.0));
+        assert_eq!(solved.len(), 16);
         assert!(solved.rect(id("leaf")).is_some());
+    }
+
+    #[test]
+    fn nesting_past_the_limit_fails_instead_of_crashing() {
+        // taffy 的 compute_layout 是递归的，debug 构建下 20~25 层就爆栈，
+        // 表现为**整个进程直接消失**——没有 panic、没有日志。
+        // 上限拦住之后至少是「界面不显示」，还能查。
+        let root = chain(MAX_DEPTH + 10);
+        let solved = solve(&root, Vec2::new(800.0, 600.0));
+        assert!(solved.is_empty(), "超深的树该被拒绝，而不是拿去算");
+    }
+
+    #[test]
+    fn depth_is_measured_without_recursing() {
+        // 深度检查本身要是递归的，就会先于 taffy 爆栈——
+        // 那样连「深度超限」这个错误都报不出来。
+        let root = chain(5_000);
+        assert!(root.depth() > MAX_DEPTH);
+    }
+
+    #[test]
+    fn count_is_iterative_too() {
+        let root = chain(5_000);
+        assert_eq!(root.count(), 5_000);
     }
 }

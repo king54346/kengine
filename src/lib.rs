@@ -135,6 +135,9 @@ pub mod prelude {
     pub use kshader::{Shader, ShaderLoader};
     pub use ksprite::{Anchor, Atlas, PlayMode, Sprite, SpriteAnimation, SpriteRegion};
     pub use ktexture::{Sampler, Texture, TextureLoader};
-    pub use kui::{Rect as UiRect, Ui};
+    pub use kui::{
+        Rect as UiRect, Theme as UiTheme, Ui, UiInput, WidgetUi,
+        layout::{AlignCross, Direction as UiDirection, Edges, Id as UiId, Justify, Length},
+    };
     pub use winit::event::WindowEvent;
 }

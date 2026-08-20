@@ -6,7 +6,7 @@ use kinput::Input;
 use krender::RenderStats;
 use kscene::{PhysicsDebugOptions, Scene, SceneDebugOptions};
 use kscript::Signal;
-use kui::Ui;
+use kui::{Ui, UiInput};
 use winit::window::Window;
 
 /// 引擎每帧自动画哪些调试信息。
@@ -75,6 +75,11 @@ pub struct Context<'a> {
     /// 引擎在 `update` 之前 `begin_frame`、渲染之前 `end_frame`，
     /// 所以插件里直接画即可，不必自己管这两步。
     pub ui: &'a mut Ui,
+    /// 本帧翻译好的 UI 输入（指针、按键、滚轮、Tab）。
+    ///
+    /// 交给 [`WidgetUi::finish`](kui::WidgetUi::finish)。位置已经换算成
+    /// 逻辑像素，和 `ui.screen()` 同一套坐标。
+    pub ui_input: &'a UiInput,
     pub(crate) exit_requested: &'a mut bool,
 }
 

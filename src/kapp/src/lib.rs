@@ -35,7 +35,8 @@ mod physics_clock;
 mod stage;
 
 pub use context::{Context, DebugDraw};
-use kui::Ui;
+use kinput::{KeyCode, MouseButton};
+use kui::{PointerButton, Ui, UiInput};
 pub use physics_clock::PhysicsClock;
 pub use stage::Stage;
 
@@ -119,6 +120,42 @@ struct Runtime {
     debug: DebugDraw,
     /// UI 状态：字体、字形图集、本帧的绘制列表。
     ui: Ui,
+    /// 本帧喂给 UI 的输入。由 `kinput` 翻译而来。
+    ui_input: UiInput,
+}
+
+/// 把 `kinput` 的状态翻译成 UI 要的输入。
+///
+/// 指针位置要**除以** DPI 缩放：`kinput` 给的是物理像素，而 UI 全程
+/// 用逻辑像素。不换算的话，高分屏上鼠标指着按钮、UI 却以为指针在
+/// 屏幕右下角外面——所有控件都点不着。
+fn translate_ui_input(input: &Input, scale: f32, out: &mut UiInput) {
+    out.pointer = input.cursor_position().map(|p| p / scale);
+    out.scroll = input.scroll_delta();
+
+    for (winit_button, ui_button) in [
+        (MouseButton::Left, PointerButton::Primary),
+        (MouseButton::Right, PointerButton::Secondary),
+        (MouseButton::Middle, PointerButton::Middle),
+    ] {
+        if input.mouse_just_pressed(winit_button) {
+            out.pressed.push(ui_button);
+        }
+        if input.mouse_just_released(winit_button) {
+            out.released.push(ui_button);
+        }
+    }
+
+    if input.key_just_pressed(KeyCode::Tab) {
+        // Shift+Tab 往回走，和所有桌面 UI 一致。
+        out.focus_step = if input.key_pressed(KeyCode::ShiftLeft)
+            || input.key_pressed(KeyCode::ShiftRight)
+        {
+            -1
+        } else {
+            1
+        };
+    }
 }
 
 /// 应用。装载插件、注册系统，然后接管主循环。
@@ -265,6 +302,7 @@ impl App {
                 script_events: &runtime.script_events,
                 debug: &mut runtime.debug,
                 ui: &mut runtime.ui,
+                ui_input: &runtime.ui_input,
                 exit_requested: &mut exit_requested,
             };
             system(&mut context);
@@ -308,6 +346,7 @@ impl App {
                 script_events: &runtime.script_events,
                 debug: &mut runtime.debug,
                 ui: &mut runtime.ui,
+                ui_input: &runtime.ui_input,
                 exit_requested: &mut exit_requested,
             };
             callback(plugin, &mut context);
@@ -348,6 +387,7 @@ impl AppHandler for App {
             script_events: Vec::new(),
             debug: DebugDraw::none(),
             ui: Ui::new(),
+            ui_input: UiInput::default(),
         });
 
         // 看门人要在资源管理器建好之后再建，它一上来就要把现有资源的
@@ -408,13 +448,12 @@ impl AppHandler for App {
         if let Some(runtime) = self.runtime.as_mut() {
             let size = runtime.window.inner_size();
             let scale = runtime.window.scale_factor() as f32;
+            let scale = scale.max(0.01);
             runtime.ui.begin_frame(
-                kmath::Vec2::new(
-                    size.width as f32 / scale.max(0.01),
-                    size.height as f32 / scale.max(0.01),
-                ),
+                kmath::Vec2::new(size.width as f32 / scale, size.height as f32 / scale),
                 scale,
             );
+            translate_ui_input(&runtime.input, scale, &mut runtime.ui_input);
         }
 
         // ── Input / Update / PostUpdate ──
@@ -499,6 +538,8 @@ impl AppHandler for App {
         // UI 一帧的收尾。插件在 `update` 里画，这里封口——
         // 不封的话最后一批图元会静默丢失。
         runtime.ui.end_frame();
+        // 一帧有效的输入（刚按下、刚松开、滚轮、文本）到此为止。
+        runtime.ui_input.end_frame();
 
         match runtime.renderer.render(&runtime.scene, &runtime.ui) {
             RenderOutcome::Ok | RenderOutcome::Skip => {}

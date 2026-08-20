@@ -24,7 +24,9 @@ use kfont::{FontStack, GlyphAtlas, TextLayout};
 use kmath::{Vec2, Vec4};
 
 /// 一个屏幕空间矩形，单位是**逻辑像素**，原点在左上角，y 向下。
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// `Default` 是一个位于原点的零尺寸矩形，也就是「空」。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Rect {
     /// 左上角。
     pub min: Vec2,
