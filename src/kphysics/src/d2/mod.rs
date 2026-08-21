@@ -43,6 +43,8 @@ mod tests;
 
 mod body;
 mod character;
+#[cfg(test)]
+mod character_tests;
 mod collider;
 mod convert;
 mod world;

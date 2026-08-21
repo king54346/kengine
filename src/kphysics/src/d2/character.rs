@@ -229,6 +229,14 @@ impl PhysicsWorld {
             });
         }
 
+        if std::env::var("KPROBE").is_ok() {
+            println!(
+                "PROBE fix=({:.5},{:.5}) result=({:.5},{:.5}) grounded={} pose=({:.4},{:.4})",
+                fix.translation.x, fix.translation.y,
+                result.translation.x, result.translation.y,
+                result.grounded, pose.translation.x, pose.translation.y
+            );
+        }
         CharacterMovement {
             translation: from_rv(fix.translation) + from_rv(result.translation),
             grounded: result.grounded,
