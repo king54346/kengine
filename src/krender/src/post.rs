@@ -102,6 +102,14 @@ pub(crate) struct PostProcess {
     bind_groups: Vec<wgpu::BindGroup>,
     /// 合成 pass 用到的 Bloom 采样绑定组。
     bloom_bind_group: Option<wgpu::BindGroup>,
+
+    /// FXAA 的管线、参数缓冲与绑定组。
+    fxaa_pipeline: wgpu::RenderPipeline,
+    fxaa_layout: wgpu::BindGroupLayout,
+    fxaa_params: wgpu::Buffer,
+    fxaa_bind_group: Option<wgpu::BindGroup>,
+    /// LDR 缓冲的格式，重建目标时要用。
+    ldr_format: wgpu::TextureFormat,
 }
 
 impl PostProcess {
@@ -264,7 +272,81 @@ impl PostProcess {
             })
         });
 
-        let targets = create_targets(device, width, height);
+        let targets = create_targets(device, width, height, surface_format);
+
+        // ── FXAA ──
+        let fxaa_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("kengine fxaa shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("fxaa.wgsl").into()),
+        });
+        let fxaa_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("kengine fxaa layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(size_of::<FxaaParams>() as u64),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let fxaa_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("kengine fxaa pipeline layout"),
+                bind_group_layouts: &[Option::from(&fxaa_layout)],
+                immediate_size: 0,
+            });
+        let fxaa_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("kengine fxaa pipeline"),
+            layout: Some(&fxaa_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &fxaa_shader,
+                entry_point: Some("fxaa_vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &fxaa_shader,
+                entry_point: Some("fxaa_fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let fxaa_params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kengine fxaa params"),
+            size: size_of::<FxaaParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let mut post = Self {
             settings: PostSettings::default(),
@@ -278,6 +360,11 @@ impl PostProcess {
             params_buffers,
             bind_groups: Vec::new(),
             bloom_bind_group: None,
+            fxaa_pipeline,
+            fxaa_layout,
+            fxaa_params,
+            fxaa_bind_group: None,
+            ldr_format: surface_format,
         };
         post.rebuild_bind_groups(device);
         post
@@ -303,7 +390,7 @@ impl PostProcess {
         if width == self.targets.width && height == self.targets.height {
             return;
         }
-        self.targets = create_targets(device, width, height);
+        self.targets = create_targets(device, width, height, self.ldr_format);
         self.rebuild_bind_groups(device);
     }
 
@@ -359,6 +446,26 @@ impl PostProcess {
 
         // 纵向模糊的结果落在 bloom[0]，合成时采样它。
         self.bloom_bind_group = Some(make_bloom(&self.targets.bloom[0]));
+
+        // FXAA 读的是 LDR 缓冲。
+        self.fxaa_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("kengine fxaa bind group"),
+            layout: &self.fxaa_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.fxaa_params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.targets.ldr),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        }));
     }
 
     /// 执行整条后处理链，把结果写到 `output`。
@@ -459,7 +566,12 @@ impl PostProcess {
             None,
             &self.targets.bloom[0],
         );
-        // HDR + bloom[0] → 屏幕
+        // 合成的目标：开了 FXAA 就先写进 LDR 缓冲，由 FXAA 再输出到屏幕。
+        let fxaa_on = self.settings.anti_alias == AntiAlias::Fxaa
+            && self.fxaa_bind_group.is_some();
+        let composite_target = if fxaa_on { &self.targets.ldr } else { output };
+
+        // HDR + bloom[0] → LDR（或直接到屏幕）
         pass(
             "kengine post composite",
             &self.composite_pipeline,
