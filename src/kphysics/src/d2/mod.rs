@@ -42,11 +42,13 @@ mod events_tests;
 mod tests;
 
 mod body;
+mod character;
 mod collider;
 mod convert;
 mod world;
 
 pub use body::{BodyMut, BodyRef, RigidBodyDesc};
+pub use character::{CharacterCollision, CharacterController, CharacterMovement};
 pub use collider::{ColliderDesc, ColliderMut, ColliderRef, ColliderShape};
 pub use world::{
     BodyHandle, ColliderHandle, CollisionEvent2d, ContactForceEvent2d, PhysicsWorld,

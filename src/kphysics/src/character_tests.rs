@@ -102,23 +102,14 @@ fn a_grounded_character_does_not_sink() {
     // 站着不动时不该慢慢往下陷。每帧的重力会被地面吃掉，
     // 但吃不干净的话几百帧下来就沉进地里了。
     let mut world = world_with_ground();
-    let body = add_character(&mut world, Vec3::new(0.0, STAND_Y + 0.05, 0.0));
+    // **恰好贴着地面**摆放——这是最自然的摆法，也曾经是最坑的：
+    // 它等于一开始就落在控制器的安全边距（`offset`）里面，
+    // 而 rapier 只在位移为零时才跑解穿透，于是之后每一帧的下坠
+    // 都不会被挡住。实测从 y=0.8 一路陷到 0.22。
+    let body = add_character(&mut world, Vec3::new(0.0, STAND_Y, 0.0));
     let controller = CharacterController::default();
 
-    let dt = 1.0 / 60.0;
-    let mut vertical = 0.0_f32;
-    for frame in 0..600 {
-        vertical += -9.81 * dt;
-        let m = world.move_character(&controller, body, Vec3::new(0.0, vertical * dt, 0.0), dt);
-        if frame < 5 || frame % 150 == 0 {
-            println!(
-                "PROBE 帧{frame} y={:.5} 位移y={:.6} 落地={} 想走y={:.6}",
-                position(&world, body).y, m.translation.y, m.grounded, vertical * dt
-            );
-        }
-        if m.grounded { vertical = 0.0; }
-        world.step(dt);
-    }
+    walk(&mut world, &controller, body, Vec3::ZERO, 600);
 
     let y = position(&world, body).y;
     assert!(y > STAND_Y - 0.1, "陷下去了：{y}");
@@ -294,32 +285,77 @@ fn a_character_does_not_pass_through_a_wall() {
 
 // ── 坡度 ──
 
-#[test]
-fn a_character_climbs_a_gentle_slope() {
-    // 20° 的坡，默认能爬 45°。
-    let mut world = world_with_ground();
-    let angle = 20.0_f32.to_radians();
-    let slope = world.add_body(
+/// 建一个从原点往 +X 升起的斜坡，倾角 `degrees`。
+///
+/// 做法是把一块薄板绕 Z 转过去，再往下沉一点，让它的左端埋进地面、
+/// 右端露在上面——这样角色从平地走过来能自然踏上去，中间没有台阶。
+fn add_ramp(world: &mut PhysicsWorld, degrees: f32) {
+    let angle = degrees.to_radians();
+    let half_length = 10.0_f32;
+    // 板中心放在坡面正好经过原点的位置。
+    let center = Vec3::new(
+        half_length * angle.cos(),
+        half_length * angle.sin() - 0.2 / angle.cos(),
+        0.0,
+    );
+    let ramp = world.add_body(
         &RigidBodyDesc::fixed()
-            .with_position(Vec3::new(5.0, 0.0, 0.0))
+            .with_position(center)
             .with_rotation(kmath::Quat::from_rotation_z(angle)),
         3,
     );
     world.add_collider(
-        &ColliderDesc::cuboid(Vec3::new(5.0, 0.2, 5.0)),
-        Some(slope),
+        &ColliderDesc::cuboid(Vec3::new(half_length, 0.2, 5.0)),
+        Some(ramp),
         3,
     );
+}
 
-    let body = add_character(&mut world, Vec3::new(1.0, STAND_Y + 0.5, 0.0));
+#[test]
+fn a_character_climbs_a_gentle_slope() {
+    // 20° 的坡，默认能爬 45°。
+    let mut world = world_with_ground();
+    add_ramp(&mut world, 20.0);
+    let body = add_character(&mut world, Vec3::new(-2.0, STAND_Y, 0.0));
     let controller = CharacterController::default();
 
+    // 先站稳，拿到平地上的基准高度——用出生高度当基准的话，
+    // 测的其实是「有没有落地」，不是「有没有爬坡」。
+    walk(&mut world, &controller, body, Vec3::ZERO, 30);
     let start = position(&world, body);
-    walk(&mut world, &controller, body, Vec3::new(2.0, 0.0, 0.0), 120);
+
+    walk(&mut world, &controller, body, Vec3::new(2.0, 0.0, 0.0), 180);
     let end = position(&world, body);
 
-    assert!(end.x > start.x + 1.0, "没往前走，x {} → {}", start.x, end.x);
-    assert!(end.y > start.y, "爬坡时没升高，y {} → {}", start.y, end.y);
+    assert!(end.x > start.x + 2.0, "没往前走，x {} → {}", start.x, end.x);
+    assert!(
+        end.y > start.y + 0.3,
+        "爬坡时没升高，y {} → {}",
+        start.y,
+        end.y
+    );
+}
+
+#[test]
+fn a_character_cannot_climb_a_wall_like_slope() {
+    // 反证：80° 的坡远超默认的 45°，该爬不上去。
+    // 没有这一条的话，上一条在「什么坡都能爬」的情况下也会通过。
+    let mut world = world_with_ground();
+    add_ramp(&mut world, 80.0);
+    let body = add_character(&mut world, Vec3::new(-2.0, STAND_Y, 0.0));
+    let controller = CharacterController::default();
+
+    walk(&mut world, &controller, body, Vec3::ZERO, 30);
+    let start = position(&world, body);
+    walk(&mut world, &controller, body, Vec3::new(2.0, 0.0, 0.0), 180);
+    let end = position(&world, body);
+
+    assert!(
+        end.y < start.y + 0.5,
+        "爬上了 80° 的坡，y {} → {}",
+        start.y,
+        end.y
+    );
 }
 
 #[test]

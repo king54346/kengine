@@ -72,7 +72,7 @@ impl Default for RayCastOptions {
 /// 互不感知。同一个游戏里两个都用是可以的（3D 场景 + 2D 小游戏），
 /// 但一个 2D 刚体永远不会撞到一个 3D 刚体。
 pub struct PhysicsWorld {
-    inner: rp::PhysicsWorld,
+    pub(super) inner: rp::PhysicsWorld,
     enabled: bool,
     event_handler: rp::ChannelEventCollector,
     collision_rx: mpsc::Receiver<rapier2d::geometry::CollisionEvent>,

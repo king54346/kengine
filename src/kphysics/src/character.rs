@@ -316,10 +316,23 @@ impl crate::PhysicsWorld {
             .exclude_rigid_body(body.0)
             .exclude_collider(collider_handle);
 
+        // 先做一次**零位移**的扫掠。rapier 只在位移为零时才跑解穿透，
+        // 而「把角色正好摆在地面上」是最自然的摆法——那等于一开始就
+        // 落在控制器的安全边距（`offset`）里面，之后每一帧的下坠都不会
+        // 被挡住，角色会一路陷进地里。实测从 y=0.8 陷到 0.22。
+        //
+        // 代价是每帧多一次相交查询（没有扫掠循环，很便宜）。
+        let queries = self.inner.query_pipeline_with_filter(filter);
+        let fix = native.move_shape(dt, &queries, &*shape, &pose, to_rv(Vec3::ZERO), |_| {});
+        let pose = rapier3d::math::Pose::from_parts(
+            pose.translation + fix.translation,
+            pose.rotation,
+        );
+
         let mut collisions = Vec::new();
         let result = native.move_shape(
             dt,
-            &self.inner.query_pipeline_with_filter(filter),
+            &queries,
             &*shape,
             &pose,
             to_rv(desired),
@@ -345,7 +358,8 @@ impl crate::PhysicsWorld {
         }
 
         CharacterMovement {
-            translation: from_rv(result.translation),
+            // 解穿透的修正也算进位移里，否则角色会一直停在穿透状态。
+            translation: from_rv(fix.translation) + from_rv(result.translation),
             grounded: result.grounded,
             sliding_down_slope: result.is_sliding_down_slope,
         }
