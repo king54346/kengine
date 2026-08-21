@@ -71,8 +71,7 @@ fn create_placeholder_depth(device: &wgpu::Device) -> wgpu::TextureView {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         })
         .create_view(&wgpu::TextureViewDescriptor::default())
@@ -369,7 +368,14 @@ impl ParticleResources {
                     .extend(0.0)
                     .to_array(),
                 soft_params: [
-                    self.soft_fade,
+                    // 正交投影下 `clip.w` 恒为 1，深度反解的公式完全不同。
+                    // 与其在着色器里再分一条路，不如在这里直接关掉——
+                    // 正交相机基本只用在 2D 和编辑器视图上，那里没有软粒子的需求。
+                    if projection.w_axis.w == 0.0 {
+                        self.soft_fade
+                    } else {
+                        0.0
+                    },
                     // 投影矩阵的深度系数，用来把深度缓冲的值还原成
                     // 视空间距离。列主序：[2][2] 是 z_axis.z，
                     // [3][2] 是 w_axis.z。
@@ -572,7 +578,7 @@ mod test {
     /// 那是这段代码最容易错的地方：取错一个元素画面上只是淡出距离
     /// 变得莫名其妙，不会报任何错。
     fn linear_depth(depth: f32, a: f32, b: f32) -> f32 {
-        let denominator = depth - a;
+        let denominator = depth + a;
         if denominator.abs() < 1e-9 {
             return 1e9;
         }
@@ -621,17 +627,29 @@ mod test {
     }
 
     #[test]
-    fn an_orthographic_projection_does_not_produce_nan() {
-        // 正交投影的 `[3][2]` 是 0，反解的分子为零。返回一个很大的值
-        // （效果是「背景无穷远」，粒子不淡出）比返回 NaN 强——
+    fn an_orthographic_projection_turns_soft_particles_off() {
+        // 正交投影下 `clip.w` 恒为 1，深度反解的公式完全不同，
+        // 套透视的公式会算出毫无意义的距离。CPU 这边直接关掉。
+        let perspective = Mat4::perspective_rh(1.0, 16.0 / 9.0, 0.1, 1000.0);
+        let orthographic = Mat4::orthographic_rh(-10.0, 10.0, -10.0, 10.0, 0.1, 100.0);
+
+        // `w_axis.w` 是区分两者的判据：透视是 0，正交是 1。
+        assert_eq!(perspective.w_axis.w, 0.0);
+        assert_eq!(orthographic.w_axis.w, 1.0);
+    }
+
+    #[test]
+    fn linearization_never_produces_nan() {
         // NaN 会让整个粒子变成黑洞，而且顺着 Bloom 扩散到整个画面。
-        let projection = Mat4::orthographic_rh(-10.0, 10.0, -10.0, 10.0, 0.1, 100.0);
+        let projection = Mat4::perspective_rh(1.0, 16.0 / 9.0, 0.1, 1000.0);
         let (a, b) = coefficients(projection);
 
-        for depth in [0.0_f32, 0.5, 1.0] {
-            let value = linear_depth(depth, a, b);
-            assert!(value.is_finite(), "深度 {depth} 得到 {value}");
+        for depth in [0.0_f32, 0.5, 1.0, -1.0, f32::MAX] {
+            assert!(linear_depth(depth, a, b).is_finite(), "深度 {depth}");
         }
+        // 系数本身退化时也不能崩。
+        assert!(linear_depth(0.5, 0.0, 0.0).is_finite());
+        assert!(linear_depth(0.5, -0.5, 1.0).is_finite());
     }
 
     #[test]
@@ -652,13 +670,15 @@ mod test {
     fn soft_particles_are_on_by_default() {
         // 粒子插进地面时露出的那条笔直交线是最显眼的穿帮之一，
         // 而代价只是一次深度采样。
-        assert!(ParticleGlobals {
-            view_proj: Mat4::IDENTITY.to_cols_array_2d(),
-            camera_right: [0.0; 4],
-            camera_up: [0.0; 4],
-            soft_params: [0.5, 0.0, 0.0, 0.0],
-        }
-        .soft_params[0]
-            > 0.0);
+        assert!(
+            ParticleGlobals {
+                view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                camera_right: [0.0; 4],
+                camera_up: [0.0; 4],
+                soft_params: [0.5, 0.0, 0.0, 0.0],
+            }
+            .soft_params[0]
+                > 0.0
+        );
     }
 }

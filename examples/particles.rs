@@ -98,19 +98,6 @@ impl Plugin for ParticleDemo {
     }
 
     fn update(&mut self, ctx: &mut Context) {
-        // TEMP-VALIDATION
-        {
-            static mut N: u32 = 0;
-            let n = unsafe { N += 1; N };
-            if n == 90 {
-                klog::info!(
-                    "[验证] 粒子 {}，绘制调用 {}，阴影绘制调用 {}",
-                    ctx.stats.particles, ctx.stats.draw_calls, ctx.stats.shadow_draw_calls
-                );
-                ctx.request_exit();
-            }
-        }
-
         // 让发射器绕圈：World 空间下，喷出去的粒子会留在原地拖出一条弧。
         self.angle += ctx.dt * 0.7;
         if let Some(node) = ctx.scene.try_get_mut(self.fountain) {

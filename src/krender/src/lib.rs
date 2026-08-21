@@ -1081,6 +1081,24 @@ impl Renderer {
 
     /// 上一帧的渲染统计。
     /// 后处理设置。
+    /// 软粒子的淡出距离（世界单位），0 表示关闭。
+    ///
+    /// 粒子是个方片，插进地面时会露出一条**笔直的交线**——一眼就能看出
+    /// 它是张纸。开着之后粒子越接近背后的几何就越透明，交线被抹掉。
+    ///
+    /// 调大让过渡更柔和，但整团粒子会整体变淡。烟雾用 0.5~2 米，
+    /// 火花这类本来就该有硬边的可以关掉。
+    ///
+    /// **正交相机下自动失效**——深度反解的公式只对透视投影成立。
+    pub fn soft_particle_fade(&self) -> f32 {
+        self.particles.soft_fade
+    }
+
+    /// 设置软粒子的淡出距离。
+    pub fn set_soft_particle_fade(&mut self, distance: f32) {
+        self.particles.soft_fade = distance.max(0.0);
+    }
+
     pub fn post_settings(&self) -> PostSettings {
         self.post.settings()
     }
@@ -1107,7 +1125,8 @@ impl Renderer {
         self.depth_view = Self::create_depth_view(&self.device, &self.config);
         // 软粒子采样的就是这张纹理。不换绑定组的话，改窗口大小之后
         // 粒子会按旧尺寸的深度去淡出——表现为淡出边界整体错位。
-        self.particles.set_depth_view(&self.device, &self.depth_view);
+        self.particles
+            .set_depth_view(&self.device, &self.depth_view);
         self.post
             .resize(&self.device, new_size.width, new_size.height);
     }
@@ -1899,7 +1918,6 @@ impl Renderer {
             // 2D 精灵画在天空之后、粒子之前：精灵半透明，要在不透明物体
             // 之后画；但它又该被粒子盖住（粒子通常是特效）。
             self.sprites.draw(&mut pass, &sprite_batches);
-
         }
 
         // ── 粒子与调试线：只读深度的第二个 pass ──
@@ -2153,8 +2171,7 @@ impl Renderer {
             format: wgpu::TextureFormat::Depth32Float,
             // 软粒子要把它当纹理采样。只写 RENDER_ATTACHMENT 的话
             // 建绑定组时会被 wgpu 打回。
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         texture.create_view(&wgpu::TextureViewDescriptor::default())

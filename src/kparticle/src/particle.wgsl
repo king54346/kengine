@@ -49,13 +49,22 @@ struct VertexOutput {
 
 // 把深度缓冲里的值还原成视空间的距离（正数，越远越大）。
 //
-// 透视投影下深度是 `(a * z + b) / -z` 的形式，反解得到 `z = b / (depth - a)`。
+// 透视投影下：`clip.z = a * z + b`、`clip.w = -z`，所以
+// `depth = (a * z + b) / (-z)`。解出 z：
+//
+//     depth * (-z) = a * z + b
+//     z * (-depth - a) = b
+//     z = -b / (depth + a)
+//
 // 传进来的 a 是 `projection[2][2]`，b 是 `projection[3][2]`。
+//
+// **只对透视投影成立。** 正交投影下 `clip.w` 恒为 1，公式完全不同——
+// 那种情况由 CPU 侧把淡出距离置 0 关掉，不走到这里。
 fn linear_depth(depth: f32, a: f32, b: f32) -> f32 {
-    let denominator = depth - a;
-    // 正交投影时 b 为 0、denominator 可能为 0。返回一个很大的值，
-    // 效果是「背景无穷远」，粒子不淡出——比返回 NaN 强，
-    // NaN 会让整个粒子变成黑洞。
+    let denominator = depth + a;
+    // 退化时返回一个很大的值，效果是「背景无穷远」，粒子不淡出——
+    // 比返回 NaN 强，NaN 会让整个粒子变成黑洞，而且顺着 Bloom
+    // 扩散到整个画面。
     if (abs(denominator) < 1e-9) {
         return 1e9;
     }
