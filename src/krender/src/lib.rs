@@ -1007,7 +1007,7 @@ impl Renderer {
         // UI 画在后处理**之后**，目标是交换链，所以用交换链的格式。
         let ui_resources = UiResources::new(&device, config.format);
 
-        Self {
+        let mut renderer = Self {
             surface,
             device,
             queue,
@@ -1056,7 +1056,13 @@ impl Renderer {
             default_textures,
             meshes: FxHashMap::default(),
             stats: RenderStats::default(),
-        }
+        };
+
+        // 粒子建的时候只有一张 1×1 占位深度，这里换成真的。
+        renderer
+            .particles
+            .set_depth_view(&renderer.device, &renderer.depth_view);
+        renderer
     }
 
     /// 登记一张给 UI 用的贴图。
@@ -1099,6 +1105,9 @@ impl Renderer {
         self.config.height = new_size.height;
         self.surface.configure(&self.device, &self.config);
         self.depth_view = Self::create_depth_view(&self.device, &self.config);
+        // 软粒子采样的就是这张纹理。不换绑定组的话，改窗口大小之后
+        // 粒子会按旧尺寸的深度去淡出——表现为淡出边界整体错位。
+        self.particles.set_depth_view(&self.device, &self.depth_view);
         self.post
             .resize(&self.device, new_size.width, new_size.height);
     }
@@ -1905,7 +1914,7 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("kengine overlay pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: self.post.scene_view(),
+                    view: self.post.hdr_target(),
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {

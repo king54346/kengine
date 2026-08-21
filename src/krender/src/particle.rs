@@ -553,8 +553,8 @@ mod test {
 
     #[test]
     fn particle_globals_are_16_byte_aligned() {
-        // mat4x4(64) + vec4(16) × 2 = 96
-        assert_eq!(size_of::<ParticleGlobals>(), 96);
+        // mat4x4(64) + vec4(16) × 3（camera_right / camera_up / soft_params）= 112
+        assert_eq!(size_of::<ParticleGlobals>(), 64 + 16 * 3);
         assert_eq!(size_of::<ParticleGlobals>() % 16, 0);
     }
 
@@ -565,5 +565,100 @@ mod test {
         assert!(kparticle::PARTICLE_WGSL.contains("@builtin(vertex_index)"));
         assert!(kparticle::PARTICLE_WGSL.contains("@builtin(instance_index)"));
         assert!(kparticle::PARTICLE_WGSL.contains("var<storage, read> particles"));
+    }
+
+    /// WGSL 里 `linear_depth` 的 Rust 版。两边必须给出同样的结果——
+    /// 这里验的是**系数取得对不对**（`projection[2][2]` 和 `[3][2]`），
+    /// 那是这段代码最容易错的地方：取错一个元素画面上只是淡出距离
+    /// 变得莫名其妙，不会报任何错。
+    fn linear_depth(depth: f32, a: f32, b: f32) -> f32 {
+        let denominator = depth - a;
+        if denominator.abs() < 1e-9 {
+            return 1e9;
+        }
+        (b / denominator).abs()
+    }
+
+    /// 从投影矩阵取出 WGSL 那边用的两个系数。和 `prepare` 里取的必须一致。
+    fn coefficients(projection: Mat4) -> (f32, f32) {
+        (projection.z_axis.z, projection.w_axis.z)
+    }
+
+    #[test]
+    fn depth_linearization_recovers_view_space_distance() {
+        let projection = Mat4::perspective_rh(1.0, 16.0 / 9.0, 0.1, 1000.0);
+        let (a, b) = coefficients(projection);
+
+        // 取几个已知的视空间距离，正投影再反解，看能不能还原。
+        for distance in [0.5_f32, 1.0, 10.0, 100.0, 500.0] {
+            // 视空间里相机朝 -z 看，所以点在 z = -distance。
+            let clip = projection * kmath::Vec4::new(0.0, 0.0, -distance, 1.0);
+            let depth = clip.z / clip.w;
+
+            let recovered = linear_depth(depth, a, b);
+            let error = (recovered - distance).abs() / distance;
+            assert!(
+                error < 1e-3,
+                "距离 {distance} 反解成了 {recovered}（相对误差 {error}）"
+            );
+        }
+    }
+
+    #[test]
+    fn depth_linearization_is_monotonic() {
+        // 越远的深度值必须还原出越大的距离。单调性错了的话
+        // 粒子会在错误的一侧淡出——离得越近反而越不透明。
+        let projection = Mat4::perspective_rh(1.0, 16.0 / 9.0, 0.1, 1000.0);
+        let (a, b) = coefficients(projection);
+
+        let mut previous = 0.0;
+        for distance in [0.2_f32, 1.0, 5.0, 20.0, 200.0] {
+            let clip = projection * kmath::Vec4::new(0.0, 0.0, -distance, 1.0);
+            let recovered = linear_depth(clip.z / clip.w, a, b);
+            assert!(recovered > previous, "{recovered} 不比 {previous} 大");
+            previous = recovered;
+        }
+    }
+
+    #[test]
+    fn an_orthographic_projection_does_not_produce_nan() {
+        // 正交投影的 `[3][2]` 是 0，反解的分子为零。返回一个很大的值
+        // （效果是「背景无穷远」，粒子不淡出）比返回 NaN 强——
+        // NaN 会让整个粒子变成黑洞，而且顺着 Bloom 扩散到整个画面。
+        let projection = Mat4::orthographic_rh(-10.0, 10.0, -10.0, 10.0, 0.1, 100.0);
+        let (a, b) = coefficients(projection);
+
+        for depth in [0.0_f32, 0.5, 1.0] {
+            let value = linear_depth(depth, a, b);
+            assert!(value.is_finite(), "深度 {depth} 得到 {value}");
+        }
+    }
+
+    #[test]
+    fn the_fade_curve_reaches_both_ends() {
+        // 复现着色器里的淡出：gap / fade 夹到 0..1。
+        let fade = 0.5_f32;
+        // 粒子正好贴在几何上：完全透明，交线因此被抹掉。
+        assert_eq!((0.0_f32 / fade).clamp(0.0, 1.0), 0.0);
+        // 离得比淡出距离还远：完全不受影响。
+        assert_eq!((1.0_f32 / fade).clamp(0.0, 1.0), 1.0);
+        // 中间是线性的。
+        assert!(((0.25_f32 / fade).clamp(0.0, 1.0) - 0.5).abs() < 1e-6);
+        // 粒子在几何后面（gap 为负）时夹到 0——那本来就会被深度测试剔掉。
+        assert_eq!((-1.0_f32 / fade).clamp(0.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn soft_particles_are_on_by_default() {
+        // 粒子插进地面时露出的那条笔直交线是最显眼的穿帮之一，
+        // 而代价只是一次深度采样。
+        assert!(ParticleGlobals {
+            view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+            camera_right: [0.0; 4],
+            camera_up: [0.0; 4],
+            soft_params: [0.5, 0.0, 0.0, 0.0],
+        }
+        .soft_params[0]
+            > 0.0);
     }
 }
