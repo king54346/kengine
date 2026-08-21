@@ -93,6 +93,11 @@ struct Globals {
     shadow_params: [f32; 4],
     /// x = 预滤波环境图的 mip 数（0 表示没有 HDR），其余保留
     ibl_params: [f32; 4],
+    /// x = 启动至今的秒数，y = 帧间隔，zw = 视口宽高（像素）。
+    ///
+    /// 自定义材质最常要的两样：没有时间做不了流动，没有视口尺寸
+    /// 算不出屏幕 UV。
+    frame_params: [f32; 4],
     environment: GpuEnvironment,
     lights: [GpuLight; MAX_LIGHTS],
 }
@@ -505,6 +510,13 @@ pub struct Renderer {
     brdf_layout: wgpu::BindGroupLayout,
     /// 重建天空绑定组时要用。
     sky_layout: wgpu::BindGroupLayout,
+    /// 渲染器自己的时钟。
+    ///
+    /// 不从 `render` 的参数里传：那会改动一个所有调用方都要跟着改的
+    /// 签名，而这个值只有着色器用得上。自带时钟也保证了「时间」在
+    /// 整条渲染管线里是同一个数。
+    started: std::time::Instant,
+    last_frame: std::time::Instant,
 
     sky_pipeline: wgpu::RenderPipeline,
     sky_buffer: wgpu::Buffer,
@@ -1054,6 +1066,8 @@ impl Renderer {
             environment_version: 0,
             brdf_layout,
             sky_layout,
+            started: std::time::Instant::now(),
+            last_frame: std::time::Instant::now(),
             sky_pipeline,
             sky_buffer,
             sky_bind_group,
@@ -1140,6 +1154,10 @@ impl Renderer {
 
     /// 绘制一帧。
     pub fn render(&mut self, scene: &Scene, ui: &Ui) -> RenderOutcome {
+        let now = std::time::Instant::now();
+        let frame_delta = now.duration_since(self.last_frame).as_secs_f32();
+        self.last_frame = now;
+
         // 相机：取场景里第一个启用的；没有就用一个看向原点的默认视角。
         let (camera_to_world, camera) = scene.active_camera().unwrap_or_else(|| {
             let eye = Vec3::new(0.0, 1.5, 3.0);
@@ -1256,6 +1274,12 @@ impl Renderer {
                 light_view_proj,
                 cascade_splits,
                 ibl_params: [self.environment_mips as f32, 0.0, 0.0, 0.0],
+                frame_params: [
+                    self.started.elapsed().as_secs_f32(),
+                    frame_delta,
+                    self.config.width.max(1) as f32,
+                    self.config.height.max(1) as f32,
+                ],
                 shadow_params: [
                     settings.depth_bias,
                     settings.normal_bias,
@@ -2348,19 +2372,34 @@ fn create_morph_weight_storage(device: &wgpu::Device, capacity: u64) -> wgpu::Bu
     })
 }
 
-/// 标准着色器的完整源码：kpbr 的 BRDF 函数 + 引擎自己的顶点/片元入口。
-/// 拼接顺序有讲究：klight 定义了 `Light` 结构，`Globals` 里要用，必须排在最前。
-/// 标准着色器的完整源码。
+/// 什么都不改的默认材质钩子。
 ///
-/// 拼接顺序有讲究：klight 定义 `Light`、kpbr 的 IBL 定义 `Environment`，
-/// 两者都被 `Globals` 引用，必须排在标准着色器之前。
+/// 编译器会把这个恒等函数整个消掉，所以「支持自定义材质」对不用它的
+/// 材质是零开销的。
+const DEFAULT_SURFACE_HOOK: &str =
+    "fn material_surface(surface: Surface) -> Surface {\n    return surface;\n}";
+
+/// 标准着色器的完整源码。
 fn standard_shader_source() -> String {
+    material_shader_source(DEFAULT_SURFACE_HOOK)
+}
+
+/// 把一段材质钩子拼成完整的着色器。
+///
+/// 顺序有讲究：
+/// - klight 定义 `Light`、kpbr 的 IBL 定义 `Environment`，两者都被
+///   `Globals` 引用，必须排在标准着色器之前；
+/// - `surface.wgsl` 定义 `Surface`，钩子要用它；
+/// - `shader.wgsl` 调用钩子，所以钩子必须排在它之前。
+fn material_shader_source(hook: &str) -> String {
     format!(
-        "{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
         klight::LIGHT_WGSL,
         kpbr::PBR_WGSL,
         kpbr::IBL_WGSL,
         shadow_sampling_source(),
+        include_str!("surface.wgsl"),
+        hook,
         include_str!("shader.wgsl")
     )
 }

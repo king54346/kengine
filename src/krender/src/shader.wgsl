@@ -18,6 +18,11 @@ struct Globals {
     shadow_params: vec4<f32>,
     // x = 预滤波环境图的 mip 数（0 表示没有 HDR），其余保留
     ibl_params: vec4<f32>,
+    // x = 启动至今的秒数，y = 上一帧的间隔，zw = 视口宽高（像素）
+    //
+    // 时间和视口尺寸是自定义材质最常要的两样东西：没有时间做不了流动，
+    // 没有视口尺寸算不出屏幕 UV。
+    frame_params: vec4<f32>,
     environment: Environment,
     lights: array<Light, 16>,
 };
@@ -228,6 +233,18 @@ fn vs_skinned(
     return out;
 }
 
+// 归一化，长度为零时退回一个已知可用的方向。
+//
+// 钩子返回零向量时 `normalize` 给出 NaN，那个像素连同它周围被 Bloom
+// 波及的一片都会变成黑洞。
+fn normalize_or_fallback(value: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
+    let length_squared = dot(value, value);
+    if (length_squared < 1e-12) {
+        return fallback;
+    }
+    return value * inverseSqrt(length_squared);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let object = objects[in.instance];
@@ -235,12 +252,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // 就等于「只采样这一格」。所有贴图槽用同一套变换，否则法线贴图会错位。
     let uv = in.uv * object.uv_transform.xy + object.uv_transform.zw;
     let sampled = textureSample(base_color_texture, base_color_sampler, uv);
-    let base = object.base_color * sampled * vec4<f32>(in.color, 1.0);
-    let albedo = base.rgb;
 
     // ── 切线空间法线 ──
     let geometric_normal = normalize(in.world_normal);
-    var n = geometric_normal;
+    var mapped_normal = geometric_normal;
     if (object.normal_scale > 0.0) {
         // Gram-Schmidt 重新正交化：插值后的切线未必还垂直于法线。
         let t = normalize(in.world_tangent - geometric_normal * dot(geometric_normal, in.world_tangent));
@@ -250,16 +265,49 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // 贴图存的是 [0,1]，解回 [-1,1]。
         var tangent_normal = textureSample(normal_texture, base_color_sampler, uv).xyz * 2.0 - 1.0;
         tangent_normal = vec3<f32>(tangent_normal.xy * object.normal_scale, tangent_normal.z);
-        n = normalize(tbn * tangent_normal);
+        mapped_normal = normalize(tbn * tangent_normal);
     }
 
     // ── 金属度粗糙度贴图（glTF 约定：G 通道粗糙度、B 通道金属度）──
     let mr = textureSample(metallic_roughness_texture, base_color_sampler, uv);
-    let roughness = clamp(object.roughness * mr.g, 0.02, 1.0);
-    let metallic = clamp(object.metallic * mr.b, 0.0, 1.0);
 
-    let occlusion = mix(1.0, textureSample(occlusion_texture, base_color_sampler, uv).r, object.occlusion_strength);
-    let v = normalize(globals.camera_position.xyz - in.world_position);
+    // ── 交给材质钩子 ──
+    //
+    // 到这里为止是引擎的标准采样结果。钩子可以整个改掉，也可以原样返回。
+    // 没有自定义着色器时，`material_surface` 是一个恒等函数，
+    // 编译器会把它整个消掉，不产生任何开销。
+    var surface: Surface;
+    surface.world_position = in.world_position;
+    surface.geometric_normal = geometric_normal;
+    surface.uv = uv;
+    surface.view_direction = normalize(globals.camera_position.xyz - in.world_position);
+    // `clip_position` 在片元阶段已经是像素坐标，除以视口尺寸得到 0..1。
+    surface.screen_uv = in.clip_position.xy / max(globals.frame_params.zw, vec2<f32>(1.0));
+    surface.time = globals.frame_params.x;
+
+    surface.base_color = object.base_color * sampled * vec4<f32>(in.color, 1.0);
+    surface.normal = mapped_normal;
+    surface.metallic = clamp(object.metallic * mr.b, 0.0, 1.0);
+    surface.roughness = clamp(object.roughness * mr.g, 0.02, 1.0);
+    surface.occlusion = mix(
+        1.0,
+        textureSample(occlusion_texture, base_color_sampler, uv).r,
+        object.occlusion_strength,
+    );
+    surface.emissive = object.emissive.rgb
+        * textureSample(emissive_texture, base_color_sampler, uv).rgb;
+
+    surface = material_surface(surface);
+
+    let base = surface.base_color;
+    let albedo = base.rgb;
+    // 钩子可能返回没归一化的法线（比如手写的程序化法线）。不归一化的话
+    // 光照会整体偏亮或偏暗，而且不报任何错。
+    let n = normalize_or_fallback(surface.normal, geometric_normal);
+    let roughness = clamp(surface.roughness, 0.02, 1.0);
+    let metallic = clamp(surface.metallic, 0.0, 1.0);
+    let occlusion = clamp(surface.occlusion, 0.0, 1.0);
+    let v = surface.view_direction;
 
     // 逐光源累加。光源数量由 CPU 侧截断到数组容量，这里再夹一次以防越界。
     var color = vec3<f32>(0.0);
@@ -362,9 +410,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // 自发光不受光照影响，直接叠加。
     // 自发光同样要被雾衰减，所以乘上清澈度。
     let clarity = 1.0 - fog_density(globals.environment, length(in.world_position - globals.camera_position.xyz));
-    color += object.emissive.rgb
-        * textureSample(emissive_texture, base_color_sampler, uv).rgb
-        * clarity;
+    color += surface.emissive * clarity;
 
     // 输出线性 HDR，不做色调映射也不做 gamma——
     // 那些交给后处理链，Bloom 需要未经压缩的高光才能提取出来。
