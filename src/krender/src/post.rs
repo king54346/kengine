@@ -22,6 +22,8 @@ pub struct PostSettings {
     pub bloom_intensity: f32,
     /// 色调映射算子。
     pub tone_mapping: ToneMapping,
+    /// 抗锯齿。
+    pub anti_alias: AntiAlias,
 }
 
 impl Default for PostSettings {
@@ -30,8 +32,31 @@ impl Default for PostSettings {
             bloom_threshold: 1.0,
             bloom_intensity: 0.06,
             tone_mapping: ToneMapping::default(),
+            anti_alias: AntiAlias::default(),
         }
     }
+}
+
+/// 抗锯齿方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AntiAlias {
+    /// 不做。边缘会有锯齿。
+    None,
+    /// FXAA：纯后处理，一个 pass。
+    ///
+    /// 代价是细小的文字和纹理细节会略糊。想要更好的效果得上 TAA，
+    /// 那需要历史帧、速度缓冲和一整套重投影。
+    #[default]
+    Fxaa,
+}
+
+/// FXAA pass 的 uniform，对应 `fxaa.wgsl` 的 `Params`。
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct FxaaParams {
+    texel: [f32; 2],
+    threshold_min: f32,
+    threshold_max: f32,
 }
 
 /// 后处理 pass 的 uniform，对应 `post.wgsl` 的 `PostParams`。
@@ -47,6 +72,11 @@ struct PostParams {
 /// 一组尺寸相关的离屏纹理。窗口尺寸变化时整体重建。
 struct Targets {
     hdr: wgpu::TextureView,
+    /// 色调映射之后、抗锯齿之前的 LDR 缓冲。
+    ///
+    /// FXAA 必须在色调映射之后跑：它靠亮度差找边缘，而 HDR 里一个高光
+    /// 可能是 100，几乎所有像素对都会被判成边缘。
+    ldr: wgpu::TextureView,
     /// 两张半分辨率缓冲，模糊时来回乒乓。
     bloom: [wgpu::TextureView; 2],
     width: u32,
@@ -440,11 +470,16 @@ impl PostProcess {
     }
 }
 
-fn create_targets(device: &wgpu::Device, width: u32, height: u32) -> Targets {
+fn create_targets(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    ldr_format: wgpu::TextureFormat,
+) -> Targets {
     let width = width.max(1);
     let height = height.max(1);
 
-    let make = |label: &str, w: u32, h: u32| {
+    let make_with = |label: &str, w: u32, h: u32, format: wgpu::TextureFormat| {
         device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
@@ -456,19 +491,23 @@ fn create_targets(device: &wgpu::Device, width: u32, height: u32) -> Targets {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: HDR_FORMAT,
+                format,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                     | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             })
             .create_view(&wgpu::TextureViewDescriptor::default())
     };
+    let make = |label: &str, w: u32, h: u32| make_with(label, w, h, HDR_FORMAT);
 
     let bloom_width = width / BLOOM_DOWNSCALE;
     let bloom_height = height / BLOOM_DOWNSCALE;
 
     Targets {
         hdr: make("kengine hdr target", width, height),
+        // LDR 缓冲的格式跟交换链走：FXAA 之后要直接拷到屏幕上，
+        // 格式不一致的话每帧多一次转换。
+        ldr: make_with("kengine ldr target", width, height, ldr_format),
         bloom: [
             make("kengine bloom a", bloom_width, bloom_height),
             make("kengine bloom b", bloom_width, bloom_height),
