@@ -14,6 +14,7 @@ mod debug;
 pub mod decal;
 mod node;
 mod physics;
+mod physics2d;
 mod ragdoll;
 mod script;
 mod serialize;
@@ -143,6 +144,8 @@ pub struct Scene {
     index: NodeIndex,
     /// 物理世界。场景节点上的刚体 / 碰撞体 / 关节都在这里有一个对应物。
     physics: PhysicsWorld,
+    /// 2D 物理世界。和 3D 那个互不感知，见 `physics2d` 模块的说明。
+    physics2d: kphysics::d2::PhysicsWorld,
     /// 本帧的 2D 精灵。
     ///
     /// 和调试线同一个模式：即时模式，每帧重新提交，渲染器读走后清空。
@@ -233,6 +236,7 @@ impl Scene {
             culling: SceneCulling::default(),
             index: NodeIndex::default(),
             physics: PhysicsWorld::new(),
+            physics2d: kphysics::d2::PhysicsWorld::new(),
             gizmos: Gizmos::new(),
             sprites: Vec::new(),
             sprite_textures: Vec::new(),
@@ -259,6 +263,7 @@ impl Scene {
             culling: SceneCulling::default(),
             index: NodeIndex::default(),
             physics: PhysicsWorld::new(),
+            physics2d: kphysics::d2::PhysicsWorld::new(),
             gizmos: Gizmos::new(),
             sprites: Vec::new(),
             sprite_textures: Vec::new(),

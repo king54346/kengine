@@ -162,17 +162,17 @@ pub struct BodyRef<'a> {
 impl BodyRef<'_> {
     /// 世界空间位置。
     pub fn position(&self) -> Vec2 {
-        from_rv(self.inner.pose().translation)
+        from_rv(self.inner.position().translation)
     }
 
     /// 世界空间朝向，弧度。
     pub fn rotation(&self) -> f32 {
-        from_rp(self.inner.pose()).1
+        from_rp(self.inner.position()).1
     }
 
     /// 线速度。
     pub fn linvel(&self) -> Vec2 {
-        from_rv(*self.inner.linvel())
+        from_rv(self.inner.linvel())
     }
 
     /// 角速度，弧度/秒。
@@ -214,17 +214,17 @@ pub struct BodyMut<'a> {
 impl BodyMut<'_> {
     /// 世界空间位置。
     pub fn position(&self) -> Vec2 {
-        from_rv(self.inner.pose().translation)
+        from_rv(self.inner.position().translation)
     }
 
     /// 世界空间朝向，弧度。
     pub fn rotation(&self) -> f32 {
-        from_rp(self.inner.pose()).1
+        from_rp(self.inner.position()).1
     }
 
     /// 线速度。
     pub fn linvel(&self) -> Vec2 {
-        from_rv(*self.inner.linvel())
+        from_rv(self.inner.linvel())
     }
 
     /// 角速度。
@@ -237,7 +237,7 @@ impl BodyMut<'_> {
     /// `wake` 为真时顺便唤醒刚体。**动态刚体一般要唤醒**——传送一个正在
     /// 休眠的物体，它会停在新位置一动不动，直到有别的东西撞它。
     pub fn set_position(&mut self, position: Vec2, rotation: f32, wake: bool) {
-        self.inner.set_pose(to_rp(position, rotation), wake);
+        self.inner.set_position(to_rp(position, rotation), wake);
     }
 
     /// 设置运动学刚体的目标位姿。
@@ -246,7 +246,7 @@ impl BodyMut<'_> {
     /// **插值过去**，于是刚体沿途会正确地推开动态物体。直接设位置的话
     /// 它会瞬移，路上的东西可能被漏掉或被挤穿。
     pub fn set_next_kinematic_position(&mut self, position: Vec2, rotation: f32) {
-        self.inner.set_next_kinematic_pose(to_rp(position, rotation));
+        self.inner.set_next_kinematic_position(to_rp(position, rotation));
     }
 
     /// 设置线速度。
@@ -311,6 +311,6 @@ impl BodyMut<'_> {
 
     /// 锁 / 解锁旋转。
     pub fn set_locked_rotation(&mut self, locked: bool, wake: bool) {
-        self.inner.set_locked_rotations(locked, wake);
+        self.inner.lock_rotations(locked, wake);
     }
 }

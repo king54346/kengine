@@ -36,6 +36,11 @@
 //! assert!(world.body(ball).unwrap().position().y < 1.5);
 //! ```
 
+#[cfg(test)]
+mod events_tests;
+#[cfg(test)]
+mod tests;
+
 mod body;
 mod collider;
 mod convert;

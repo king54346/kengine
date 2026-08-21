@@ -5,24 +5,21 @@ use super::{
     collider::{ColliderDesc, ColliderMut, ColliderRef},
     convert::{from_rv, to_rv},
 };
-use crate::{
-    IntegrationParameters,
-    events::{CollisionEvent, ContactForceEvent},
-};
+use crate::IntegrationParameters;
 use kmath::Vec2;
 use rapier2d::{
     geometry::CollisionEventFlags,
     pipeline as rp,
     prelude::{QueryFilter, Ray},
 };
-use std::{sync::mpsc, time::Instant};
+use std::sync::mpsc;
 
 /// 2D 刚体的句柄。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BodyHandle(pub(crate) rapier2d::dynamics::RigidBodyHandle);
 
 /// 2D 碰撞体的句柄。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ColliderHandle(pub(crate) rapier2d::geometry::ColliderHandle);
 
 /// 一次射线检测的结果。
@@ -310,9 +307,8 @@ impl PhysicsWorld {
             return;
         }
 
-        let _started = Instant::now();
         self.inner.integration_parameters.dt = dt;
-        self.inner.step_with_events(&self.event_handler);
+        self.inner.step_with_events(&(), &self.event_handler);
         self.query_structures_stale = false;
 
         self.drain_events();
@@ -354,17 +350,13 @@ impl PhysicsWorld {
     pub fn cast_ray(&mut self, options: &RayCastOptions) -> Option<RayHit> {
         // 查询结构在步进时才更新。刚加完刚体就查询的话，查询树里
         // 还没有它——这在「加载关卡后立刻检测地面」时会静默返回 None。
-        self.refresh_query_pipeline();
+        self.update_query_structures();
 
         let ray = Ray::new(to_rv(options.origin).into(), to_rv(options.direction));
         let filter = QueryFilter::default().groups(options.groups.to_rapier2d());
 
-        let (handle, intersection) = self.inner.query_pipeline().cast_ray_and_get_normal(
-            &ray,
-            options.max_distance,
-            options.solid,
-            filter,
-        )?;
+        let (handle, intersection) = self.inner.query_pipeline_with_filter(filter)
+            .cast_ray_and_get_normal(&ray, options.max_distance, options.solid)?;
 
         Some(RayHit {
             collider: ColliderHandle(handle),
@@ -376,30 +368,29 @@ impl PhysicsWorld {
 
     /// 一个点落在哪些碰撞体里。
     pub fn colliders_at_point(&mut self, point: Vec2) -> Vec<ColliderHandle> {
-        self.refresh_query_pipeline();
-        let mut hits = Vec::new();
-        self.inner.query_pipeline().intersections_with_point(
-            &to_rv(point).into(),
-            QueryFilter::default(),
-            |handle| {
-                hits.push(ColliderHandle(handle));
-                true
-            },
-        );
-        hits
+        self.update_query_structures();
+        self.inner
+            .query_pipeline()
+            .intersect_point(to_rv(point))
+            .map(|(handle, _)| ColliderHandle(handle))
+            .collect()
     }
 
-    /// 让查询结构跟上最新的增删。
-    fn refresh_query_pipeline(&mut self) {
-        if self.query_structures_stale {
-            self.inner.broad_phase.update(
-                self.inner.integration_parameters.prediction_distance(),
-                &self.inner.colliders,
-                &[],
-                &[],
-                &mut self.inner.narrow_phase,
-            );
-            self.query_structures_stale = false;
+    /// 让射线 / 点查询用的加速结构跟上最新的增删。
+    ///
+    /// 和 3D 的 [`update_query_structures`](crate::PhysicsWorld::update_query_structures)
+    /// 同理：查询走的是广相的 BVH，而 BVH 是在 [`step`](Self::step) 里维护的。
+    /// 刚加完碰撞体就查询的话，查询会**静默返回空结果**——既不报错也不 panic。
+    ///
+    /// 已经是最新的话直接返回，重复调用不花钱。
+    pub fn update_query_structures(&mut self) {
+        if !self.query_structures_stale {
+            return;
         }
+        // 步长为 0 的一步：碰撞检测跑完、BVH 更新完，但什么都不会动。
+        self.inner.integration_parameters.dt = 0.0;
+        self.inner.step_with_events(&(), &self.event_handler);
+        self.query_structures_stale = false;
+        self.drain_events();
     }
 }

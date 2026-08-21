@@ -116,9 +116,7 @@ impl ColliderShape {
                 if normalized == Vec2::ZERO {
                     return None;
                 }
-                rg::SharedShape::halfspace(rapier2d::math::UnitVector::new(
-                    to_rv(normalized),
-                ))
+                rg::SharedShape::halfspace(to_rv(normalized))
             }
         };
         Some(shape)
@@ -150,6 +148,12 @@ pub struct ColliderDesc {
     pub collision_groups: InteractionGroups,
     /// 求解组：过滤「产生接触力」，但仍然会报告碰撞事件。
     pub solver_groups: InteractionGroups,
+    /// 是否上报碰撞开始 / 结束事件。默认关闭——事件是有成本的，
+    /// 只给真正要监听的碰撞体打开。
+    ///
+    /// **传感器不受这个开关限制**：传感器不开事件的话什么都不做，
+    /// 既不碰撞也不报告，没有任何用途。所以传感器一律自动开启。
+    pub emit_collision_events: bool,
     /// 是否报告接触力事件。
     pub contact_force_events: bool,
     /// 触发接触力事件的力阈值。
@@ -170,6 +174,7 @@ impl Default for ColliderDesc {
             friction_combine_rule: CoefficientCombineRule::Average,
             restitution_combine_rule: CoefficientCombineRule::Average,
             sensor: false,
+            emit_collision_events: false,
             collision_groups: InteractionGroups::default(),
             solver_groups: InteractionGroups::default(),
             contact_force_events: false,
@@ -256,9 +261,15 @@ impl ColliderDesc {
         self
     }
 
-    /// 变成传感器。
+    /// 变成传感器。碰撞事件会自动开启。
     pub fn as_sensor(mut self) -> Self {
         self.sensor = true;
+        self
+    }
+
+    /// 开启碰撞事件上报。
+    pub fn with_collision_events(mut self) -> Self {
+        self.emit_collision_events = true;
         self
     }
 
@@ -278,7 +289,17 @@ impl ColliderDesc {
 
     pub(crate) fn build(&self, user_data: u128) -> Option<rg::Collider> {
         let shape = self.shape.build()?;
+        let mut events = rapier2d::pipeline::ActiveEvents::empty();
+        // 传感器一律开启：不开的话它什么都不做。
+        if self.emit_collision_events || self.sensor {
+            events |= rapier2d::pipeline::ActiveEvents::COLLISION_EVENTS;
+        }
+        if self.contact_force_events {
+            events |= rapier2d::pipeline::ActiveEvents::CONTACT_FORCE_EVENTS;
+        }
+
         let mut builder = rg::ColliderBuilder::new(shape)
+            .active_events(events)
             .position(to_rp(self.position, self.rotation))
             .density(self.density)
             .friction(self.friction)
@@ -292,9 +313,7 @@ impl ColliderDesc {
             .user_data(user_data);
 
         if self.contact_force_events {
-            builder = builder
-                .active_events(rg::ActiveEvents::CONTACT_FORCE_EVENTS)
-                .contact_force_event_threshold(self.contact_force_threshold);
+            builder = builder.contact_force_event_threshold(self.contact_force_threshold);
         }
         // 传感器默认不报告和静态物体的重叠。触发区多半就是贴在
         // 静态几何上的，不开这个的话它永远不触发。
@@ -311,7 +330,7 @@ pub struct ColliderRef<'a> {
 impl ColliderRef<'_> {
     /// 世界空间位置。
     pub fn position(&self) -> Vec2 {
-        from_rv(self.inner.pose().translation)
+        from_rv(self.inner.position().translation)
     }
 
     /// 是不是传感器。
