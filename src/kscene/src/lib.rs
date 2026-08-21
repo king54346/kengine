@@ -120,9 +120,6 @@ fn skinned_transform(node: &Node) -> Mat4 {
     }
 }
 
-/// 一个场景。
-///
-/// 场景创建时自带一个名为 `__root` 的根节点，[`Scene::add_node`] 默认挂在它下面。
 /// 一个反射探针和它的预滤波数据。
 #[derive(Debug, Clone)]
 pub struct ReflectionProbeEntry {
@@ -133,6 +130,9 @@ pub struct ReflectionProbeEntry {
     pub levels: std::sync::Arc<Vec<kpbr::prefilter::PrefilteredLevel>>,
 }
 
+/// 一个场景。
+///
+/// 场景创建时自带一个名为 `__root` 的根节点，[`Scene::add_node`] 默认挂在它下面。
 pub struct Scene {
     nodes: Pool<Node>,
     root: Handle<Node>,

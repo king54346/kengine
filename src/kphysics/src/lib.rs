@@ -47,6 +47,7 @@
 
 mod body;
 mod collider;
+pub mod d2;
 mod convert;
 mod debug;
 mod events;

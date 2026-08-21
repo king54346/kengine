@@ -9,3 +9,5 @@ kmath = { path = "../kmath" }
 kmesh = { path = "../kmesh" }
 # debug-render：把碰撞体/关节/接触点拆成线段，只要求一个「画线」回调。
 rapier3d = { version = "0.35", features = ["debug-render"] }
+# 2D 物理。和 rapier3d 是同一个引擎的两个维度版本，所以仍然关在这一个 crate 里。
+rapier2d = { version = "0.35", features = ["debug-render"] }

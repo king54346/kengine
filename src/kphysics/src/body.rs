@@ -37,6 +37,28 @@ impl RigidBodyType {
         }
     }
 
+    /// 同上，2D 版。rapier2d 和 rapier3d 的这个枚举是两个不同的类型。
+    pub(crate) fn to_rapier2d(self) -> rapier2d::dynamics::RigidBodyType {
+        use rapier2d::dynamics::RigidBodyType as R;
+        match self {
+            RigidBodyType::Dynamic => R::Dynamic,
+            RigidBodyType::Fixed => R::Fixed,
+            RigidBodyType::KinematicPositionBased => R::KinematicPositionBased,
+            RigidBodyType::KinematicVelocityBased => R::KinematicVelocityBased,
+        }
+    }
+
+    /// 同上，2D 版。
+    pub(crate) fn from_rapier2d(t: rapier2d::dynamics::RigidBodyType) -> Self {
+        use rapier2d::dynamics::RigidBodyType as R;
+        match t {
+            R::Dynamic => RigidBodyType::Dynamic,
+            R::Fixed => RigidBodyType::Fixed,
+            R::KinematicPositionBased => RigidBodyType::KinematicPositionBased,
+            R::KinematicVelocityBased => RigidBodyType::KinematicVelocityBased,
+        }
+    }
+
     pub(crate) fn from_rapier(t: rd::RigidBodyType) -> Self {
         match t {
             rd::RigidBodyType::Dynamic => RigidBodyType::Dynamic,

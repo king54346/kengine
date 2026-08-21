@@ -296,6 +296,18 @@ impl CoefficientCombineRule {
             CoefficientCombineRule::Max => R::Max,
         }
     }
+
+    /// 同上，2D 版。rapier2d 和 rapier3d 的这个枚举是两个不同的类型，
+    /// 尽管长得一模一样。
+    pub(crate) fn to_rapier2d(self) -> rapier2d::dynamics::CoefficientCombineRule {
+        use rapier2d::dynamics::CoefficientCombineRule as R;
+        match self {
+            CoefficientCombineRule::Average => R::Average,
+            CoefficientCombineRule::Min => R::Min,
+            CoefficientCombineRule::Multiply => R::Multiply,
+            CoefficientCombineRule::Max => R::Max,
+        }
+    }
 }
 
 /// 碰撞过滤分组。
@@ -347,6 +359,16 @@ impl InteractionGroups {
         rg::InteractionGroups::new(
             rg::Group::from_bits_truncate(self.memberships),
             rg::Group::from_bits_truncate(self.filter),
+            Default::default(),
+        )
+    }
+
+    /// 同上，2D 版。
+    pub(crate) fn to_rapier2d(self) -> rapier2d::geometry::InteractionGroups {
+        use rapier2d::geometry as rg2;
+        rg2::InteractionGroups::new(
+            rg2::Group::from_bits_truncate(self.memberships),
+            rg2::Group::from_bits_truncate(self.filter),
             Default::default(),
         )
     }
