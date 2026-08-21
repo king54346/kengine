@@ -92,6 +92,36 @@ fn ibl_specular(
     return radiance * (f0 * brdf.x + vec3<f32>(brdf.y));
 }
 
+// 方向转等距柱状投影的 UV。与 CPU 侧 `HdrImage::sample_direction` 一致——
+// 两边不一致的话反射会整体偏转一个角度，而且不报错。
+fn equirect_uv(direction: vec3<f32>) -> vec2<f32> {
+    let d = normalize(direction);
+    let u = (atan2(d.z, d.x) + IBL_PI) / (2.0 * IBL_PI);
+    let v = acos(clamp(d.y, -1.0, 1.0)) / IBL_PI;
+    return vec2<f32>(u, v);
+}
+
+// 从预滤波的 mip 链取镜面反射。
+//
+// mip 级由粗糙度线性选出。**必须用 `textureSampleLevel` 而不是
+// `textureSample`**：后者按屏幕导数自己挑 mip，那算的是纹理在屏幕上的
+// 缩放，和粗糙度毫无关系——粗糙的表面会得到清晰的镜像。
+fn ibl_specular_prefiltered(
+    prefiltered: texture_2d<f32>,
+    prefiltered_sampler: sampler,
+    mip_count: f32,
+    reflection: vec3<f32>,
+    roughness: f32,
+    f0: vec3<f32>,
+    brdf: vec2<f32>,
+    intensity: f32,
+) -> vec3<f32> {
+    let uv = equirect_uv(reflection);
+    let level = clamp(roughness, 0.0, 1.0) * max(mip_count - 1.0, 0.0);
+    let radiance = textureSampleLevel(prefiltered, prefiltered_sampler, uv, level).rgb;
+    return radiance * intensity * (f0 * brdf.x + vec3<f32>(brdf.y));
+}
+
 // 漫反射环境贡献。金属没有漫反射，故按金属度衰减。
 fn ibl_diffuse(
     env: Environment,

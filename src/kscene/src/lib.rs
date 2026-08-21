@@ -138,6 +138,13 @@ pub struct Scene {
     /// 走这条路的精灵享受专用的 2D 批处理；挂在节点上的 `Sprite`
     /// 走的仍然是 3D 管线（一个贴了图的方片）。
     sprites: Vec<ksprite::SpriteInstance>,
+    /// 预滤波的 HDR 环境图 mip 链。渲染器靠它做镜面 IBL。
+    prefiltered_environment: Option<std::sync::Arc<Vec<kpbr::prefilter::PrefilteredLevel>>>,
+    /// 环境图的版本号。渲染器靠它判断要不要重传。
+    ///
+    /// 一条 256×128 的 mip 链是几兆的浮点数据，每帧重传纯属浪费；
+    /// 而它只在换环境图时才变。
+    environment_version: u64,
     /// 2D 精灵用到的贴图。
     ///
     /// 精灵实例只带一个纹理 id，渲染器得先见过贴图本身才画得出来。
@@ -214,6 +221,8 @@ impl Scene {
             gizmos: Gizmos::new(),
             sprites: Vec::new(),
             sprite_textures: Vec::new(),
+            prefiltered_environment: None,
+            environment_version: 0,
         }
     }
 
@@ -236,6 +245,8 @@ impl Scene {
             gizmos: Gizmos::new(),
             sprites: Vec::new(),
             sprite_textures: Vec::new(),
+            prefiltered_environment: None,
+            environment_version: 0,
         }
     }
 
@@ -1245,6 +1256,32 @@ impl Scene {
     /// 已登记的精灵贴图。渲染器每帧扫一遍，新的就上传。
     pub fn sprite_textures(&self) -> &[ktexture::Texture] {
         &self.sprite_textures
+    }
+
+    /// 用一张 HDR 全景图当环境光，漫反射与镜面都换掉。
+    ///
+    /// 这一步会做**两次离线计算**：球谐投影（漫反射）和 GGX 预滤波
+    /// （镜面）。后者在默认参数下要卷积几万个像素，**在加载时做一次，
+    /// 不要每帧调**。
+    pub fn set_environment_hdr(
+        &mut self,
+        image: &kpbr::hdr::HdrImage,
+        settings: kpbr::prefilter::PrefilterSettings,
+    ) {
+        self.environment.set_hdr(image);
+        self.prefiltered_environment =
+            Some(std::sync::Arc::new(kpbr::prefilter::prefilter(image, settings)));
+        self.environment_version += 1;
+    }
+
+    /// 预滤波的环境 mip 链。没设过 HDR 时为 `None`。
+    pub fn prefiltered_environment(&self) -> Option<&[kpbr::prefilter::PrefilteredLevel]> {
+        self.prefiltered_environment.as_ref().map(|c| c.as_slice())
+    }
+
+    /// 环境图的版本号。每次换图递增。
+    pub fn environment_version(&self) -> u64 {
+        self.environment_version
     }
 
     /// 本帧的调试线缓冲。

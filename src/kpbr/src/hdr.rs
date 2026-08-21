@@ -273,7 +273,7 @@ fn read_scanline(bytes: &[u8], cursor: &mut usize, out: &mut [[u8; 4]]) -> Resul
 
     // 新式 RLE 是**按通道**存的：先一整行的 R，再一整行的 G……
     // 按像素解会得到一张颜色完全错乱的图。
-    for channel in 0..4 {
+    for channel in 0..4usize {
         let mut filled = 0usize;
         while filled < width {
             if *cursor >= bytes.len() {
@@ -343,13 +343,13 @@ mod tests {
 
         for _ in 0..height {
             bytes.extend_from_slice(&[2, 2, (width >> 8) as u8, (width & 0xff) as u8]);
-            for channel in 0..4 {
+            for value in pixel {
                 // 一个游程覆盖整行。游程最长 127。
                 let mut remaining = width;
                 while remaining > 0 {
                     let run = remaining.min(127);
                     bytes.push((128 + run) as u8);
-                    bytes.push(pixel[channel]);
+                    bytes.push(value);
                     remaining -= run;
                 }
             }

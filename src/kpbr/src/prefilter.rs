@@ -80,15 +80,18 @@ impl Default for PrefilterSettings {
 /// 生成预滤波的 mip 链。
 ///
 /// 返回 `levels` 级，第 0 级粗糙度为 0（原图降采样），最后一级为 1。
+///
+/// 级数会被夹住，保证每一级都**正好是上一级的一半**——GPU 的 mip 链
+/// 是这么定义的。级数要得太多时后面几级会被 `max(8)` 夹成同样大小，
+/// 那样的数组传不进纹理的 mip 链（尺寸对不上，wgpu 直接报错）。
 pub fn prefilter(image: &HdrImage, settings: PrefilterSettings) -> Vec<PrefilteredLevel> {
-    let levels = settings.levels.max(1);
+    let levels = settings.levels.max(1).min(max_levels(settings.base_width));
     let mut out = Vec::with_capacity(levels);
 
     for level in 0..levels {
-        // 每级尺寸减半，但不小于 4——再小的话等距柱状投影的
-        // 极点区域会退化成一两个像素，反射会出现明显的横条。
-        let width = (settings.base_width >> level).max(8);
-        let height = (width / 2).max(4);
+        // 每级尺寸严格减半。级数已经在上面夹过，这里不会低于 8。
+        let width = settings.base_width >> level;
+        let height = width / 2;
         let roughness = if levels == 1 {
             0.0
         } else {
@@ -121,6 +124,20 @@ pub fn prefilter(image: &HdrImage, settings: PrefilterSettings) -> Vec<Prefilter
         });
     }
     out
+}
+
+/// 给定基础宽度，最多能生成几级严格减半的 mip。
+///
+/// 下限取 8 像素宽：再小的话等距柱状投影的极点区域会退化成
+/// 一两个像素，反射会出现明显的横条。
+pub fn max_levels(base_width: usize) -> usize {
+    let mut width = base_width.max(8);
+    let mut count = 1;
+    while width / 2 >= 8 {
+        width /= 2;
+        count += 1;
+    }
+    count
 }
 
 /// 等距柱状投影里某个像素对应的方向。
@@ -169,7 +186,7 @@ fn convolve(image: &HdrImage, normal: Vec3, roughness: f32, samples: u32) -> Vec
 fn hammersley(index: u32, count: u32) -> (f32, f32) {
     // 位反转产生 Van der Corput 序列。
     let mut bits = index;
-    bits = (bits << 16) | (bits >> 16);
+    bits = bits.rotate_right(16);
     bits = ((bits & 0x5555_5555) << 1) | ((bits & 0xAAAA_AAAA) >> 1);
     bits = ((bits & 0x3333_3333) << 2) | ((bits & 0xCCCC_CCCC) >> 2);
     bits = ((bits & 0x0F0F_0F0F) << 4) | ((bits & 0xF0F0_F0F0) >> 4);
@@ -253,7 +270,9 @@ mod tests {
 
     fn small() -> PrefilterSettings {
         PrefilterSettings {
-            base_width: 32,
+            // 64 才够生成四级严格减半的 mip（64→32→16→8）。
+            // 用 32 的话只能出三级，级数会被夹掉一级。
+            base_width: 64,
             levels: 4,
             samples: 32,
         }
@@ -261,13 +280,13 @@ mod tests {
 
     #[test]
     fn the_chain_has_the_requested_number_of_levels() {
-        let levels = prefilter(&split_sky(32, 16), small());
+        let levels = prefilter(&split_sky(64, 32), small());
         assert_eq!(levels.len(), 4);
     }
 
     #[test]
     fn roughness_goes_from_zero_to_one() {
-        let levels = prefilter(&split_sky(32, 16), small());
+        let levels = prefilter(&split_sky(64, 32), small());
         assert_eq!(levels[0].roughness, 0.0);
         assert_eq!(levels[levels.len() - 1].roughness, 1.0);
         for pair in levels.windows(2) {
@@ -319,7 +338,7 @@ mod tests {
     fn level_zero_is_the_source_image() {
         // 粗糙度为 0 时卷积核退化成一个方向。走通用路径的话，
         // 重要性采样在 a=0 时会除以零。
-        let image = split_sky(32, 16);
+        let image = split_sky(64, 32);
         let levels = prefilter(&image, small());
 
         let up = direction_of(16, 2, levels[0].width, levels[0].height);
@@ -402,7 +421,7 @@ mod tests {
     fn no_nan_anywhere() {
         // 法线与参考向量共线时叉乘得零向量，归一化之后是 NaN，
         // 整个采样全废——而且画面上只是一片黑，不报错。
-        let levels = prefilter(&split_sky(32, 16), small());
+        let levels = prefilter(&split_sky(64, 32), small());
         for level in &levels {
             assert!(
                 level.pixels.iter().all(|v| v.is_finite()),
@@ -415,7 +434,7 @@ mod tests {
     #[test]
     fn the_poles_are_handled() {
         // 正上方和正下方是等距柱状投影的奇点，容易出 NaN。
-        let levels = prefilter(&split_sky(32, 16), small());
+        let levels = prefilter(&split_sky(64, 32), small());
         for level in &levels {
             let top = level.pixel(level.width / 2, 0);
             let bottom = level.pixel(level.width / 2, level.height - 1);

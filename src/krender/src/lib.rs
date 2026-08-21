@@ -89,6 +89,8 @@ struct Globals {
     cascade_splits: [f32; 4],
     /// x = 深度偏移，y = 法线偏移，z = 阴影贴图边长，w = 是否启用
     shadow_params: [f32; 4],
+    /// x = 预滤波环境图的 mip 数（0 表示没有 HDR），其余保留
+    ibl_params: [f32; 4],
     environment: GpuEnvironment,
     lights: [GpuLight; MAX_LIGHTS],
 }
@@ -357,6 +359,12 @@ pub struct Renderer {
     ui: UiResources,
     /// 上一次上传的字形图集版本号。
     ui_atlas_version: u64,
+    /// 预滤波环境图的 mip 数。0 表示没有 HDR，着色器会退回程序化天空。
+    environment_mips: usize,
+    /// 上一次上传的环境图版本号。
+    environment_version: u64,
+    /// 重建 group(3) 绑定组时要用。
+    brdf_layout: wgpu::BindGroupLayout,
 
     sky_pipeline: wgpu::RenderPipeline,
     sky_buffer: wgpu::Buffer,
@@ -649,6 +657,24 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
+                // 预滤波的 HDR 环境图。没有 HDR 时绑一张 1×1 的占位——
+                // wgpu 不允许绑定组留空，而着色器靠 `ibl_params.x` 跳过采样。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         // 阴影贴图与 BRDF LUT 同属 group(3)，需要等阴影资源建好后一起绑定。
@@ -777,7 +803,16 @@ impl Renderer {
             ),
         };
 
-        let brdf_bind_group = create_brdf_lut(&device, &queue, &brdf_layout, &shadow.depth_view);
+        // 还没有 HDR 时先绑一张 1×1 的占位；`set_environment_hdr` 之后
+        // 会重建这个绑定组。
+        let placeholder_environment = create_placeholder_environment(&device);
+        let brdf_bind_group = create_brdf_lut(
+            &device,
+            &queue,
+            &brdf_layout,
+            &shadow.depth_view,
+            &placeholder_environment,
+        );
         let post = PostProcess::new(&device, config.width, config.height, config.format);
         // 粒子画在主 pass 里，因此目标格式与深度格式都要与主 pass 一致。
         let particles = ParticleResources::new(
@@ -829,6 +864,9 @@ impl Renderer {
             sprite_scratch: Vec::new(),
             ui: ui_resources,
             ui_atlas_version: u64::MAX,
+            environment_mips: 0,
+            environment_version: 0,
+            brdf_layout,
             sky_pipeline,
             sky_buffer,
             sky_bind_group,
@@ -929,6 +967,34 @@ impl Renderer {
             light_count += 1;
         }
 
+        // ── HDR 环境图 ──
+        // 只在版本号变了时重传：一条 256×128 的 mip 链是几兆的浮点数据，
+        // 每帧重传纯属浪费，而它只在换环境图时才变。
+        if scene.environment_version() != self.environment_version {
+            self.environment_version = scene.environment_version();
+            let uploaded = scene
+                .prefiltered_environment()
+                .and_then(|levels| {
+                    upload_prefiltered_environment(&self.device, &self.queue, levels)
+                        .map(|view| (view, levels.len()))
+                });
+
+            let (view, mips) = match uploaded {
+                Some((view, mips)) => (view, mips),
+                // 换回程序化天空：绑占位图，着色器靠 `ibl_params.x == 0`
+                // 跳过采样。
+                None => (create_placeholder_environment(&self.device), 0),
+            };
+            self.environment_mips = mips;
+            self.brdf_bind_group = create_brdf_lut(
+                &self.device,
+                &self.queue,
+                &self.brdf_layout,
+                &self.shadow.depth_view,
+                &view,
+            );
+        }
+
         // ── 级联阴影 ──
         // 把视锥按距离切段，每段一张阴影图。近处那段覆盖的世界范围小，
         // 同样分辨率下纹素密度高一个数量级。
@@ -967,6 +1033,7 @@ impl Renderer {
                 light_count: [light_count as u32, 0, 0, 0],
                 light_view_proj,
                 cascade_splits,
+                ibl_params: [self.environment_mips as f32, 0.0, 0.0, 0.0],
                 shadow_params: [
                     settings.depth_bias,
                     settings.normal_bias,
@@ -2180,11 +2247,13 @@ fn sky_shader_source() -> String {
 /// 生成环境 BRDF 查找表并上传。
 ///
 /// 值域在 [0, 1]，8 位精度足够，且保证在所有后端上都可过滤。
+#[allow(clippy::too_many_arguments)]
 fn create_brdf_lut(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     layout: &wgpu::BindGroupLayout,
     shadow_view: &wgpu::TextureView,
+    environment_view: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     const SIZE: u32 = 64;
 
@@ -2231,6 +2300,21 @@ fn create_brdf_lut(
     );
 
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    // 环境图的采样器：水平要**重复**（全景图左右连续），
+    // 垂直夹取（两极），并开三线性以便在 mip 之间平滑过渡。
+    let environment_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("kengine environment sampler"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        // 不开的话按粗糙度选 mip 时会在级与级之间跳变，
+        // 表现为粗糙度渐变的表面上出现一圈圈台阶。
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
+        ..Default::default()
+    });
+
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("kengine brdf sampler"),
         // 查找表必须夹边，重复采样会让掠射角的值绕回去。
@@ -2275,8 +2359,123 @@ fn create_brdf_lut(
                 binding: 3,
                 resource: wgpu::BindingResource::Sampler(&shadow_sampler),
             },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(environment_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::Sampler(&environment_sampler),
+            },
         ],
     })
+}
+
+/// 一张 1×1 的黑色占位环境图。
+///
+/// wgpu 不允许绑定组留空，而没有 HDR 时那两个绑定点也得有东西。
+/// 着色器靠 `ibl_params.x == 0` 跳过采样，所以内容是什么无所谓。
+fn create_placeholder_environment(device: &wgpu::Device) -> wgpu::TextureView {
+    device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("kengine placeholder environment"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// 把预滤波的 mip 链传上显存。
+///
+/// 每一级正好是上一级的一半（`prefilter` 保证了这件事），
+/// 于是可以直接当纹理的 mip 链用——着色器按粗糙度选级，
+/// 硬件的三线性过滤顺便把相邻两级插好。
+fn upload_prefiltered_environment(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    levels: &[kpbr::prefilter::PrefilteredLevel],
+) -> Option<wgpu::TextureView> {
+    let base = levels.first()?;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("kengine prefiltered environment"),
+        size: wgpu::Extent3d {
+            width: base.width as u32,
+            height: base.height as u32,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: levels.len() as u32,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        // 必须是浮点格式：HDR 的值可以远大于 1，
+        // 用 8 位会把所有高光压成纯白，镜面反射全丢。
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    for (index, level) in levels.iter().enumerate() {
+        // CPU 侧是紧凑的 RGB，GPU 要 RGBA 半精度。
+        let mut texels: Vec<u8> = Vec::with_capacity(level.width * level.height * 8);
+        for pixel in level.pixels.chunks_exact(3) {
+            for channel in [pixel[0], pixel[1], pixel[2], 1.0] {
+                texels.extend_from_slice(&half_from_f32(channel).to_le_bytes());
+            }
+        }
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: index as u32,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &texels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(level.width as u32 * 8),
+                rows_per_image: Some(level.height as u32),
+            },
+            wgpu::Extent3d {
+                width: level.width as u32,
+                height: level.height as u32,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    Some(texture.create_view(&wgpu::TextureViewDescriptor::default()))
+}
+
+/// `f32` 转 IEEE754 半精度。
+///
+/// 手写而不是拉一个 crate：只用在环境图上传这一处，而 `half` 会把
+/// 整个依赖树拉进来。溢出饱和到 inf 而不是回绕——HDR 里确实有
+/// 超出半精度范围的太阳，回绕会让它变成黑点。
+fn half_from_f32(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exponent = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+    let mantissa = bits & 0x007f_ffff;
+
+    if exponent >= 0x1f {
+        // 溢出或本来就是 inf/NaN。
+        return sign | 0x7c00;
+    }
+    if exponent <= 0 {
+        // 下溢：直接归零。半精度的非规格化数在这里不值得处理——
+        // 环境图里那么暗的值对光照没有贡献。
+        return sign;
+    }
+    sign | ((exponent as u16) << 10) | ((mantissa >> 13) as u16)
 }
 
 /// 上传一张贴图，连同按其采样设置建好的采样器一起返回。

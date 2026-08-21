@@ -16,6 +16,8 @@ struct Globals {
     cascade_splits: vec4<f32>,
     // x = 深度偏移，y = 法线偏移，z = 阴影贴图边长，w = 是否启用
     shadow_params: vec4<f32>,
+    // x = 预滤波环境图的 mip 数（0 表示没有 HDR），其余保留
+    ibl_params: vec4<f32>,
     environment: Environment,
     lights: array<Light, 16>,
 };
@@ -70,6 +72,11 @@ struct MorphDelta {
 @group(3) @binding(1) var brdf_sampler: sampler;
 @group(3) @binding(2) var shadow_map: texture_depth_2d_array;
 @group(3) @binding(3) var shadow_sampler: sampler_comparison;
+// 预滤波的 HDR 环境图（等距柱状投影，带 mip 链）。
+// 没有 HDR 时这里绑的是一张 1×1 的占位图，靠 shadow_params 之外的
+// 标志位跳过采样——绑空的绑定组在 wgpu 里是非法的。
+@group(3) @binding(4) var prefiltered_env: texture_2d<f32>;
+@group(3) @binding(5) var prefiltered_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -293,13 +300,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let brdf = textureSample(brdf_lut, brdf_sampler, vec2<f32>(n_dot_v, roughness)).rg;
 
     color += ibl_diffuse(globals.environment, n, albedo, metallic, occlusion);
-    color += ibl_specular(
-        globals.environment,
-        reflect(-v, n),
-        roughness,
-        f0,
-        brdf,
-    ) * occlusion;
+
+    // 有 HDR 就走预滤波的 mip 链，否则退回程序化天空的近似。
+    // 保留退路是必要的：不是每个场景都会配 HDR，而没有镜面反射的
+    // 金属会变成纯黑。
+    let reflection = reflect(-v, n);
+    if (globals.ibl_params.x > 0.5) {
+        color += ibl_specular_prefiltered(
+            prefiltered_env,
+            prefiltered_sampler,
+            globals.ibl_params.x,
+            reflection,
+            roughness,
+            f0,
+            brdf,
+            globals.environment.sun_color.a,
+        ) * occlusion;
+    } else {
+        color += ibl_specular(globals.environment, reflection, roughness, f0, brdf) * occlusion;
+    }
 
     // 自发光不受光照影响，直接叠加。
     color += object.emissive.rgb * textureSample(emissive_texture, base_color_sampler, uv).rgb;
