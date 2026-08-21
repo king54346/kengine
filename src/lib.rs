@@ -114,6 +114,7 @@ pub mod prelude {
         Attenuation, AudioBuffer, AudioDevice, AudioLoader, Listener, Mixer, Sound, Spatial, Status,
     };
     pub use kfont::{Align as TextAlign, Font, TextStyle, Wrap as TextWrap};
+    pub use klight::cascade::{Cascade, CascadeSettings};
     pub use klight::{Light, LightKind};
     pub use kmesh::{Mesh, SkinVertex, Vertex};
     pub use kparticle::{
@@ -126,7 +127,7 @@ pub mod prelude {
         JointDesc, JointHandle, JointKind, PhysicsDebugOptions, PhysicsWorld, RayCastOptions,
         RayHit, RigidBodyDesc, RigidBodyType, ShapeCastOptions, SphericalLimits,
     };
-    pub use krender::RenderStats;
+    pub use krender::{AntiAlias, PostSettings, RenderStats};
     pub use kscene::{
         AnimationPlayer, Cell, Collider, Joint, LimbDesc, Node, Ragdoll, RagdollBuilder,
         RagdollLimb, RigidBody, Scene, SceneDebugOptions, SceneRayHit, ScriptSlot, Skin, SortMode,

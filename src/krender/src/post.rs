@@ -310,12 +310,11 @@ impl PostProcess {
                 },
             ],
         });
-        let fxaa_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("kengine fxaa pipeline layout"),
-                bind_group_layouts: &[Option::from(&fxaa_layout)],
-                immediate_size: 0,
-            });
+        let fxaa_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("kengine fxaa pipeline layout"),
+            bind_group_layouts: &[Option::from(&fxaa_layout)],
+            immediate_size: 0,
+        });
         let fxaa_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("kengine fxaa pipeline"),
             layout: Some(&fxaa_pipeline_layout),
@@ -567,8 +566,7 @@ impl PostProcess {
             &self.targets.bloom[0],
         );
         // 合成的目标：开了 FXAA 就先写进 LDR 缓冲，由 FXAA 再输出到屏幕。
-        let fxaa_on = self.settings.anti_alias == AntiAlias::Fxaa
-            && self.fxaa_bind_group.is_some();
+        let fxaa_on = self.settings.anti_alias == AntiAlias::Fxaa && self.fxaa_bind_group.is_some();
         let composite_target = if fxaa_on { &self.targets.ldr } else { output };
 
         // HDR + bloom[0] → LDR（或直接到屏幕）

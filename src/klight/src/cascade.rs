@@ -257,7 +257,10 @@ mod tests {
     }
 
     fn scene() -> Aabb {
-        Aabb::new(Vec3::new(-200.0, -10.0, -200.0), Vec3::new(200.0, 60.0, 200.0))
+        Aabb::new(
+            Vec3::new(-200.0, -10.0, -200.0),
+            Vec3::new(200.0, 60.0, 200.0),
+        )
     }
 
     fn light() -> Vec3 {
@@ -278,7 +281,10 @@ mod tests {
         for lambda in [0.0, 0.5, 0.85, 1.0] {
             let splits = split_distances(0.1, 500.0, 4, lambda);
             for pair in splits.windows(2) {
-                assert!(pair[1] > pair[0], "lambda={lambda} 时切分点乱序：{splits:?}");
+                assert!(
+                    pair[1] > pair[0],
+                    "lambda={lambda} 时切分点乱序：{splits:?}"
+                );
             }
         }
     }
@@ -301,11 +307,7 @@ mod tests {
         // 纯对数在近平面极小时会让第一级退化成一个点：
         // 近平面 0.001 米时，第一级只覆盖几毫米，等于白搭一级。
         let splits = split_distances(0.001, 300.0, 3, 0.85);
-        assert!(
-            splits[1] > 0.5,
-            "第一级只到 {} 米，太近了",
-            splits[1]
-        );
+        assert!(splits[1] > 0.5, "第一级只到 {} 米，太近了", splits[1]);
     }
 
     #[test]

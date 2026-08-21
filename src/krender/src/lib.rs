@@ -26,6 +26,7 @@ use kparticle::GpuParticle;
 use kscene::Scene;
 use kui::Ui;
 use particle::ParticleResources;
+pub use post::AntiAlias;
 use post::PostProcess;
 use sprite2d::SpriteResources;
 use ui::UiResources;
@@ -941,7 +942,8 @@ impl Renderer {
             None => Vec::new(),
         };
 
-        let mut light_view_proj = [Mat4::IDENTITY.to_cols_array_2d(); klight::cascade::MAX_CASCADES];
+        let mut light_view_proj =
+            [Mat4::IDENTITY.to_cols_array_2d(); klight::cascade::MAX_CASCADES];
         // 切分距离交给着色器选级联。用不满的级填一个极大值，
         // 免得着色器选到没渲染过的层——那是一片未初始化的噪点。
         let mut cascade_splits = [f32::MAX; 4];
@@ -2414,11 +2416,16 @@ mod test {
 
     #[test]
     fn uniform_sizes_match_wgsl_layout() {
-        // Globals：view_proj(64) + vec4 × 3 + 光空间矩阵(64) + 阴影参数(16)
-        //          + 环境(224) + 光源数组(64 × 16)
+        // Globals：view_proj(64) + vec4 × 3 + 级联矩阵(64 × 4)
+        //          + 切分距离(16) + 阴影参数(16) + 环境(224) + 光源数组(64 × 16)
         assert_eq!(
             size_of::<Globals>(),
-            64 + 16 * 3 + 64 + 16 + size_of::<GpuEnvironment>() + 64 * MAX_LIGHTS
+            64 + 16 * 3
+                + 64 * klight::cascade::MAX_CASCADES
+                + 16
+                + 16
+                + size_of::<GpuEnvironment>()
+                + 64 * MAX_LIGHTS
         );
         assert_eq!(size_of::<Globals>() % 16, 0);
         // ObjectUniforms：mat4x4(64) × 2 + base_color(16) + f32 × 4 + emissive(16)
