@@ -1269,8 +1269,9 @@ impl Scene {
         settings: kpbr::prefilter::PrefilterSettings,
     ) {
         self.environment.set_hdr(image);
-        self.prefiltered_environment =
-            Some(std::sync::Arc::new(kpbr::prefilter::prefilter(image, settings)));
+        self.prefiltered_environment = Some(std::sync::Arc::new(kpbr::prefilter::prefilter(
+            image, settings,
+        )));
         self.environment_version += 1;
     }
 

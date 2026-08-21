@@ -119,6 +119,8 @@ struct ShadowObject {
 struct SkyGlobals {
     inverse_view_proj: [[f32; 4]; 4],
     camera_position: [f32; 4],
+    /// x = 预滤波环境图的 mip 数（0 表示没有 HDR），其余保留
+    ibl_params: [f32; 4],
     environment: GpuEnvironment,
 }
 
@@ -365,6 +367,8 @@ pub struct Renderer {
     environment_version: u64,
     /// 重建 group(3) 绑定组时要用。
     brdf_layout: wgpu::BindGroupLayout,
+    /// 重建天空绑定组时要用。
+    sky_layout: wgpu::BindGroupLayout,
 
     sky_pipeline: wgpu::RenderPipeline,
     sky_buffer: wgpu::Buffer,
@@ -713,22 +717,45 @@ impl Renderer {
         let shadow = create_shadow_resources(&device, ShadowSettings::default());
 
         // ── 天空 pass ──
+        // 还没有 HDR 时先绑一张 1×1 的占位；`set_environment_hdr` 之后
+        // 会重建这些绑定组。主 pass 与天空 pass 共用它。
+        let placeholder_environment = create_placeholder_environment(&device);
+
         let sky_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("kengine sky shader"),
             source: wgpu::ShaderSource::Wgsl(sky_shader_source().into()),
         });
         let sky_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("kengine sky layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: NonZeroU64::new(size_of::<SkyGlobals>() as u64),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(size_of::<SkyGlobals>() as u64),
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                // 和主 pass 共用同一张预滤波环境图。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
         let sky_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("kengine sky buffer"),
@@ -736,14 +763,8 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let sky_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("kengine sky bind group"),
-            layout: &sky_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: sky_buffer.as_entire_binding(),
-            }],
-        });
+        let sky_bind_group =
+            create_sky_bind_group(&device, &sky_layout, &sky_buffer, &placeholder_environment);
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("kengine sky pipeline layout"),
             bind_group_layouts: &[Option::from(&sky_layout)],
@@ -803,9 +824,6 @@ impl Renderer {
             ),
         };
 
-        // 还没有 HDR 时先绑一张 1×1 的占位；`set_environment_hdr` 之后
-        // 会重建这个绑定组。
-        let placeholder_environment = create_placeholder_environment(&device);
         let brdf_bind_group = create_brdf_lut(
             &device,
             &queue,
@@ -867,6 +885,7 @@ impl Renderer {
             environment_mips: 0,
             environment_version: 0,
             brdf_layout,
+            sky_layout,
             sky_pipeline,
             sky_buffer,
             sky_bind_group,
@@ -972,12 +991,10 @@ impl Renderer {
         // 每帧重传纯属浪费，而它只在换环境图时才变。
         if scene.environment_version() != self.environment_version {
             self.environment_version = scene.environment_version();
-            let uploaded = scene
-                .prefiltered_environment()
-                .and_then(|levels| {
-                    upload_prefiltered_environment(&self.device, &self.queue, levels)
-                        .map(|view| (view, levels.len()))
-                });
+            let uploaded = scene.prefiltered_environment().and_then(|levels| {
+                upload_prefiltered_environment(&self.device, &self.queue, levels)
+                    .map(|view| (view, levels.len()))
+            });
 
             let (view, mips) = match uploaded {
                 Some((view, mips)) => (view, mips),
@@ -993,6 +1010,10 @@ impl Renderer {
                 &self.shadow.depth_view,
                 &view,
             );
+            // 天空 pass 也要跟着换：不换的话反射来自新 HDR、
+            // 天上还是旧的那张，两者对不上。
+            self.sky_bind_group =
+                create_sky_bind_group(&self.device, &self.sky_layout, &self.sky_buffer, &view);
         }
 
         // ── 级联阴影 ──
@@ -1254,6 +1275,7 @@ impl Renderer {
             0,
             bytemuck::cast_slice(&[SkyGlobals {
                 inverse_view_proj: view_proj.inverse().to_cols_array_2d(),
+                ibl_params: [self.environment_mips as f32, 0.0, 0.0, 0.0],
                 camera_position: camera_position.extend(1.0).to_array(),
                 environment: scene.environment().to_gpu(),
             }]),
@@ -2371,6 +2393,45 @@ fn create_brdf_lut(
     })
 }
 
+/// 建天空 pass 的绑定组。
+fn create_sky_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    buffer: &wgpu::Buffer,
+    environment_view: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    // 天空的采样器和主 pass 那个是同一套设置：水平重复、垂直夹取。
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("kengine sky environment sampler"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
+        ..Default::default()
+    });
+
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("kengine sky bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(environment_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ],
+    })
+}
+
 /// 一张 1×1 的黑色占位环境图。
 ///
 /// wgpu 不允许绑定组留空，而没有 HDR 时那两个绑定点也得有东西。
@@ -2616,13 +2677,13 @@ mod test {
     #[test]
     fn uniform_sizes_match_wgsl_layout() {
         // Globals：view_proj(64) + vec4 × 3 + 级联矩阵(64 × 4)
-        //          + 切分距离(16) + 阴影参数(16) + 环境(224) + 光源数组(64 × 16)
+        //          + 切分距离(16) + 阴影参数(16) + IBL 参数(16)
+        //          + 环境(224) + 光源数组(64 × 16)
         assert_eq!(
             size_of::<Globals>(),
             64 + 16 * 3
                 + 64 * klight::cascade::MAX_CASCADES
-                + 16
-                + 16
+                + 16 * 3
                 + size_of::<GpuEnvironment>()
                 + 64 * MAX_LIGHTS
         );
