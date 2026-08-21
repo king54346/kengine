@@ -46,6 +46,9 @@
 #![warn(missing_docs)]
 
 mod body;
+mod character;
+#[cfg(test)]
+mod character_tests;
 mod collider;
 mod convert;
 pub mod d2;
@@ -57,6 +60,9 @@ mod visit;
 mod world;
 
 pub use body::{BodyMut, BodyRef, RigidBodyDesc, RigidBodyType};
+pub use character::{
+    Autostep, CharacterCollision, CharacterController, CharacterMovement, Length,
+};
 pub use collider::{
     Axis, CoefficientCombineRule, ColliderDesc, ColliderMut, ColliderRef, ColliderShape,
     InteractionGroups, TriMeshData,
