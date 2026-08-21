@@ -544,6 +544,13 @@ struct DefaultTextures {
     flat_normal: GpuTexture,
 }
 
+/// 每级级联的全局量在缓冲里占多大一段。
+///
+/// `ShadowGlobals` 只有 80 字节，但动态偏移必须是
+/// `min_uniform_buffer_offset_alignment` 的倍数——各家硬件普遍是 256，
+/// WebGPU 的下限保证也是 256，直接按它对齐最省事。
+const SHADOW_GLOBALS_STRIDE: u64 = 256;
+
 /// 阴影 pass 所需的一组 GPU 资源。
 struct ShadowResources {
     settings: ShadowSettings,
@@ -1533,9 +1540,11 @@ impl Renderer {
             &self.device,
             &self.queue,
             &mut particle_items,
-            view_proj,
-            camera_to_world,
-            camera.projection_matrix(aspect),
+            particle::ParticleCamera {
+                view_proj,
+                camera_to_world,
+                projection: camera.projection_matrix(aspect),
+            },
             &mut scratch,
         );
         stats.particles = scratch.len() as u32;
@@ -1708,6 +1717,30 @@ impl Renderer {
             // 这曾经是级联最主要的代价——N 级就是 N 次**完整**的场景遍历。
             // 现在每级先剔一遍：范围外的不画，投影小于两个纹素的也不画
             // （小物件在几百米外投的影子还不到一个像素）。
+            // 所有级联的全局量**一次写完**，各占一段。
+            //
+            // 见 `has_dynamic_offset` 那里的注释：分开写会被 wgpu 的
+            // 写入时序合并成最后一次。
+            {
+                let mut blob = vec![0u8; SHADOW_GLOBALS_STRIDE as usize * cascades.len().max(1)];
+                for (index, cascade) in cascades.iter().enumerate() {
+                    let globals = ShadowGlobals {
+                        light_view_proj: cascade.matrix.to_cols_array_2d(),
+                        params: [
+                            settings.depth_bias,
+                            settings.normal_bias,
+                            settings.resolution.max(256) as f32,
+                            1.0,
+                        ],
+                    };
+                    let start = index * SHADOW_GLOBALS_STRIDE as usize;
+                    blob[start..start + size_of::<ShadowGlobals>()]
+                        .copy_from_slice(bytemuck::bytes_of(&globals));
+                }
+                self.queue
+                    .write_buffer(&self.shadow.globals_buffer, 0, &blob);
+            }
+
             for (index, cascade) in cascades.iter().enumerate() {
                 let cascade_batches = cascade_batches(
                     &batches,
@@ -1719,20 +1752,6 @@ impl Renderer {
                 // 写 `self.stats` 而不是本地的 `stats`：后者在阴影 pass
                 // 之前就已经定格并搬进 self 了，改它不会被任何人读到。
                 self.stats.shadow_draw_calls += cascade_batches.len() as u32;
-
-                self.queue.write_buffer(
-                    &self.shadow.globals_buffer,
-                    0,
-                    bytemuck::cast_slice(&[ShadowGlobals {
-                        light_view_proj: cascade.matrix.to_cols_array_2d(),
-                        params: [
-                            settings.depth_bias,
-                            settings.normal_bias,
-                            settings.resolution.max(256) as f32,
-                            1.0,
-                        ],
-                    }]),
-                );
 
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("kengine shadow pass"),
@@ -1750,7 +1769,12 @@ impl Renderer {
                     multiview_mask: None,
                 });
 
-                pass.set_bind_group(0, &self.shadow.globals_bind_group, &[]);
+                // 动态偏移选中本级那一段。
+                pass.set_bind_group(
+                    0,
+                    &self.shadow.globals_bind_group,
+                    &[index as u32 * SHADOW_GLOBALS_STRIDE as u32],
+                );
                 pass.set_bind_group(1, &self.shadow.object_bind_group, &[]);
 
                 // 深度 pass 与贴图无关，本可以按网格合并得更狠，
@@ -2369,7 +2393,9 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Depth32Float,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     // 采样用的是整个数组的视图。
@@ -2402,7 +2428,14 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
             visibility: wgpu::ShaderStages::VERTEX,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
+                // 每级级联一段，靠动态偏移选。
+                //
+                // 不能每级各写一次同一段缓冲然后各开一个 pass——
+                // `Queue::write_buffer` 的写入是在**提交的命令之前**统一
+                // 执行的（wgpu 文档原话），所以那样写的话三个 pass
+                // 会全部读到最后一次写入的值，三级级联渲染出一模一样的
+                // 深度图。这个 bug 不报任何错，只表现为近处的阴影错位。
+                has_dynamic_offset: true,
                 min_binding_size: NonZeroU64::new(size_of::<ShadowGlobals>() as u64),
             },
             count: None,
@@ -2410,7 +2443,7 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
     });
     let globals_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("kengine shadow globals"),
-        size: size_of::<ShadowGlobals>() as u64,
+        size: SHADOW_GLOBALS_STRIDE * klight::cascade::MAX_CASCADES as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -2419,7 +2452,12 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
         layout: &globals_layout,
         entries: &[wgpu::BindGroupEntry {
             binding: 0,
-            resource: globals_buffer.as_entire_binding(),
+            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: &globals_buffer,
+                offset: 0,
+                // 绑定的是一段，不是整个缓冲——动态偏移在此基础上再加。
+                size: NonZeroU64::new(size_of::<ShadowGlobals>() as u64),
+            }),
         }],
     });
 
@@ -2550,8 +2588,14 @@ fn create_shadow_pipeline(
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
-            // 只渲染背面：让深度值落在物体背面，可显著减少自阴影条纹。
-            cull_mode: Some(wgpu::Face::Front),
+            // 两面都画。
+            //
+            // 「只画背面」是减少自阴影条纹的经典手法，但它**只对闭合网格
+            // 成立**：地形、地面平面、单面的墙都是一层三角形，正面朝着光，
+            // 剔掉正面就等于整个物体不投影——实测地形的阴影图全是清除值。
+            //
+            // 自阴影条纹改由 `depth_bias` 与 `normal_bias` 处理。
+            cull_mode: None,
             polygon_mode: wgpu::PolygonMode::Fill,
             unclipped_depth: false,
             conservative: false,
@@ -3521,5 +3565,79 @@ mod test {
         // 不满足时 wgpu 会在创建绑定组时报错。
         assert_eq!(size_of::<Globals>() % 16, 0);
         assert_eq!(size_of::<ObjectUniforms>() % 16, 0);
+    }
+
+    #[test]
+    fn shadow_globals_fit_in_their_stride() {
+        // 每级级联在缓冲里占一段，动态偏移选中其中一段。
+        // 结构体涨过 stride 的话，后一级会把前一级的数据盖掉。
+        assert!(
+            size_of::<ShadowGlobals>() as u64 <= SHADOW_GLOBALS_STRIDE,
+            "ShadowGlobals 有 {} 字节，超过了 {SHADOW_GLOBALS_STRIDE} 的步长",
+            size_of::<ShadowGlobals>()
+        );
+    }
+
+    #[test]
+    fn the_shadow_globals_stride_satisfies_the_alignment_floor() {
+        // 动态偏移必须是 `min_uniform_buffer_offset_alignment` 的倍数。
+        // WebGPU 保证这个下限不超过 256，所以按 256 对齐在哪儿都成立。
+        assert_eq!(SHADOW_GLOBALS_STRIDE % 256, 0);
+    }
+
+    #[test]
+    fn every_cascade_gets_a_distinct_offset() {
+        // 这条测试记录的是一个真实的 bug：原来的写法是每级各写一次
+        // 同一段缓冲、各开一个 pass。`Queue::write_buffer` 的写入是在
+        // **提交的命令之前**统一执行的，所以三个 pass 全读到最后一次
+        // 写入的值——三级级联渲染出逐字节相同的深度图。
+        //
+        // 不报任何错，只表现为近处的阴影错位。实测确认过：修复前
+        // 三层 `layers[0] == layers[i]` 全为真，修复后为假。
+        let offsets: Vec<u64> = (0..klight::cascade::MAX_CASCADES)
+            .map(|i| i as u64 * SHADOW_GLOBALS_STRIDE)
+            .collect();
+
+        for pair in offsets.windows(2) {
+            assert_ne!(pair[0], pair[1]);
+            assert!(
+                pair[1] - pair[0] >= size_of::<ShadowGlobals>() as u64,
+                "两级的偏移间距放不下一个 ShadowGlobals"
+            );
+        }
+        // 最后一级也要落在缓冲里。
+        let buffer_size = SHADOW_GLOBALS_STRIDE * klight::cascade::MAX_CASCADES as u64;
+        assert!(offsets.last().unwrap() + size_of::<ShadowGlobals>() as u64 <= buffer_size);
+    }
+
+    #[test]
+    fn packing_cascade_globals_lands_at_the_right_offsets() {
+        // 复现 `render` 里那段打包逻辑，验证每级的数据落在自己那一段。
+        let matrices = [
+            Mat4::IDENTITY,
+            Mat4::from_scale(Vec3::splat(2.0)),
+            Mat4::ZERO,
+        ];
+        let mut blob = vec![0u8; SHADOW_GLOBALS_STRIDE as usize * matrices.len()];
+        for (index, matrix) in matrices.iter().enumerate() {
+            let globals = ShadowGlobals {
+                light_view_proj: matrix.to_cols_array_2d(),
+                params: [index as f32, 0.0, 0.0, 1.0],
+            };
+            let start = index * SHADOW_GLOBALS_STRIDE as usize;
+            blob[start..start + size_of::<ShadowGlobals>()]
+                .copy_from_slice(bytemuck::bytes_of(&globals));
+        }
+
+        for (index, matrix) in matrices.iter().enumerate() {
+            let start = index * SHADOW_GLOBALS_STRIDE as usize;
+            let read: &ShadowGlobals =
+                bytemuck::from_bytes(&blob[start..start + size_of::<ShadowGlobals>()]);
+            assert_eq!(read.light_view_proj, matrix.to_cols_array_2d());
+            assert_eq!(
+                read.params[0], index as f32,
+                "第 {index} 级读到了别人的数据"
+            );
+        }
     }
 }

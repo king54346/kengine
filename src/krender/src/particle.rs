@@ -77,6 +77,20 @@ fn create_placeholder_depth(device: &wgpu::Device) -> wgpu::TextureView {
         .create_view(&wgpu::TextureViewDescriptor::default())
 }
 
+/// 粒子这一帧要用的相机矩阵。
+///
+/// 打包成一个结构体而不是三个参数：三个 `Mat4` 挨着传，调用方
+/// 传错顺序编译器一句话都不会说。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ParticleCamera {
+    /// 投影 × 视图。
+    pub view_proj: Mat4,
+    /// 相机的世界变换，方片靠它的右向量与上向量张开。
+    pub camera_to_world: Mat4,
+    /// 纯投影矩阵，软粒子靠它反解深度。
+    pub projection: Mat4,
+}
+
 /// 粒子 pass 所需的一组 GPU 资源。
 pub(crate) struct ParticleResources {
     alpha_pipeline: wgpu::RenderPipeline,
@@ -305,11 +319,14 @@ impl ParticleResources {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         items: &mut [ParticleItem<'_>],
-        view_proj: Mat4,
-        camera_to_world: Mat4,
-        projection: Mat4,
+        camera: ParticleCamera,
         scratch: &mut Vec<GpuParticle>,
     ) -> Vec<ParticleBatch> {
+        let ParticleCamera {
+            view_proj,
+            camera_to_world,
+            projection,
+        } = camera;
         scratch.clear();
         if items.is_empty() {
             return Vec::new();

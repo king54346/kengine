@@ -181,6 +181,54 @@ function print() {
 // 给 Rust 侧发一个信号。
 function emit(name, value) { __k.emit(name, value === undefined ? 0 : value); }
 
+// ── 模块系统 ──
+//
+// CommonJS 风格的 `require`，不是 ES 的 `import`。理由：
+//
+// - 脚本本身就是**函数体**（见 `script.rs` 的约定），ES 模块要求
+//   顶层是模块作用域，两者对不上。
+// - ES 模块的解析是**异步**的（`import` 可以在求值中途暂停去加载依赖），
+//   而脚本回调必须同步跑完——一帧里不能等 I/O。
+// - `require` 的语义只有几行就能写清楚，而且和 Node 一致，不用另学。
+//
+// 模块源码由 Rust 侧的 `ScriptRuntime::add_module` 事先塞进
+// `__moduleSources`，所以 `require` 是纯同步的查表。
+const __moduleSources = {};
+const __moduleCache = {};
+
+function require(name) {
+    if (Object.prototype.hasOwnProperty.call(__moduleCache, name)) {
+        return __moduleCache[name].exports;
+    }
+
+    const source = __moduleSources[name];
+    if (typeof source !== "string") {
+        throw new Error(
+            "找不到模块「" + name + "」。模块要先用 ScriptRuntime::add_module 注册。"
+        );
+    }
+
+    const module = { exports: {} };
+    // **先放进缓存再执行**：循环依赖时后来者拿到的是一份还没填完的
+    // exports，而不是无限递归到栈溢出。这是 CommonJS 的标准行为，
+    // 代价是循环依赖里拿到的可能是半成品——所以循环依赖仍然该避免。
+    __moduleCache[name] = module;
+
+    try {
+        // 用 `new Function` 而不是 eval：模块拿到的是自己的作用域，
+        // 顶层的 `let` 不会漏进全局去污染别的脚本。
+        const factory = new Function("module", "exports", "require", source);
+        factory(module, module.exports, require);
+    } catch (error) {
+        // 执行失败的模块要从缓存里拿掉，否则下次 require 会拿到一个
+        // 空壳，报出来的错离真正的原因十万八千里。
+        delete __moduleCache[name];
+        throw error;
+    }
+
+    return module.exports;
+}
+
 const engine = {
     get time() { return __k.time(); },
     get deltaTime() { return __k.delta(); },
@@ -188,4 +236,5 @@ const engine = {
     raycast,
     print,
     emit,
+    require,
 };

@@ -134,6 +134,93 @@ impl ScriptRuntime {
         }
     }
 
+    /// 注册一个模块，脚本里用 `require("名字")` 取。
+    ///
+    /// ```js
+    /// // 模块 "math_utils"：
+    /// exports.lerp = (a, b, t) => a + (b - a) * t;
+    ///
+    /// // 脚本里：
+    /// const utils = require("math_utils");
+    /// return { _process(dt) { self.position.y = utils.lerp(0, 5, dt); } };
+    /// ```
+    ///
+    /// # 模块是懒执行的
+    ///
+    /// 这里只存源码，第一次 `require` 时才真正跑一遍，之后走缓存。
+    /// 所以注册一个语法有错的模块**不会立刻报错**——没人 require 它就一直
+    /// 相安无事。
+    ///
+    /// # 重新注册会清掉缓存
+    ///
+    /// 热重载时用同一个名字再注册一次，下次 `require` 会拿到新版本。
+    /// 但**已经 require 过它的脚本手里还攥着旧的 exports**——那是它们
+    /// 实例化时就抓在闭包里的引用，这里够不着。要彻底换掉得连脚本一起重载。
+    ///
+    /// 返回 `false` 表示运行时内部状态异常（正常情况下不会发生）。
+    pub fn add_module(&mut self, name: &str, source: &str) -> bool {
+        // 直接操作对象属性，不是拼一段 JS 去 eval——源码里带引号或反斜杠
+        // 的话，拼字符串会拼出语法错误，甚至让模块源码逃逸成可执行代码。
+        let Ok(sources) = self
+            .context
+            .global_object()
+            .get(js_string!("__moduleSources"), &mut self.context)
+        else {
+            klog::error!("找不到 __moduleSources，前奏脚本没跑成功？");
+            return false;
+        };
+        let Some(sources) = sources.as_object() else {
+            klog::error!("__moduleSources 不是对象");
+            return false;
+        };
+
+        if sources
+            .set(
+                js_string!(name),
+                js_string!(source),
+                true,
+                &mut self.context,
+            )
+            .is_err()
+        {
+            klog::error!("模块「{name}」写入失败");
+            return false;
+        }
+
+        self.invalidate_module(name);
+        true
+    }
+
+    /// 一个模块是否已注册。
+    pub fn has_module(&mut self, name: &str) -> bool {
+        let Ok(sources) = self
+            .context
+            .global_object()
+            .get(js_string!("__moduleSources"), &mut self.context)
+        else {
+            return false;
+        };
+        sources
+            .as_object()
+            .and_then(|o| o.get(js_string!(name), &mut self.context).ok())
+            .is_some_and(|v| v.is_string())
+    }
+
+    /// 把一个模块从缓存里剔除，下次 `require` 会重新执行它。
+    fn invalidate_module(&mut self, name: &str) {
+        let Ok(cache) = self
+            .context
+            .global_object()
+            .get(js_string!("__moduleCache"), &mut self.context)
+        else {
+            return;
+        };
+        if let Some(cache) = cache.as_object() {
+            let key: boa_engine::property::PropertyKey = js_string!(name).into();
+            let _ = cache.delete_property_or_throw(key, &mut self.context);
+        }
+    }
+
     /// 上一次 tick 的统计。
     pub fn stats(&self) -> ScriptStats {
         self.stats
