@@ -13,11 +13,26 @@ fn shadow_project(light_view_proj: mat4x4<f32>, world_position: vec3<f32>) -> ve
     return vec3<f32>(uv, ndc.z);
 }
 
-// 3×3 PCF 软阴影。返回受光比例：1 表示完全受光，0 表示完全在阴影里。
-fn shadow_factor(
-    shadow_map: texture_depth_2d,
+// 按到相机的距离选级联。
+//
+// `splits` 的 x/y/z 是前三级的远距离，w 是级数。
+// 返回的层号已经夹在有效范围内——越界会采到未初始化的层，那是一片噪点。
+fn pick_cascade(view_depth: f32, splits: vec4<f32>) -> i32 {
+    let count = i32(splits.w);
+    if (view_depth < splits.x) { return 0; }
+    if (count > 1 && view_depth < splits.y) { return 1; }
+    if (count > 2 && view_depth < splits.z) { return 2; }
+    return max(count - 1, 0);
+}
+
+// 3×3 PCF 软阴影，从级联数组的某一层采样。
+//
+// 返回受光比例：1 表示完全受光，0 表示完全在阴影里。
+fn shadow_factor_cascade(
+    shadow_map: texture_depth_2d_array,
     shadow_sampler: sampler_comparison,
     light_view_proj: mat4x4<f32>,
+    layer: i32,
     world_position: vec3<f32>,
     n_dot_l: f32,
     depth_bias: f32,
@@ -43,7 +58,9 @@ fn shadow_factor(
         for (var x = -1; x <= 1; x = x + 1) {
             let offset = vec2<f32>(f32(x), f32(y)) * texel;
             // 硬件比较采样：一次返回该纹素通过深度测试的比例。
-            sum += textureSampleCompare(shadow_map, shadow_sampler, uv + offset, compare);
+            sum += textureSampleCompare(
+                shadow_map, shadow_sampler, uv + offset, layer, compare
+            );
         }
     }
 

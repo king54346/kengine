@@ -82,7 +82,10 @@ struct Globals {
     ambient: [f32; 4],
     /// x = 生效光源数，其余为对齐填充
     light_count: [u32; 4],
-    light_view_proj: [[f32; 4]; 4],
+    /// 各级级联的光空间矩阵。用不满的级填单位阵。
+    light_view_proj: [[[f32; 4]; 4]; klight::cascade::MAX_CASCADES],
+    /// x/y/z = 前三级的远距离，w = 实际级数。
+    cascade_splits: [f32; 4],
     /// x = 深度偏移，y = 法线偏移，z = 阴影贴图边长，w = 是否启用
     shadow_params: [f32; 4],
     environment: GpuEnvironment,
@@ -395,8 +398,13 @@ struct DefaultTextures {
 /// 阴影 pass 所需的一组 GPU 资源。
 struct ShadowResources {
     settings: ShadowSettings,
+    /// 级联参数。
+    cascades: klight::cascade::CascadeSettings,
     pipeline: wgpu::RenderPipeline,
+    /// 整个数组的视图，给主着色器采样。
     depth_view: wgpu::TextureView,
+    /// 每层一个视图，渲染时当深度附件。
+    layer_views: Vec<wgpu::TextureView>,
     globals_buffer: wgpu::Buffer,
     globals_bind_group: wgpu::BindGroup,
     object_layout: wgpu::BindGroupLayout,
@@ -628,7 +636,8 @@ impl Renderer {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                        // 级联：每级一层。
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
                         multisampled: false,
                     },
                     count: None,
@@ -919,15 +928,31 @@ impl Renderer {
             light_count += 1;
         }
 
-        // 光空间范围由可见物体的包围盒决定：范围越紧，阴影分辨率越高。
-        let light_view_proj = match shadow_caster {
-            Some((light, transform)) => klight::shadow::directional_light_matrix(
+        // ── 级联阴影 ──
+        // 把视锥按距离切段，每段一张阴影图。近处那段覆盖的世界范围小，
+        // 同样分辨率下纹素密度高一个数量级。
+        let cascades = match shadow_caster {
+            Some((light, transform)) => klight::cascade::compute(
+                view_proj,
                 light.direction(transform),
                 scene.visible_bounds(),
+                self.shadow.cascades,
             ),
-            None => Mat4::IDENTITY,
+            None => Vec::new(),
         };
-        let shadow_enabled = shadow_caster.is_some() && light_count > 0;
+
+        let mut light_view_proj = [Mat4::IDENTITY.to_cols_array_2d(); klight::cascade::MAX_CASCADES];
+        // 切分距离交给着色器选级联。用不满的级填一个极大值，
+        // 免得着色器选到没渲染过的层——那是一片未初始化的噪点。
+        let mut cascade_splits = [f32::MAX; 4];
+        for (index, cascade) in cascades.iter().enumerate() {
+            light_view_proj[index] = cascade.matrix.to_cols_array_2d();
+            if index < 3 {
+                cascade_splits[index] = cascade.far;
+            }
+        }
+        cascade_splits[3] = cascades.len() as f32;
+        let shadow_enabled = !cascades.is_empty() && light_count > 0;
         let settings = self.shadow.settings;
 
         self.queue.write_buffer(
@@ -938,7 +963,8 @@ impl Renderer {
                 camera_position: camera_position.extend(1.0).to_array(),
                 ambient: [0.0; 4],
                 light_count: [light_count as u32, 0, 0, 0],
-                light_view_proj: light_view_proj.to_cols_array_2d(),
+                light_view_proj,
+                cascade_splits,
                 shadow_params: [
                     settings.depth_bias,
                     settings.normal_bias,
@@ -1325,20 +1351,6 @@ impl Renderer {
                 );
             }
 
-            self.queue.write_buffer(
-                &self.shadow.globals_buffer,
-                0,
-                bytemuck::cast_slice(&[ShadowGlobals {
-                    light_view_proj: light_view_proj.to_cols_array_2d(),
-                    params: [
-                        settings.depth_bias,
-                        settings.normal_bias,
-                        settings.resolution.max(256) as f32,
-                        1.0,
-                    ],
-                }]),
-            );
-
             // 深度 pass 只要模型矩阵，实例顺序与主 pass 完全一致。
             let shadow_objects: Vec<ShadowObject> = instances
                 .iter()
@@ -1355,55 +1367,79 @@ impl Renderer {
                 );
             }
 
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("kengine shadow pass"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
+            // 每级级联跑一遍：一次 render pass 只能挂一层当深度附件。
+            //
+            // 这是级联最主要的代价——N 级就是 N 次完整的场景遍历。
+            // 远处那几级其实可以只画大物体（小物件在几百米外投的影子
+            // 不到一个像素），但那需要按尺寸分级剔除，暂时没做。
+            for (index, cascade) in cascades.iter().enumerate() {
+                self.queue.write_buffer(
+                    &self.shadow.globals_buffer,
+                    0,
+                    bytemuck::cast_slice(&[ShadowGlobals {
+                        light_view_proj: cascade.matrix.to_cols_array_2d(),
+                        params: [
+                            settings.depth_bias,
+                            settings.normal_bias,
+                            settings.resolution.max(256) as f32,
+                            1.0,
+                        ],
+                    }]),
+                );
+
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("kengine shadow pass"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.shadow.layer_views[index],
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
                     }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
 
-            pass.set_bind_group(0, &self.shadow.globals_bind_group, &[]);
-            pass.set_bind_group(1, &self.shadow.object_bind_group, &[]);
+                pass.set_bind_group(0, &self.shadow.globals_bind_group, &[]);
+                pass.set_bind_group(1, &self.shadow.object_bind_group, &[]);
 
-            // 深度 pass 与贴图无关，本可以按网格合并得更狠，
-            // 但沿用主 pass 的分批能保证两边的实例下标一一对应。
-            let mut current_skinned = None;
-            for batch in &batches {
-                let Some(gpu_mesh) = self.meshes.get(&batch.mesh_id) else {
-                    continue;
-                };
-                // 批次已按蒙皮与否排过序，管线最多切换一次。
-                if current_skinned != Some(batch.skinned) {
-                    pass.set_pipeline(if batch.skinned {
-                        &self.shadow.skinned_pipeline
-                    } else {
-                        &self.shadow.pipeline
-                    });
-                    current_skinned = Some(batch.skinned);
-                }
-
-                pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
-                if batch.skinned {
-                    let Some(skin) = gpu_mesh.skin_buffer.as_ref() else {
+                // 深度 pass 与贴图无关，本可以按网格合并得更狠，
+                // 但沿用主 pass 的分批能保证两边的实例下标一一对应。
+                let mut current_skinned = None;
+                for batch in &batches {
+                    let Some(gpu_mesh) = self.meshes.get(&batch.mesh_id) else {
                         continue;
                     };
-                    pass.set_vertex_buffer(1, skin.slice(..));
+                    // 批次已按蒙皮与否排过序，管线最多切换一次。
+                    if current_skinned != Some(batch.skinned) {
+                        pass.set_pipeline(if batch.skinned {
+                            &self.shadow.skinned_pipeline
+                        } else {
+                            &self.shadow.pipeline
+                        });
+                        current_skinned = Some(batch.skinned);
+                    }
+
+                    pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
+                    if batch.skinned {
+                        let Some(skin) = gpu_mesh.skin_buffer.as_ref() else {
+                            continue;
+                        };
+                        pass.set_vertex_buffer(1, skin.slice(..));
+                    }
+                    pass.set_index_buffer(
+                        gpu_mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(
+                        0..gpu_mesh.index_count,
+                        0,
+                        batch.first..batch.first + batch.count,
+                    );
                 }
-                pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(
-                    0..gpu_mesh.index_count,
-                    0,
-                    batch.first..batch.first + batch.count,
-                );
             }
         }
 
@@ -1881,12 +1917,15 @@ fn shadow_sampling_source() -> &'static str {
 fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> ShadowResources {
     let resolution = settings.resolution.max(256);
 
+    // 每级级联一层。分成独立的纹理数组而不是一张大图切格子：
+    // 切格子的话相邻级的纹素会在边界处互相渗色，采样到隔壁级的深度，
+    // 表现为级联交界处一圈错误的阴影。
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("kengine shadow map"),
         size: wgpu::Extent3d {
             width: resolution,
             height: resolution,
-            depth_or_array_layers: 1,
+            depth_or_array_layers: klight::cascade::MAX_CASCADES as u32,
         },
         mip_level_count: 1,
         sample_count: 1,
@@ -1895,7 +1934,23 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
-    let depth_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    // 采样用的是整个数组的视图。
+    let depth_view = texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    // 渲染时每层一个视图：一次 pass 只能挂一层当深度附件。
+    let layer_views: Vec<wgpu::TextureView> = (0..klight::cascade::MAX_CASCADES as u32)
+        .map(|layer| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("kengine shadow layer"),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: layer,
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        })
+        .collect();
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("kengine shadow shader"),
@@ -2013,7 +2068,10 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
 
     ShadowResources {
         settings,
+        cascades: klight::cascade::CascadeSettings::default(),
         pipeline,
+        depth_view,
+        layer_views,
         skinned_pipeline,
         joint_buffer,
         joint_capacity: Renderer::INITIAL_JOINTS,
@@ -2021,7 +2079,6 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
         morph_capacity: Renderer::INITIAL_MORPH,
         morph_weight_buffer,
         morph_weight_capacity: Renderer::INITIAL_CAPACITY,
-        depth_view,
         globals_buffer,
         globals_bind_group,
         object_layout,

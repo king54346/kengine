@@ -577,8 +577,50 @@ impl PostProcess {
             &self.composite_pipeline,
             &self.bind_groups[3],
             Some(bloom_bind_group),
-            output,
+            composite_target,
         );
+
+        // LDR → 屏幕，顺便抗锯齿。
+        if fxaa_on {
+            let Some(fxaa) = &self.fxaa_bind_group else {
+                return;
+            };
+            queue.write_buffer(
+                &self.fxaa_params,
+                0,
+                bytemuck::cast_slice(&[FxaaParams {
+                    texel: [
+                        1.0 / self.targets.width.max(1) as f32,
+                        1.0 / self.targets.height.max(1) as f32,
+                    ],
+                    // 两个阈值缺一不可：只有绝对阈值的话，亮部里很轻微的
+                    // 渐变也会被当成边缘去糊；只有相对阈值的话，暗部的
+                    // 噪声会被无限放大。这两个数是 FXAA 3.11 的推荐值。
+                    threshold_min: 0.0312,
+                    threshold_max: 0.125,
+                }]),
+            );
+
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("kengine fxaa"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: output,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            render_pass.set_pipeline(&self.fxaa_pipeline);
+            render_pass.set_bind_group(0, fxaa, &[]);
+            render_pass.draw(0..3, 0..1);
+        }
     }
 }
 

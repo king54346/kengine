@@ -10,8 +10,10 @@ struct Globals {
     ambient: vec4<f32>,
     // x = 生效的光源数量，其余保留
     light_count: vec4<u32>,
-    // 阴影光源的光空间矩阵
-    light_view_proj: mat4x4<f32>,
+    // 各级级联的光空间矩阵。用不满的级填单位阵。
+    light_view_proj: array<mat4x4<f32>, 4>,
+    // x/y/z = 前三级的远距离，w = 实际级数
+    cascade_splits: vec4<f32>,
     // x = 深度偏移，y = 法线偏移，z = 阴影贴图边长，w = 是否启用
     shadow_params: vec4<f32>,
     environment: Environment,
@@ -66,7 +68,7 @@ struct MorphDelta {
 // 环境 BRDF 查找表：u = n·v，v = 粗糙度。
 @group(3) @binding(0) var brdf_lut: texture_2d<f32>;
 @group(3) @binding(1) var brdf_sampler: sampler;
-@group(3) @binding(2) var shadow_map: texture_depth_2d;
+@group(3) @binding(2) var shadow_map: texture_depth_2d_array;
 @group(3) @binding(3) var shadow_sampler: sampler_comparison;
 
 struct VertexInput {
@@ -259,10 +261,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let n_dot_l = max(dot(n, sample.xyz), 0.0);
             // 沿法线推开一点再采样，比纯深度偏移更不容易漏光。
             let offset_position = in.world_position + n * globals.shadow_params.y;
-            visibility = shadow_factor(
+            // 按到相机的距离选级联。用世界空间距离而不是视空间 z：
+            // 视空间 z 在视野边缘会偏小，导致边缘用了过细的级联，
+            // 而那一级根本没覆盖到那里——表现为屏幕四角的阴影消失。
+            let view_depth = distance(in.world_position, globals.camera_position.xyz);
+            let layer = pick_cascade(view_depth, globals.cascade_splits);
+            visibility = shadow_factor_cascade(
                 shadow_map,
                 shadow_sampler,
-                globals.light_view_proj,
+                globals.light_view_proj[layer],
+                layer,
                 offset_position,
                 n_dot_l,
                 globals.shadow_params.x,
