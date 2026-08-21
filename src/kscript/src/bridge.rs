@@ -415,6 +415,239 @@ pub(crate) fn register(context: &mut Context) {
             js_string!("playSound"),
             1,
         )
+        // ── 动画 ──
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                // 先把字符串取干净再借场景：转字符串可能触发用户的
+                // toString()，那会回调进 JS，此时若还持着借用就是重入。
+                let handle = node_arg(args, 0, context)?;
+                let name = match args.get(1) {
+                    Some(value) => value.to_string(context)?.to_std_string_lossy(),
+                    None => String::new(),
+                };
+                let Some(handle) = handle else {
+                    return Ok(JsValue::from(false));
+                };
+                let played = with_scene(|scene| {
+                    scene
+                        .try_get_mut(handle)
+                        .and_then(kscene::Node::animator_mut)
+                        .and_then(|player| player.animator_mut().play_by_name(&name))
+                        .is_some()
+                })
+                .unwrap_or(false);
+                Ok(JsValue::from(played))
+            }),
+            js_string!("playAnimation"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let playing = args.get(1).map(JsValue::to_boolean).unwrap_or(false);
+                if let Some(handle) = handle {
+                    with_scene(|scene| {
+                        if let Some(player) =
+                            scene.try_get_mut(handle).and_then(kscene::Node::animator_mut)
+                        {
+                            player.animator_mut().set_playing(playing);
+                        }
+                    });
+                }
+                Ok(JsValue::undefined())
+            }),
+            js_string!("setAnimationPlaying"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let speed = number(args, 1, context)? as f32;
+                if let Some(handle) = handle {
+                    with_scene(|scene| {
+                        if let Some(player) =
+                            scene.try_get_mut(handle).and_then(kscene::Node::animator_mut)
+                        {
+                            player.animator_mut().set_speed(speed);
+                        }
+                    });
+                }
+                Ok(JsValue::undefined())
+            }),
+            js_string!("setAnimationSpeed"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let Some(handle) = handle else {
+                    return Ok(JsValue::from(false));
+                };
+                let playing = with_scene(|scene| {
+                    scene
+                        .try_get(handle)
+                        .and_then(kscene::Node::animator)
+                        .is_some_and(|player| player.animator().is_playing())
+                })
+                .unwrap_or(false);
+                Ok(JsValue::from(playing))
+            }),
+            js_string!("isAnimationPlaying"),
+            1,
+        )
+        // ── 粒子 ──
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let playing = args.get(1).map(JsValue::to_boolean).unwrap_or(false);
+                if let Some(handle) = handle {
+                    with_scene(|scene| {
+                        if let Some(system) = scene
+                            .try_get_mut(handle)
+                            .and_then(kscene::Node::particles_mut)
+                        {
+                            system.playing = playing;
+                        }
+                    });
+                }
+                Ok(JsValue::undefined())
+            }),
+            js_string!("setParticlesPlaying"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let rate = number(args, 1, context)? as f32;
+                if let Some(handle) = handle {
+                    with_scene(|scene| {
+                        if let Some(system) = scene
+                            .try_get_mut(handle)
+                            .and_then(kscene::Node::particles_mut)
+                        {
+                            system.emitter.rate = rate.max(0.0);
+                        }
+                    });
+                }
+                Ok(JsValue::undefined())
+            }),
+            js_string!("setEmissionRate"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let count = number(args, 1, context)?.max(0.0) as u32;
+                if let Some(handle) = handle {
+                    with_scene(|scene| {
+                        // 喷发发生在世界空间，所以要先拿到世界变换。
+                        // 借用是嵌套的：先算矩阵，再改粒子。
+                        let world = scene.world_matrix(handle);
+                        if let Some(system) = scene
+                            .try_get_mut(handle)
+                            .and_then(kscene::Node::particles_mut)
+                        {
+                            system.burst(count, world);
+                        }
+                    });
+                }
+                Ok(JsValue::undefined())
+            }),
+            js_string!("burstParticles"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let Some(handle) = handle else {
+                    return Ok(JsValue::from(0.0));
+                };
+                let count = with_scene(|scene| {
+                    scene
+                        .try_get(handle)
+                        .and_then(kscene::Node::particles)
+                        .map_or(0.0, |system| system.alive() as f64)
+                })
+                .unwrap_or(0.0);
+                Ok(JsValue::from(count))
+            }),
+            js_string!("particleCount"),
+            1,
+        )
+        // ── 音频 ──
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                if let Some(handle) = handle {
+                    with_scene(|scene| {
+                        if let Some(sound) =
+                            scene.try_get_mut(handle).and_then(kscene::Node::sound_mut)
+                        {
+                            sound.stop();
+                        }
+                    });
+                }
+                Ok(JsValue::undefined())
+            }),
+            js_string!("stopSound"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let gain = number(args, 1, context)? as f32;
+                if let Some(handle) = handle {
+                    with_scene(|scene| {
+                        if let Some(sound) =
+                            scene.try_get_mut(handle).and_then(kscene::Node::sound_mut)
+                        {
+                            sound.gain = gain.max(0.0);
+                        }
+                    });
+                }
+                Ok(JsValue::undefined())
+            }),
+            js_string!("setSoundGain"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let pitch = number(args, 1, context)? as f32;
+                if let Some(handle) = handle {
+                    with_scene(|scene| {
+                        if let Some(sound) =
+                            scene.try_get_mut(handle).and_then(kscene::Node::sound_mut)
+                        {
+                            // 音高为 0 会让播放头永远不前进：声音既不响
+                            // 也不结束，那个声源就永远占着混音器的一路。
+                            sound.pitch = pitch.max(0.01);
+                        }
+                    });
+                }
+                Ok(JsValue::undefined())
+            }),
+            js_string!("setSoundPitch"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let handle = node_arg(args, 0, context)?;
+                let looping = args.get(1).map(JsValue::to_boolean).unwrap_or(false);
+                if let Some(handle) = handle {
+                    with_scene(|scene| {
+                        if let Some(sound) =
+                            scene.try_get_mut(handle).and_then(kscene::Node::sound_mut)
+                        {
+                            sound.looping = looping;
+                        }
+                    });
+                }
+                Ok(JsValue::undefined())
+            }),
+            js_string!("setSoundLooping"),
+            2,
+        )
         .function(
             NativeFunction::from_fn_ptr(|_, args, context| {
                 let handle = node_arg(args, 0, context)?;

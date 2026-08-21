@@ -41,6 +41,8 @@ mod runtime;
 mod script;
 
 #[cfg(test)]
+mod api_tests;
+#[cfg(test)]
 mod module_tests;
 #[cfg(test)]
 mod state_tests;

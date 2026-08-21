@@ -12,3 +12,6 @@ kscene = { path = "../kscene" }
 kphysics = { path = "../kphysics" }
 fxhash = "0.2.1"
 boa_engine = "0.21"
+
+[dev-dependencies]
+kparticle = { path = "../kparticle" }

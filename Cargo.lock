@@ -2023,6 +2023,7 @@ dependencies = [
  "kcore",
  "klog",
  "kmath",
+ "kparticle",
  "kphysics",
  "kscene",
 ]

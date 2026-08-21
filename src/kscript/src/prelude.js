@@ -126,7 +126,29 @@ class Node {
     applyImpulse(v) { __k.applyImpulse(this._id, v.x, v.y, v.z); return this; }
     setLinearVelocity(v) { __k.setLinvel(this._id, v.x, v.y, v.z); return this; }
 
+    // ── 动画 ──
+    //
+    // 名字取剪辑名，和 glTF 里导出的一致。找不到时返回 false 而不是抛异常，
+    // 美术改个剪辑名不该让整个脚本停掉。
+    playAnimation(name) { return __k.playAnimation(this._id, String(name)); }
+    stopAnimation() { __k.setAnimationPlaying(this._id, false); return this; }
+    resumeAnimation() { __k.setAnimationPlaying(this._id, true); return this; }
+    get animationPlaying() { return __k.isAnimationPlaying(this._id); }
+    set animationSpeed(v) { __k.setAnimationSpeed(this._id, v); }
+
+    // ── 粒子 ──
+    startParticles() { __k.setParticlesPlaying(this._id, true); return this; }
+    stopParticles() { __k.setParticlesPlaying(this._id, false); return this; }
+    set emissionRate(v) { __k.setEmissionRate(this._id, v); }
+    burst(count) { __k.burstParticles(this._id, count === undefined ? 1 : count); return this; }
+    get particleCount() { return __k.particleCount(this._id); }
+
+    // ── 音频 ──
     playSound() { __k.playSound(this._id); return this; }
+    stopSound() { __k.stopSound(this._id); return this; }
+    set volume(v) { __k.setSoundGain(this._id, v); }
+    set pitch(v) { __k.setSoundPitch(this._id, v); }
+    set soundLooping(v) { __k.setSoundLooping(this._id, !!v); }
 
     // 名字取自 GDScript 的 `queue_free()`：删除在本次操作里立即生效。
     queueFree() { __k.queueFree(this._id); }
