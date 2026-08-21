@@ -18,6 +18,7 @@
 #![warn(missing_docs)]
 
 pub mod attenuation;
+pub mod cascade;
 pub mod shadow;
 
 use bytemuck::{Pod, Zeroable};
