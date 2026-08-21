@@ -123,6 +123,16 @@ fn skinned_transform(node: &Node) -> Mat4 {
 /// 一个场景。
 ///
 /// 场景创建时自带一个名为 `__root` 的根节点，[`Scene::add_node`] 默认挂在它下面。
+/// 一个反射探针和它的预滤波数据。
+#[derive(Debug, Clone)]
+pub struct ReflectionProbeEntry {
+    /// 探针参数（位置、视差盒、强度）。
+    pub probe: kpbr::probe::ReflectionProbe,
+    /// 预滤波的 mip 链。用 `Arc` 是因为渲染器按版本号决定重传，
+    /// 中间可能持有它一帧。
+    pub levels: std::sync::Arc<Vec<kpbr::prefilter::PrefilteredLevel>>,
+}
+
 pub struct Scene {
     nodes: Pool<Node>,
     root: Handle<Node>,
@@ -141,6 +151,10 @@ pub struct Scene {
     sprites: Vec<ksprite::SpriteInstance>,
     /// 预滤波的 HDR 环境图 mip 链。渲染器靠它做镜面 IBL。
     prefiltered_environment: Option<std::sync::Arc<Vec<kpbr::prefilter::PrefilteredLevel>>>,
+    /// 反射探针。和全局环境拼在同一张 GPU 纹理数组里。
+    reflection_probes: Vec<ReflectionProbeEntry>,
+    /// 全局环境用的预滤波设置。探针必须沿用它——纹理数组要求每层等大。
+    probe_settings: kpbr::prefilter::PrefilterSettings,
     /// 环境图的版本号。渲染器靠它判断要不要重传。
     ///
     /// 一条 256×128 的 mip 链是几兆的浮点数据，每帧重传纯属浪费；
@@ -1788,6 +1802,159 @@ impl Index<Handle<Node>> for Scene {
 impl IndexMut<Handle<Node>> for Scene {
     fn index_mut(&mut self, handle: Handle<Node>) -> &mut Self::Output {
         &mut self.nodes[handle]
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    use kmath::Vec3;
+    use kpbr::probe::ReflectionProbe;
+
+    /// 一张 8×4 的程序化 HDR。
+    fn tiny_hdr() -> kpbr::hdr::HdrImage {
+        let (w, h) = (8usize, 4usize);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"#?RADIANCE
+FORMAT=32-bit_rle_rgbe
+
+");
+        bytes.extend_from_slice(format!("-Y {h} +X {w}
+").as_bytes());
+        for _ in 0..w * h {
+            bytes.extend_from_slice(&[128u8, 128, 128, 129]);
+        }
+        kpbr::hdr::HdrImage::decode(&bytes).expect("该能解码")
+    }
+
+    fn settings() -> kpbr::prefilter::PrefilterSettings {
+        kpbr::prefilter::PrefilterSettings {
+            base_width: 16,
+            levels: 2,
+            samples: 4,
+        }
+    }
+
+    fn scene_with_environment() -> Scene {
+        let mut scene = Scene::new();
+        scene.set_environment_hdr(&tiny_hdr(), settings());
+        scene
+    }
+
+    #[test]
+    fn a_probe_needs_a_global_environment_first() {
+        // 探针和全局环境拼在同一张纹理数组里，全局环境定下了规格。
+        let mut scene = Scene::new();
+        assert_eq!(
+            scene.add_reflection_probe(ReflectionProbe::default(), &tiny_hdr()),
+            None
+        );
+
+        scene.set_environment_hdr(&tiny_hdr(), settings());
+        assert_eq!(
+            scene.add_reflection_probe(ReflectionProbe::default(), &tiny_hdr()),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn probes_share_the_global_prefilter_settings() {
+        // 纹理数组要求每层完全等大。探针自己挑分辨率的话，
+        // 上传时会拼出一张错位的纹理，反射变成花屏。
+        let mut scene = scene_with_environment();
+        scene.add_reflection_probe(ReflectionProbe::default(), &tiny_hdr());
+
+        let global = scene.prefiltered_environment().unwrap();
+        let probe = &scene.reflection_probes()[0].levels;
+        assert_eq!(probe.len(), global.len());
+        for (a, b) in probe.iter().zip(global) {
+            assert_eq!((a.width, a.height), (b.width, b.height));
+        }
+    }
+
+    #[test]
+    fn adding_a_probe_bumps_the_version() {
+        // 渲染器靠版本号决定重传纹理数组。不递增的话新探针传不上去。
+        let mut scene = scene_with_environment();
+        let before = scene.environment_version();
+        scene.add_reflection_probe(ReflectionProbe::default(), &tiny_hdr());
+        assert!(scene.environment_version() > before);
+    }
+
+    #[test]
+    fn changing_the_environment_drops_existing_probes() {
+        // 换了全局环境，旧探针的分辨率可能对不上。留着的话上传时
+        // 会拼出一张错位的纹理数组。
+        let mut scene = scene_with_environment();
+        scene.add_reflection_probe(ReflectionProbe::default(), &tiny_hdr());
+        assert_eq!(scene.reflection_probes().len(), 1);
+
+        scene.set_environment_hdr(&tiny_hdr(), settings());
+        assert!(scene.reflection_probes().is_empty());
+    }
+
+    #[test]
+    fn probe_lookup_finds_the_covering_probe() {
+        let mut scene = scene_with_environment();
+        scene.add_reflection_probe(
+            ReflectionProbe::new(Vec3::new(50.0, 0.0, 0.0), Vec3::splat(4.0)),
+            &tiny_hdr(),
+        );
+        scene.add_reflection_probe(
+            ReflectionProbe::new(Vec3::ZERO, Vec3::splat(4.0)),
+            &tiny_hdr(),
+        );
+
+        assert_eq!(scene.probe_at(Vec3::ZERO), Some(1));
+        assert_eq!(scene.probe_at(Vec3::new(50.0, 0.0, 0.0)), Some(0));
+        // 没探针管的地方退回全局环境。
+        assert_eq!(scene.probe_at(Vec3::new(0.0, 500.0, 0.0)), None);
+    }
+
+    #[test]
+    fn moving_a_probe_does_not_reprefilter() {
+        // 挪一下探针位置该是廉价的；重新预滤波和加载一张 HDR 一个量级。
+        let mut scene = scene_with_environment();
+        scene.add_reflection_probe(ReflectionProbe::default(), &tiny_hdr());
+        let pixels_before = scene.reflection_probes()[0].levels.clone();
+
+        scene.reflection_probe_mut(0).unwrap().position = Vec3::new(9.0, 0.0, 0.0);
+
+        assert_eq!(
+            scene.reflection_probes()[0].levels[0].pixels,
+            pixels_before[0].pixels
+        );
+        assert_eq!(
+            scene.reflection_probes()[0].probe.position,
+            Vec3::new(9.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn clearing_probes_bumps_the_version_only_when_something_changed() {
+        let mut scene = scene_with_environment();
+        let empty = scene.environment_version();
+        scene.clear_reflection_probes();
+        assert_eq!(scene.environment_version(), empty, "本来就是空的，不该递增");
+
+        scene.add_reflection_probe(ReflectionProbe::default(), &tiny_hdr());
+        let with_probe = scene.environment_version();
+        scene.clear_reflection_probes();
+        assert!(scene.environment_version() > with_probe);
+        assert!(scene.reflection_probes().is_empty());
+    }
+
+    #[test]
+    fn probe_indices_are_stable_and_sequential() {
+        // 下标就是纹理数组的层号减一。不连续的话物体会采到别的探针。
+        let mut scene = scene_with_environment();
+        for expected in 0..3 {
+            assert_eq!(
+                scene.add_reflection_probe(ReflectionProbe::default(), &tiny_hdr()),
+                Some(expected)
+            );
+        }
+        assert_eq!(scene.reflection_probes().len(), 3);
     }
 }
 

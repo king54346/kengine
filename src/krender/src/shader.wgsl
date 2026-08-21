@@ -39,6 +39,16 @@ struct ObjectUniforms {
     skin: vec4<u32>,
     // 纹理坐标变换：xy = 缩放，zw = 偏移。图集里取一格子图就靠它。
     uv_transform: vec4<f32>,
+    // 反射探针：xyz = 采集点，w = 纹理数组的层号。
+    //
+    // w = 0 表示这个对象没有探针，用第 0 层（全局环境）且不做视差。
+    // 探针是**逐对象**选的，所以一个横跨两个房间的大物体只能用一个
+    // 探针——这是前向渲染的常规取舍，办法是把大物体拆开。
+    probe_position: vec4<f32>,
+    // xyz = 视差盒最小角，w = 是否做视差校正（>0.5 为是）
+    probe_min: vec4<f32>,
+    // xyz = 视差盒最大角，w = 强度
+    probe_max: vec4<f32>,
 };
 
 // 一个顶点在某个形变目标下的增量。两个 vec3 各自补齐到 16 字节。
@@ -75,7 +85,7 @@ struct MorphDelta {
 // 预滤波的 HDR 环境图（等距柱状投影，带 mip 链）。
 // 没有 HDR 时这里绑的是一张 1×1 的占位图，靠 shadow_params 之外的
 // 标志位跳过采样——绑空的绑定组在 wgpu 里是非法的。
-@group(3) @binding(4) var prefiltered_env: texture_2d<f32>;
+@group(3) @binding(4) var prefiltered_env: texture_2d_array<f32>;
 @group(3) @binding(5) var prefiltered_sampler: sampler;
 
 struct VertexInput {
@@ -304,17 +314,31 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // 有 HDR 就走预滤波的 mip 链，否则退回程序化天空的近似。
     // 保留退路是必要的：不是每个场景都会配 HDR，而没有镜面反射的
     // 金属会变成纯黑。
-    let reflection = reflect(-v, n);
+    var reflection = reflect(-v, n);
     if (globals.ibl_params.x > 0.5) {
+        // 视差校正：把反射射线和探针盒求交，用「从采集点看向交点」
+        // 的方向去采样。不做的话环境被当成无穷远，室内的金属球
+        // 会反射出天空而不是墙。
+        if (object.probe_min.w > 0.5) {
+            reflection = parallax_correct(
+                in.world_position,
+                reflection,
+                object.probe_min.xyz,
+                object.probe_max.xyz,
+                object.probe_position.xyz,
+            );
+        }
         color += ibl_specular_prefiltered(
             prefiltered_env,
             prefiltered_sampler,
+            // w = 0 时用第 0 层，也就是全局环境。
+            object.probe_position.w,
             globals.ibl_params.x,
             reflection,
             roughness,
             f0,
             brdf,
-            globals.environment.sun_color.a,
+            globals.environment.sun_color.a * object.probe_max.w,
         ) * occlusion;
     } else {
         color += ibl_specular(globals.environment, reflection, roughness, f0, brdf) * occlusion;

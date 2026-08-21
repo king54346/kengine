@@ -146,6 +146,14 @@ struct ObjectUniforms {
     /// 精灵图集靠它从一张大图里取出一格：整张图的 UV 是 0..1，
     /// 缩放到格子大小、再偏移到格子位置，就等于「只采样这一格」。
     uv_transform: [f32; 4],
+    /// xyz = 反射探针的采集点，w = 预滤波纹理数组的层号。
+    ///
+    /// w = 0 表示这个对象没有探针管，用第 0 层（全局环境）。
+    probe_position: [f32; 4],
+    /// xyz = 视差盒最小角，w = 是否做视差校正（>0.5 为是）。
+    probe_min: [f32; 4],
+    /// xyz = 视差盒最大角，w = 反射强度。
+    probe_max: [f32; 4],
 }
 
 /// 从材质里取出纹理坐标变换：`[缩放x, 缩放y, 偏移x, 偏移y]`。
@@ -727,7 +735,8 @@ impl Renderer {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                        // 数组维度：第 0 层是全局环境，之后每个反射探针一层。
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
                         multisampled: false,
                     },
                     count: None,
@@ -824,7 +833,8 @@ impl Renderer {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                        // 数组维度：第 0 层全局环境，之后每个反射探针一层。
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
                         multisampled: false,
                     },
                     count: None,
@@ -1073,8 +1083,13 @@ impl Renderer {
         // 每帧重传纯属浪费，而它只在换环境图时才变。
         if scene.environment_version() != self.environment_version {
             self.environment_version = scene.environment_version();
+            let probe_levels: Vec<&[kpbr::prefilter::PrefilteredLevel]> = scene
+                .reflection_probes()
+                .iter()
+                .map(|entry| entry.levels.as_slice())
+                .collect();
             let uploaded = scene.prefiltered_environment().and_then(|levels| {
-                upload_prefiltered_environment(&self.device, &self.queue, levels)
+                upload_prefiltered_environment(&self.device, &self.queue, levels, &probe_levels)
                     .map(|view| (view, levels.len()))
             });
 
@@ -1173,6 +1188,13 @@ impl Renderer {
         // 标准材质建一次就够：它内部是带 String 键的哈希表，
         // 放在循环里等于每个对象都重新分配一遍。
         let default_material = Material::standard();
+        // 探针参数拿出来一份：`select` 要一个连续切片，而场景里
+        // 存的是带像素的条目。
+        let probe_params: Vec<kpbr::probe::ReflectionProbe> = scene
+            .reflection_probes()
+            .iter()
+            .map(|entry| entry.probe)
+            .collect();
         let mut draws = Vec::with_capacity(visible.len());
         // 半透明的单独收：它们要按距离排序，混不进不透明的批次里。
         let mut transparent_draws: Vec<DrawCall> = Vec::new();
@@ -1247,6 +1269,31 @@ impl Renderer {
                 None => None,
             };
 
+            // 逐对象选探针，用包围盒中心。横跨两个房间的大物体只能
+            // 用一个探针——前向渲染的常规取舍，办法是把大物体拆开。
+            let (probe_position, probe_min, probe_max) =
+                match kpbr::probe::select(&probe_params, item.aabb.center()) {
+                    Some(index) => {
+                        let probe = &probe_params[index];
+                        (
+                            // 层号 +1：第 0 层是全局环境。
+                            probe.position.extend((index + 1) as f32).to_array(),
+                            probe
+                                .bounds
+                                .min
+                                .extend(if probe.parallax { 1.0 } else { 0.0 })
+                                .to_array(),
+                            probe.bounds.max.extend(probe.intensity).to_array(),
+                        )
+                    }
+                    // 没探针管它：层号 0（全局环境）、不做视差、强度 1。
+                    None => (
+                        [0.0; 4],
+                        [0.0, 0.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.0, 1.0],
+                    ),
+                };
+
             let model = item.transform;
             // 用包围盒中心而不是变换的平移：蒙皮网格的变换是单位阵，
             // 拿平移排序的话所有角色都会被当成在原点。
@@ -1286,8 +1333,20 @@ impl Renderer {
                         .to_array(),
                     skin: [skin_offset.unwrap_or(0), morph.0, morph.1, weight_offset],
                     uv_transform: uv_transform_of(material),
+                    probe_position,
+                    probe_min,
+                    probe_max,
                 },
             });
+        }
+
+        if !probe_params.is_empty() {
+            let mut counts = [0usize; 8];
+            for d in draws.iter().chain(transparent_draws.iter()) {
+                let layer = d.uniforms.probe_position[3] as usize;
+                counts[layer.min(7)] += 1;
+            }
+            klog::info!("[验证] 逐对象层号分布 {:?}（下标即层号，0 = 全局环境）", &counts[..4]);
         }
 
         // ── 批处理：同网格同贴图的对象合并成一次绘制 ──
@@ -2604,7 +2663,12 @@ fn create_placeholder_environment(device: &wgpu::Device) -> wgpu::TextureView {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         })
-        .create_view(&wgpu::TextureViewDescriptor::default())
+        .create_view(&wgpu::TextureViewDescriptor {
+            // 着色器声明的是 texture_2d_array，默认视图会推断成 D2，
+            // 绑定时会被拒绝。
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        })
 }
 
 /// 把预滤波的 mip 链传上显存。
@@ -2616,14 +2680,21 @@ fn upload_prefiltered_environment(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     levels: &[kpbr::prefilter::PrefilteredLevel],
+    probes: &[&[kpbr::prefilter::PrefilteredLevel]],
 ) -> Option<wgpu::TextureView> {
     let base = levels.first()?;
+    // 第 0 层是全局环境，之后每个反射探针一层。
+    //
+    // 纹理数组要求**每层完全等大**——分辨率和 mip 级数都得一致。
+    // 这就是为什么 `Scene::add_reflection_probe` 强制沿用全局环境的
+    // 预滤波设置：这里没法给某一层单独换尺寸。
+    let layers = 1 + probes.len();
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("kengine prefiltered environment"),
         size: wgpu::Extent3d {
             width: base.width as u32,
             height: base.height as u32,
-            depth_or_array_layers: 1,
+            depth_or_array_layers: layers as u32,
         },
         mip_level_count: levels.len() as u32,
         sample_count: 1,
@@ -2635,37 +2706,67 @@ fn upload_prefiltered_environment(
         view_formats: &[],
     });
 
-    for (index, level) in levels.iter().enumerate() {
-        // CPU 侧是紧凑的 RGB，GPU 要 RGBA 半精度。
-        let mut texels: Vec<u8> = Vec::with_capacity(level.width * level.height * 8);
-        for pixel in level.pixels.chunks_exact(3) {
-            for channel in [pixel[0], pixel[1], pixel[2], 1.0] {
-                texels.extend_from_slice(&half_from_f32(channel).to_le_bytes());
+    // 每层的 mip 链依次写入。层号 0 是全局环境。
+    for (layer, source) in std::iter::once(levels).chain(probes.iter().copied()).enumerate() {
+        for (index, level) in source.iter().enumerate() {
+            // 尺寸对不上的层直接跳过：写进去会被 wgpu 拒绝，
+            // 而留一层没写的话那个探针会采样出未初始化的内存。
+            // 跳过至少让它退化成黑色，而不是花屏。
+            let expected_width = (base.width >> index).max(1);
+            let expected_height = (base.height >> index).max(1);
+            if index >= levels.len()
+                || level.width != expected_width
+                || level.height != expected_height
+            {
+                klog::warn!(
+                    "反射探针第 {layer} 层的 mip {index} 尺寸是 {}×{}，                     期望 {expected_width}×{expected_height}——跳过",
+                    level.width,
+                    level.height
+                );
+                continue;
             }
-        }
 
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: index as u32,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &texels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(level.width as u32 * 8),
-                rows_per_image: Some(level.height as u32),
-            },
-            wgpu::Extent3d {
-                width: level.width as u32,
-                height: level.height as u32,
-                depth_or_array_layers: 1,
-            },
-        );
+            // CPU 侧是紧凑的 RGB，GPU 要 RGBA 半精度。
+            let mut texels: Vec<u8> = Vec::with_capacity(level.width * level.height * 8);
+            for pixel in level.pixels.chunks_exact(3) {
+                for channel in [pixel[0], pixel[1], pixel[2], 1.0] {
+                    texels.extend_from_slice(&half_from_f32(channel).to_le_bytes());
+                }
+            }
+
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: index as u32,
+                    // z 是数组层号，不是深度——2D 数组纹理就是这么寻址的。
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: layer as u32,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &texels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(level.width as u32 * 8),
+                    rows_per_image: Some(level.height as u32),
+                },
+                wgpu::Extent3d {
+                    width: level.width as u32,
+                    height: level.height as u32,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
     }
 
-    Some(texture.create_view(&wgpu::TextureViewDescriptor::default()))
+    Some(texture.create_view(&wgpu::TextureViewDescriptor {
+        // 必须显式指定 D2Array：默认视图对只有一层的纹理会推断成 D2，
+        // 而着色器声明的是 texture_2d_array，绑定时会被拒绝。
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    }))
 }
 
 /// `f32` 转 IEEE754 半精度。
@@ -2841,9 +2942,10 @@ mod test {
         );
         assert_eq!(size_of::<Globals>() % 16, 0);
         // ObjectUniforms：mat4x4(64) × 2 + base_color(16) + f32 × 4 + emissive(16)
-        //                 + 骨骼偏移(16) + UV 变换(16) = 208。
+        //                 + 骨骼偏移(16) + UV 变换(16)
+        //                 + 探针 vec4 × 3(48) = 256。
         // 四个 f32 恰好凑满 16 字节，emissive 才能落在 vec4 要求的对齐边界上。
-        assert_eq!(size_of::<ObjectUniforms>(), 208);
+        assert_eq!(size_of::<ObjectUniforms>(), 64 * 2 + 16 * 3 + 16 * 2 + 16 * 3);
         assert_eq!(size_of::<ObjectUniforms>() % 16, 0);
     }
 

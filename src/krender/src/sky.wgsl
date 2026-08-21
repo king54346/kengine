@@ -11,7 +11,7 @@ struct SkyGlobals {
 
 @group(0) @binding(0) var<uniform> sky_globals: SkyGlobals;
 // 和主 pass 共用同一张预滤波环境图。背景取第 0 级（最清晰的那级）。
-@group(0) @binding(1) var sky_environment: texture_2d<f32>;
+@group(0) @binding(1) var sky_environment: texture_2d_array<f32>;
 @group(0) @binding(2) var sky_environment_sampler: sampler;
 
 struct SkyOutput {
@@ -50,7 +50,9 @@ fn sky_fs(in: SkyOutput) -> @location(0) vec4<f32> {
         // 背景要最清晰的那级。用 `textureSampleLevel` 显式取第 0 级：
         // 让硬件自己挑的话，屏幕边缘的高变化率会挑到模糊的 mip，
         // 天空会糊掉一圈。
-        color = textureSampleLevel(sky_environment, sky_environment_sampler, uv, 0.0).rgb
+        // 背景永远用第 0 层（全局环境）。反射探针是给物体表面用的，
+        // 天空本身没有「站在哪儿看」的问题。
+        color = textureSampleLevel(sky_environment, sky_environment_sampler, uv, 0, 0.0).rgb
             * sky_globals.environment.sun_color.a;
     } else {
         color = ibl_sky(sky_globals.environment, direction);

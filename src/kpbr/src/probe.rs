@@ -115,8 +115,21 @@ impl ReflectionProbe {
 
 /// 射线从盒子内部射出时，到边界的距离。
 ///
-/// 用 slab 法：每个轴算出进出的 t，出射距离是三个轴的**出射 t 的最小值**。
-/// 返回 [`None`] 表示射线和盒子没有正的交点。
+/// 标准 slab 法：每个轴算出与两个面的 t，取较大的那个（出射面），
+/// 三个轴的出射 t 取**最小值**。取最大的话射线会「穿过」最近的那面墙，
+/// 反射落在盒子外面。
+///
+/// 返回 [`None`] 表示没有正的出射距离。
+///
+/// # 和着色器保持一致
+///
+/// `ibl.wgsl` 里的 `parallax_correct` 用的是同一套公式。那边靠
+/// 「除以零得 inf、inf 参与 min 会被忽略」隐式跳过零方向的轴，
+/// 这边显式跳过——结果相同，但 Rust 里显式写出来更清楚。
+///
+/// 注意这个公式对**盒外**的原点算出的是出射点，不是入射点。
+/// 探针只会在物体中心落在盒内时被选中，所以正常路径上原点总在盒内；
+/// 大物体的边缘片元可能落在盒外，那时校正会退化，但不会产生乱数。
 fn exit_distance(origin: Vec3, direction: Vec3, bounds: Aabb) -> Option<f32> {
     let mut nearest = f32::INFINITY;
 
@@ -127,16 +140,13 @@ fn exit_distance(origin: Vec3, direction: Vec3, bounds: Aabb) -> Option<f32> {
         if d.abs() < 1e-6 {
             continue;
         }
-        let (min, max) = (bounds.min[axis], bounds.max[axis]);
-        // 往正方向走就撞 max 面，反之撞 min 面。
-        let target = if d > 0.0 { max } else { min };
-        let t = (target - origin[axis]) / d;
-        if t > 0.0 {
-            nearest = nearest.min(t);
-        }
+        let inverse = 1.0 / d;
+        let to_min = (bounds.min[axis] - origin[axis]) * inverse;
+        let to_max = (bounds.max[axis] - origin[axis]) * inverse;
+        nearest = nearest.min(to_min.max(to_max));
     }
 
-    nearest.is_finite().then_some(nearest)
+    (nearest.is_finite() && nearest > 0.0).then_some(nearest)
 }
 
 /// 从一堆探针里挑出管 `point` 的那个，返回它在切片中的下标。
@@ -272,6 +282,19 @@ mod tests {
         // 从 (4,0,0) 朝 +x，距离 1——不是 y 或 z 轴的 5。
         let d = exit_distance(Vec3::new(4.0, 0.0, 0.0), Vec3::X, bounds).unwrap();
         assert!((d - 1.0).abs() < 1e-5, "实测 {d}");
+    }
+
+    #[test]
+    fn exit_distance_from_outside_is_rejected_or_positive() {
+        // 盒外的原点算出的是出射点而不是入射点。探针只在物体中心
+        // 落在盒内时才被选中，所以这是边缘情况——要求它不产生
+        // 负数或 NaN 就够了，不要求「正确」。
+        let bounds = Aabb::new(Vec3::splat(-5.0), Vec3::splat(5.0));
+        // 从盒子外面朝远离盒子的方向：没有正的出射距离。
+        assert!(exit_distance(Vec3::new(50.0, 0.0, 0.0), Vec3::X, bounds).is_none());
+        // 朝着盒子：有正的出射距离。
+        let d = exit_distance(Vec3::new(50.0, 0.0, 0.0), -Vec3::X, bounds).unwrap();
+        assert!(d > 0.0 && d.is_finite());
     }
 
     #[test]

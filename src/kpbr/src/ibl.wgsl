@@ -106,9 +106,51 @@ fn equirect_uv(direction: vec3<f32>) -> vec2<f32> {
 // mip 级由粗糙度线性选出。**必须用 `textureSampleLevel` 而不是
 // `textureSample`**：后者按屏幕导数自己挑 mip，那算的是纹理在屏幕上的
 // 缩放，和粗糙度毫无关系——粗糙的表面会得到清晰的镜像。
+// 视差校正。和 CPU 侧的 `ReflectionProbe::correct` 必须算出同样的结果。
+//
+// slab 法求射线从盒内射出的距离：每个轴算出撞哪面墙的 t，取最小的那个。
+// 取最大的话射线会「穿过」最近的墙，反射落在盒子外面。
+fn parallax_correct(
+    position: vec3<f32>,
+    reflection: vec3<f32>,
+    bounds_min: vec3<f32>,
+    bounds_max: vec3<f32>,
+    capture_position: vec3<f32>,
+) -> vec3<f32> {
+    // 往正方向走撞 max 面，反之撞 min 面。
+    //
+    // 某个轴的方向为零时这里会得到 ±inf，而 inf 参与 min 会被
+    // 自动忽略（另外两轴的有限值更小）——正好是想要的行为，
+    // 所以不用像 CPU 那边一样显式跳过。但三个轴同时为零时
+    // 三个 t 都是 inf，下面的 `hit` 会变成 NaN，所以还要兜一次底。
+    let inverse = 1.0 / reflection;
+    let to_max = (bounds_max - position) * inverse;
+    let to_min = (bounds_min - position) * inverse;
+    // 每个轴取正的那个 t（另一个是负的，指向背后那面墙）。
+    let furthest = max(to_max, to_min);
+    let distance = min(min(furthest.x, furthest.y), furthest.z);
+
+    if (!(distance > 0.0) || distance > 1e18) {
+        // 距离非正、或者是 inf/NaN：射线打不到盒子，或者输入退化。
+        // 退回未校正的方向——总比返回一个乱数好，NaN 采样出来是黑洞，
+        // 而且会顺着 Bloom 扩散到整个画面。
+        return reflection;
+    }
+
+    let hit = position + reflection * distance;
+    let corrected = hit - capture_position;
+    let length_squared = dot(corrected, corrected);
+    if (length_squared < 1e-12) {
+        return reflection;
+    }
+    return corrected * inverseSqrt(length_squared);
+}
+
 fn ibl_specular_prefiltered(
-    prefiltered: texture_2d<f32>,
+    prefiltered: texture_2d_array<f32>,
     prefiltered_sampler: sampler,
+    // 纹理数组的层号。第 0 层是全局环境，1 起是各个反射探针。
+    layer: f32,
     mip_count: f32,
     reflection: vec3<f32>,
     roughness: f32,
@@ -118,7 +160,13 @@ fn ibl_specular_prefiltered(
 ) -> vec3<f32> {
     let uv = equirect_uv(reflection);
     let level = clamp(roughness, 0.0, 1.0) * max(mip_count - 1.0, 0.0);
-    let radiance = textureSampleLevel(prefiltered, prefiltered_sampler, uv, level).rgb;
+    let radiance = textureSampleLevel(
+        prefiltered,
+        prefiltered_sampler,
+        uv,
+        i32(layer),
+        level,
+    ).rgb;
     return radiance * intensity * (f0 * brdf.x + vec3<f32>(brdf.y));
 }
 
