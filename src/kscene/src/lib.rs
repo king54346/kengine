@@ -1815,12 +1815,19 @@ mod probe_tests {
     fn tiny_hdr() -> kpbr::hdr::HdrImage {
         let (w, h) = (8usize, 4usize);
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"#?RADIANCE
+        bytes.extend_from_slice(
+            b"#?RADIANCE
 FORMAT=32-bit_rle_rgbe
 
-");
-        bytes.extend_from_slice(format!("-Y {h} +X {w}
-").as_bytes());
+",
+        );
+        bytes.extend_from_slice(
+            format!(
+                "-Y {h} +X {w}
+"
+            )
+            .as_bytes(),
+        );
         for _ in 0..w * h {
             bytes.extend_from_slice(&[128u8, 128, 128, 129]);
         }

@@ -1287,11 +1287,7 @@ impl Renderer {
                         )
                     }
                     // 没探针管它：层号 0（全局环境）、不做视差、强度 1。
-                    None => (
-                        [0.0; 4],
-                        [0.0, 0.0, 0.0, 0.0],
-                        [0.0, 0.0, 0.0, 1.0],
-                    ),
+                    None => ([0.0; 4], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
                 };
 
             let model = item.transform;
@@ -1338,15 +1334,6 @@ impl Renderer {
                     probe_max,
                 },
             });
-        }
-
-        if !probe_params.is_empty() {
-            let mut counts = [0usize; 8];
-            for d in draws.iter().chain(transparent_draws.iter()) {
-                let layer = d.uniforms.probe_position[3] as usize;
-                counts[layer.min(7)] += 1;
-            }
-            klog::info!("[验证] 逐对象层号分布 {:?}（下标即层号，0 = 全局环境）", &counts[..4]);
         }
 
         // ── 批处理：同网格同贴图的对象合并成一次绘制 ──
@@ -2707,7 +2694,10 @@ fn upload_prefiltered_environment(
     });
 
     // 每层的 mip 链依次写入。层号 0 是全局环境。
-    for (layer, source) in std::iter::once(levels).chain(probes.iter().copied()).enumerate() {
+    for (layer, source) in std::iter::once(levels)
+        .chain(probes.iter().copied())
+        .enumerate()
+    {
         for (index, level) in source.iter().enumerate() {
             // 尺寸对不上的层直接跳过：写进去会被 wgpu 拒绝，
             // 而留一层没写的话那个探针会采样出未初始化的内存。
@@ -2945,7 +2935,10 @@ mod test {
         //                 + 骨骼偏移(16) + UV 变换(16)
         //                 + 探针 vec4 × 3(48) = 256。
         // 四个 f32 恰好凑满 16 字节，emissive 才能落在 vec4 要求的对齐边界上。
-        assert_eq!(size_of::<ObjectUniforms>(), 64 * 2 + 16 * 3 + 16 * 2 + 16 * 3);
+        assert_eq!(
+            size_of::<ObjectUniforms>(),
+            64 * 2 + 16 * 3 + 16 * 2 + 16 * 3
+        );
         assert_eq!(size_of::<ObjectUniforms>() % 16, 0);
     }
 

@@ -151,51 +151,6 @@ impl Plugin for TerrainDemo {
                 .and_then(Node::terrain)
                 .map_or(0, |t| t.chunks().len())
         );
-        // TEMP-VALIDATION：HDR + 两个反射探针。
-        {
-            let (w, h) = (128usize, 64usize);
-            let mut bytes = Vec::new();
-            bytes.extend_from_slice(b"#?RADIANCE
-FORMAT=32-bit_rle_rgbe
-
-");
-            bytes.extend_from_slice(format!("-Y {h} +X {w}
-").as_bytes());
-            for row in 0..h {
-                for _ in 0..w {
-                    let p = if row < h / 2 { [90u8, 140, 255, 129] } else { [60, 55, 45, 126] };
-                    bytes.extend_from_slice(&p);
-                }
-            }
-            let image = kengine::kpbr::hdr::HdrImage::decode(&bytes).unwrap();
-            ctx.scene.set_environment_hdr(
-                &image,
-                kengine::kpbr::prefilter::PrefilterSettings {
-                    base_width: 64, levels: 4, samples: 32,
-                },
-            );
-            use kengine::kpbr::probe::ReflectionProbe;
-            let a = ctx.scene.add_reflection_probe(
-                ReflectionProbe::new(Vec3::new(150.0, 0.0, 150.0), Vec3::splat(400.0)),
-                &image,
-            );
-            let b = ctx.scene.add_reflection_probe(
-                ReflectionProbe::new(Vec3::new(150.0, 0.0, 150.0), Vec3::splat(120.0)),
-                &image,
-            );
-            klog::info!(
-                "[验证] 探针 a={a:?} b={b:?}，共 {} 个，纹理数组 {} 层",
-                ctx.scene.reflection_probes().len(),
-                ctx.scene.reflection_probes().len() + 1
-            );
-            klog::info!(
-                "[验证] probe_at(150,0,150)={:?}  probe_at(350,0,50)={:?}  probe_at(0,0,0)={:?}",
-                ctx.scene.probe_at(Vec3::new(150.0, 0.0, 150.0)),
-                ctx.scene.probe_at(Vec3::new(350.0, 0.0, 50.0)),
-                ctx.scene.probe_at(Vec3::ZERO)
-            );
-        }
-
         klog::info!("WASD/QE 移动，左键抬升、右键下压、中键抹平，[ ] 改笔刷，H 看分块，空格丢球");
     }
 

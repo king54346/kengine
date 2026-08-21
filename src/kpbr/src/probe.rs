@@ -205,7 +205,12 @@ mod tests {
         // 着色点正好在采集点上时，交点方向就是原方向——
         // 这时探针退化成普通环境图，正好是它该有的行为。
         let probe = unit_probe();
-        for direction in [Vec3::X, Vec3::Y, Vec3::Z, Vec3::new(1.0, 2.0, 3.0).normalize()] {
+        for direction in [
+            Vec3::X,
+            Vec3::Y,
+            Vec3::Z,
+            Vec3::new(1.0, 2.0, 3.0).normalize(),
+        ] {
             let corrected = probe.correct(Vec3::ZERO, direction);
             assert!(
                 (corrected - direction).length() < 1e-5,
@@ -357,6 +362,9 @@ mod tests {
         let probe = unit_probe();
         let left = probe.correct(Vec3::new(-4.0, 0.0, 0.0), Vec3::Y);
         let right = probe.correct(Vec3::new(4.0, 0.0, 0.0), Vec3::Y);
-        assert!(left.x < 0.0 && right.x > 0.0, "left={left:?} right={right:?}");
+        assert!(
+            left.x < 0.0 && right.x > 0.0,
+            "left={left:?} right={right:?}"
+        );
     }
 }
