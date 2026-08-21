@@ -266,7 +266,10 @@ fn a_module_injection_attempt_stays_a_string() {
     // 同上的反面：源码里带 `"};` 这种收尾，如果是拼进 eval 的，
     // 就能提前闭合字符串跑出任意代码。
     let mut runtime = ScriptRuntime::new();
-    runtime.add_module("inject", r#"exports.ok = true; // "}; globalThis.__pwned = 1;"#);
+    runtime.add_module(
+        "inject",
+        r#"exports.ok = true; // "}; globalThis.__pwned = 1;"#,
+    );
 
     let signals = run(
         &mut runtime,

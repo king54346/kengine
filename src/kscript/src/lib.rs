@@ -43,6 +43,8 @@ mod script;
 #[cfg(test)]
 mod module_tests;
 #[cfg(test)]
+mod state_tests;
+#[cfg(test)]
 mod tests;
 
 pub use runtime::{InstanceId, ScriptRuntime, ScriptStats, Signal};

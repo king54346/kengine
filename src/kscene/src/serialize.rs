@@ -144,6 +144,26 @@ impl Visit for Joint {
     }
 }
 
+impl Visit for crate::ScriptSlot {
+    fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
+        let mut region = visitor.enter_region(name)?;
+
+        self.path.visit("Path", &mut region)?;
+        self.enabled.visit("Enabled", &mut region)?;
+        self.state.visit("State", &mut region)?;
+
+        // `instance` 与 `failed` 是**运行时**状态，不存。
+        // 存下来的话读档后会指向上一次运行里的实例编号——那个编号在
+        // 新的运行时里要么不存在，要么是别人的。
+        if region.is_reading() {
+            self.instance = crate::ScriptSlot::NO_INSTANCE;
+            self.failed = false;
+        }
+
+        Ok(())
+    }
+}
+
 impl Visit for Node {
     fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
         let mut region = visitor.enter_region(name)?;
@@ -170,6 +190,9 @@ impl Visit for Node {
                 Handle::NONE,
                 kphysics::JointDesc::default(),
             ))
+        })?;
+        visit_optional("Script", &mut self.script, &mut region, || {
+            Box::new(crate::ScriptSlot::default())
         })?;
 
         self.parent.visit("Parent", &mut region)?;
@@ -1038,15 +1061,5 @@ mod test {
         assert!(restored[node].mesh().is_some());
 
         let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn probe_script_survives_save() {
-        let mut scene = Scene::new();
-        scene.add_node(Node::new("n").with_script("spin.js"));
-        let bytes = scene.save_to_vec().unwrap();
-        let loaded = Scene::load_from_slice(&bytes, None).unwrap();
-        let h = loaded.find_by_name("n").unwrap();
-        println!("PROBE 脚本槽位 = {:?}", loaded.try_get(h).unwrap().script());
     }
 }

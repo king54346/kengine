@@ -272,6 +272,7 @@ impl ScriptRuntime {
             }
 
             let path = slot.path.clone();
+            let state = slot.state.clone();
             // 脚本是异步加载的，没就绪就等下一帧。
             let Some(script) = resources
                 .request::<Script>(&path)
@@ -282,6 +283,19 @@ impl ScriptRuntime {
             };
 
             let instance = self.instantiate(&script, handle);
+
+            // 读档回来的状态在 `_ready` **之前**喂回去：`_ready` 里
+            // 多半要根据状态决定做什么（比如按存下来的血量决定是不是
+            // 该播死亡动画），喂晚了它看到的是初始值。
+            if let Some(id) = instance {
+                let object = self.instances[id.0 as usize]
+                    .as_ref()
+                    .map(|i| (i.object.clone(), i.name.clone()));
+                if let Some((object, name)) = object {
+                    self.call_load(&object, &name, &state);
+                }
+            }
+
             if let Some(slot) = scene.try_get_mut(handle).and_then(Node::script_mut) {
                 match instance {
                     Some(id) => slot.instance = id.0,
@@ -345,6 +359,117 @@ impl ScriptRuntime {
             }
         };
         Some(InstanceId(id as u32))
+    }
+
+    /// 把每个脚本的状态存回它所在节点的 [`ScriptSlot::state`]。
+    ///
+    /// **存档前调一次**，否则存下去的是上一次的状态（或者空）。
+    ///
+    /// 只有实现了 `_save()` 的脚本才有状态。`_save` 要返回一个能
+    /// `JSON.stringify` 的对象——里面有函数、有循环引用的话会失败，
+    /// 那个脚本的状态记一条日志后留空，不影响别人。
+    ///
+    /// 返回成功存下状态的脚本数。
+    pub fn save_states(&mut self, scene: &mut Scene) -> usize {
+        let mut saved = 0;
+        for index in 0..self.instances.len() {
+            let Some(instance) = self.instances[index].as_ref() else {
+                continue;
+            };
+            let (object, node, name) = (
+                instance.object.clone(),
+                instance.node,
+                instance.name.clone(),
+            );
+
+            let Some(state) = self.call_save(&object, &name) else {
+                continue;
+            };
+            if let Some(slot) = scene.try_get_mut(node).and_then(Node::script_mut) {
+                slot.state = state;
+                saved += 1;
+            }
+        }
+        saved
+    }
+
+    /// 调一个实例的 `_save()` 并 JSON 化，没有这个方法时返回 [`None`]。
+    fn call_save(&mut self, object: &JsObject, name: &str) -> Option<String> {
+        let method = object.get(js_string!("_save"), &mut self.context).ok()?;
+        let callable = method.as_callable()?;
+
+        let value = match callable.call(&object.clone().into(), &[], &mut self.context) {
+            Ok(value) => value,
+            Err(error) => {
+                klog::error!("脚本「{name}」的 _save 抛异常：{error}");
+                return None;
+            }
+        };
+
+        // 走 JS 自己的 `JSON.stringify` 而不是在 Rust 里遍历对象：
+        // undefined、循环引用、`toJSON` 这些边角的规则很细，
+        // 自己写一份必然和它不一致，而脚本作者按的是 JS 的直觉。
+        let json = match self.json_call("stringify", &[value]) {
+            Ok(value) => value,
+            Err(error) => {
+                klog::error!(
+                    "脚本「{name}」的 _save 返回了没法 JSON 化的东西（函数？循环引用？）：{error}"
+                );
+                return None;
+            }
+        };
+
+        // `JSON.stringify(undefined)` 返回 undefined 而不是字符串。
+        let string = json.as_string()?;
+        Some(string.to_std_string_lossy())
+    }
+
+    /// 调 `JSON.<name>(args...)`。
+    fn json_call(&mut self, name: &str, args: &[JsValue]) -> Result<JsValue, String> {
+        let json = self
+            .context
+            .global_object()
+            .get(js_string!("JSON"), &mut self.context)
+            .map_err(|e| e.to_string())?;
+        let method = json
+            .as_object()
+            .ok_or_else(|| "JSON 不是对象".to_string())?
+            .get(js_string!(name), &mut self.context)
+            .map_err(|e| e.to_string())?;
+        let callable = method
+            .as_callable()
+            .ok_or_else(|| format!("JSON.{name} 不可调用"))?;
+        callable
+            .call(&json, args, &mut self.context)
+            .map_err(|e| e.to_string())
+    }
+
+    /// 把一段状态喂给刚实例化的脚本。
+    fn call_load(&mut self, object: &JsObject, name: &str, state: &str) {
+        if state.is_empty() {
+            return;
+        }
+        let Ok(method) = object.get(js_string!("_load"), &mut self.context) else {
+            return;
+        };
+        let Some(callable) = method.as_callable() else {
+            // 有状态但没有 `_load`：多半是脚本改过了，把 `_load` 删了却
+            // 留着旧存档。记一条日志——静默丢掉状态会让人以为存档坏了。
+            klog::warn!("脚本「{name}」有存档状态但没有 _load，状态被忽略");
+            return;
+        };
+
+        let parsed = match self.json_call("parse", &[js_string!(state).into()]) {
+            Ok(value) => value,
+            Err(error) => {
+                klog::error!("脚本「{name}」的存档状态不是合法 JSON：{error}");
+                return;
+            }
+        };
+
+        if let Err(error) = callable.call(&object.clone().into(), &[parsed], &mut self.context) {
+            klog::error!("脚本「{name}」的 _load 抛异常：{error}");
+        }
     }
 
     /// 跑一轮生命周期回调。

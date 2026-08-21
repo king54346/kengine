@@ -21,6 +21,16 @@ pub struct ScriptSlot {
     pub instance: u32,
     /// 实例化失败过就不再重试——源码有语法错误的话，重试一万次也一样。
     pub failed: bool,
+    /// 脚本自己存下来的状态，一段 JSON。
+    ///
+    /// 脚本的闭包变量（`let hp = 100;` 那种）**存不下来**——它们活在
+    /// JS 的闭包里，Rust 这边够不着，而且里面可能有函数、有循环引用。
+    /// 所以是**显式**的：脚本实现 `_save()` 返回一个可 JSON 化的对象，
+    /// 实现 `_load(state)` 把它读回去。两个都不实现就没有状态。
+    ///
+    /// 存档时由 `ScriptRuntime::save_states` 填，读档后由
+    /// `ScriptRuntime` 在实例化时喂回给脚本。
+    pub state: String,
 }
 
 impl ScriptSlot {
@@ -34,6 +44,7 @@ impl ScriptSlot {
             enabled: true,
             instance: Self::NO_INSTANCE,
             failed: false,
+            state: String::new(),
         }
     }
 
