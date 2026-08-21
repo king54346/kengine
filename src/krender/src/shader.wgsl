@@ -266,6 +266,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let count = min(globals.light_count.x, 16u);
     for (var i = 0u; i < count; i = i + 1u) {
         let light = globals.lights[i];
+
+        // 半球光是环境项，不走「入射方向 + BRDF」那条路：它没有方向，
+        // 也不产生高光。金属没有漫反射，所以按金属度衰减。
+        if (light.position.w == LIGHT_HEMISPHERE) {
+            color += light_hemisphere(light, n) * albedo * (1.0 - metallic) * occlusion;
+            continue;
+        }
+
         let sample = light_sample_direction(light, in.world_position);
         // 衰减为 0 说明超出作用范围或在聚光锥外，跳过。
         if (sample.w <= 0.0) {
@@ -344,8 +352,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         color += ibl_specular(globals.environment, reflection, roughness, f0, brdf) * occlusion;
     }
 
+    // ── 雾 ──
+    //
+    // 放在最后、自发光之前：雾是眼睛和物体之间的介质，它该盖住
+    // 一切从物体来的光，包括自发光。放在自发光之后的话，
+    // 远处的灯会穿透浓雾清晰可见。
+    color = apply_fog(globals.environment, color, length(in.world_position - globals.camera_position.xyz));
+
     // 自发光不受光照影响，直接叠加。
-    color += object.emissive.rgb * textureSample(emissive_texture, base_color_sampler, uv).rgb;
+    // 自发光同样要被雾衰减，所以乘上清澈度。
+    let clarity = 1.0 - fog_density(globals.environment, length(in.world_position - globals.camera_position.xyz));
+    color += object.emissive.rgb
+        * textureSample(emissive_texture, base_color_sampler, uv).rgb
+        * clarity;
 
     // 输出线性 HDR，不做色调映射也不做 gamma——
     // 那些交给后处理链，Bloom 需要未经压缩的高光才能提取出来。

@@ -168,6 +168,76 @@ impl Mesh {
         mesh.recompute_tangents();
         mesh
     }
+
+    /// 圆柱，直径 1、高 1，中轴沿 Y。
+    ///
+    /// `segments` 是周向分段数，至少 3。
+    ///
+    /// 侧面与两个端盖**不共享顶点**：共享的话端盖边缘的法线会被侧面
+    /// 的法线拉平，柱子的上下边缘看上去像是圆角的。
+    pub fn cylinder(segments: u32) -> Self {
+        let segments = segments.max(3);
+        let (half_height, radius) = (0.5_f32, 0.5_f32);
+
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        // ── 侧面 ──
+        for segment in 0..=segments {
+            let u = segment as f32 / segments as f32;
+            let (sin, cos) = (u * std::f32::consts::TAU).sin_cos();
+            let normal = Vec3::new(cos, 0.0, sin);
+
+            vertices.push(Vertex::new(
+                normal * radius + Vec3::Y * half_height,
+                normal,
+                [u, 0.0],
+            ));
+            vertices.push(Vertex::new(
+                normal * radius - Vec3::Y * half_height,
+                normal,
+                [u, 1.0],
+            ));
+        }
+        for segment in 0..segments {
+            let a = segment * 2;
+            indices.extend_from_slice(&[a, a + 2, a + 1, a + 2, a + 3, a + 1]);
+        }
+
+        // ── 两个端盖 ──
+        for (sign, normal) in [(1.0_f32, Vec3::Y), (-1.0, Vec3::NEG_Y)] {
+            let center = vertices.len() as u32;
+            vertices.push(Vertex::new(
+                Vec3::Y * half_height * sign,
+                normal,
+                [0.5, 0.5],
+            ));
+
+            for segment in 0..=segments {
+                let u = segment as f32 / segments as f32;
+                let (sin, cos) = (u * std::f32::consts::TAU).sin_cos();
+                vertices.push(Vertex::new(
+                    Vec3::new(cos * radius, half_height * sign, sin * radius),
+                    normal,
+                    [cos * 0.5 + 0.5, sin * 0.5 + 0.5],
+                ));
+            }
+
+            for segment in 0..segments {
+                let a = center + 1 + segment;
+                // 上下两个盖的绕序相反，否则有一个会朝里。
+                if sign > 0.0 {
+                    indices.extend_from_slice(&[center, a + 1, a]);
+                } else {
+                    indices.extend_from_slice(&[center, a, a + 1]);
+                }
+            }
+        }
+
+        let mut mesh = Self::new(vertices, indices);
+        mesh.recompute_tangents();
+        mesh
+    }
 }
 
 #[cfg(test)]
@@ -248,5 +318,84 @@ mod test {
         let aabb = Mesh::sphere(16, 24).aabb();
 
         assert!((aabb.size() - Vec3::ONE).length() < 1e-3);
+    }
+
+    #[test]
+    fn cylinder_side_normals_point_outward() {
+        let mesh = Mesh::cylinder(16);
+        for vertex in mesh.vertices() {
+            let normal = Vec3::from_array(vertex.normal);
+            let position = Vec3::from_array(vertex.position);
+            // 侧面的顶点法线该是水平的、指着外面。
+            if normal.y.abs() < 0.5 {
+                let radial = Vec3::new(position.x, 0.0, position.z);
+                assert!(
+                    normal.dot(radial) > 0.0,
+                    "侧面法线朝里了：{normal:?} vs {radial:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cylinder_caps_are_flat() {
+        // 端盖和侧面不共享顶点。共享的话端盖边缘的法线会被侧面拉平，
+        // 柱子的上下边缘看上去像圆角的。
+        let mesh = Mesh::cylinder(16);
+        let top = mesh
+            .vertices()
+            .iter()
+            .filter(|v| v.position[1] > 0.49 && v.normal[1] > 0.9)
+            .count();
+        assert!(top > 3, "顶盖上没有朝上的法线，端盖多半和侧面共享了顶点");
+    }
+
+    #[test]
+    fn cylinder_fits_the_unit_box() {
+        let mesh = Mesh::cylinder(24);
+        for vertex in mesh.vertices() {
+            let p = Vec3::from_array(vertex.position);
+            assert!(p.y.abs() <= 0.5 + 1e-5, "高度超了：{}", p.y);
+            let radius = (p.x * p.x + p.z * p.z).sqrt();
+            assert!(radius <= 0.5 + 1e-5, "半径超了：{radius}");
+        }
+    }
+
+    #[test]
+    fn cylinder_indices_stay_in_range() {
+        let mesh = Mesh::cylinder(3);
+        let count = mesh.vertices().len() as u32;
+        assert!(mesh.indices().iter().all(|i| *i < count));
+        assert_eq!(mesh.indices().len() % 3, 0);
+    }
+
+    #[test]
+    fn cylinder_clamps_tiny_segment_counts() {
+        // 少于 3 段构不成一个封闭的柱面。
+        for segments in [0, 1, 2, 3] {
+            let mesh = Mesh::cylinder(segments);
+            assert!(!mesh.indices().is_empty(), "{segments} 段时是空的");
+        }
+    }
+
+    #[test]
+    fn cylinder_winding_is_outward() {
+        // 面朝里的话背面剔除会把柱子剔没，画面上什么都不剩。
+        let mesh = Mesh::cylinder(16);
+        for triangle in mesh.indices().chunks_exact(3) {
+            let p: Vec<Vec3> = triangle
+                .iter()
+                .map(|i| Vec3::from_array(mesh.vertices()[*i as usize].position))
+                .collect();
+            let face = (p[1] - p[0]).cross(p[2] - p[0]);
+            if face.length_squared() < 1e-12 {
+                continue;
+            }
+            let center = (p[0] + p[1] + p[2]) / 3.0;
+            assert!(
+                face.dot(center) > -1e-4,
+                "三角形朝里了：面法线 {face:?}，中心 {center:?}"
+            );
+        }
     }
 }

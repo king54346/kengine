@@ -17,9 +17,31 @@ struct Environment {
     sun_direction: vec4<f32>,
     // rgb = 太阳颜色，a = 环境光整体强度
     sun_color: vec4<f32>,
+    // rgb = 雾色，a = 是否启用（0/1）
+    fog_color: vec4<f32>,
+    // x = 起雾距离，y = 全雾距离
+    fog_params: vec4<f32>,
 };
 
 const IBL_PI: f32 = 3.14159265359;
+
+// 线性雾的浓度。和 CPU 侧的 `Fog::density_at` 必须算出同样的结果。
+fn fog_density(env: Environment, distance: f32) -> f32 {
+    if (env.fog_color.a < 0.5) {
+        return 0.0;
+    }
+    let span = env.fog_params.y - env.fog_params.x;
+    // 区间退化时返回 0（完全清澈），不能除以零——NaN 会把整个像素染黑。
+    if (span <= 1e-6) {
+        return 0.0;
+    }
+    return clamp((distance - env.fog_params.x) / span, 0.0, 1.0);
+}
+
+// 把雾混进已经算好的颜色里。
+fn apply_fog(env: Environment, color: vec3<f32>, distance: f32) -> vec3<f32> {
+    return mix(color, env.fog_color.rgb, fog_density(env, distance));
+}
 
 // 不含太阳的天空。球谐系数就是对这个函数积分得到的，
 // 太阳由一盏方向光单独表示，这里计入会导致重复曝光。

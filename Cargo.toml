@@ -89,3 +89,10 @@ harness = false
 [[bench]]
 name = "serialization"
 harness = false
+
+# three.js 例子的 kengine 移植。放在 examples/kengine/ 下单独一个目录，
+# 和引擎自己的例子分开——它们的目的不同：那些是「怎么用某个功能」，
+# 这些是「对着一个成熟引擎的例子查自己缺什么」。
+[[example]]
+name = "backdrop_water"
+path = "examples/kengine/backdrop_water.rs"

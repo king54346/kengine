@@ -11,13 +11,15 @@ struct Light {
     direction: vec4<f32>,
     // rgb = 颜色，a = 强度
     color: vec4<f32>,
-    // x = 内锥余弦，y = 外锥余弦，zw 保留
+    // 聚光灯：x = 内锥余弦，y = 外锥余弦
+    // 半球光：xyz = 地面色
     params: vec4<f32>,
 };
 
 const LIGHT_DIRECTIONAL: f32 = 0.0;
 const LIGHT_POINT: f32 = 1.0;
 const LIGHT_SPOT: f32 = 2.0;
+const LIGHT_HEMISPHERE: f32 = 3.0;
 
 // 距离衰减：物理上的平方反比，再乘一个窗函数在 range 处平滑归零。
 //
@@ -73,6 +75,15 @@ fn light_sample_direction(light: Light, world_position: vec3<f32>) -> vec4<f32> 
     }
 
     return vec4<f32>(l, attenuation);
+}
+
+// 半球光的环境项：按法线在地面色和天空色之间插值。
+//
+// `n.y * 0.5 + 0.5` 把法线的竖直分量映到 0..1：朝下取地面色，
+// 朝上取天空色，水平方向取两者的中间。
+fn light_hemisphere(light: Light, normal: vec3<f32>) -> vec3<f32> {
+    let t = normal.y * 0.5 + 0.5;
+    return mix(light.params.rgb, light.color.rgb, t) * light.color.a;
 }
 
 // 光源的辐射亮度（颜色 × 强度 × 衰减）。

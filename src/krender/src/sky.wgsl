@@ -57,6 +57,15 @@ fn sky_fs(in: SkyOutput) -> @location(0) vec4<f32> {
     } else {
         color = ibl_sky(sky_globals.environment, direction);
     }
+    // 天空按**地平线附近**的浓度上雾色：物体在远处融进雾里，
+    // 而背景还是清亮的天空的话，会看到一圈突兀的分界。
+    //
+    // 用 `1 - |direction.y|` 当权重：正上方和正下方保持原色，
+    // 越靠近地平线雾越浓。
+    let horizon = 1.0 - min(abs(direction.y), 1.0);
+    let fog = fog_density(sky_globals.environment, sky_globals.environment.fog_params.y) * horizon;
+    color = mix(color, sky_globals.environment.fog_color.rgb, fog);
+
     // 同样输出线性 HDR，色调映射统一在后处理链里做。
     return vec4<f32>(color, 1.0);
 }

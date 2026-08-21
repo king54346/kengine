@@ -83,6 +83,8 @@ pub struct Environment {
     pub sky: Sky,
     /// 环境光整体强度。
     pub intensity: f32,
+    /// 距离雾。默认关闭。
+    pub fog: Fog,
     /// 由天空投影出的漫反射球谐系数。
     harmonics: ibl::SphericalHarmonics,
 }
@@ -120,6 +122,7 @@ impl Environment {
         Self {
             sky,
             intensity: 1.0,
+            fog: Fog::default(),
             harmonics: ibl::SphericalHarmonics::from_sky(&sky, 48),
         }
     }
@@ -140,6 +143,7 @@ impl Environment {
         Self {
             sky,
             intensity: 1.0,
+            fog: Fog::default(),
             harmonics: ibl::SphericalHarmonics::from_hdr(image, 96),
         }
     }
@@ -167,6 +171,72 @@ impl Environment {
     }
 }
 
+
+/// 线性雾：距离越远，物体颜色越向雾色靠拢。
+///
+/// # 为什么要有雾
+///
+/// 远处的几何被视锥远平面**硬切**掉时，物体会在某个距离上凭空消失，
+/// 一眼就能看出边界。雾让它们在到达远平面之前先融进背景里，
+/// 于是可以把远平面拉近、少画很多东西。
+///
+/// # 线性而不是指数
+///
+/// 指数雾（`exp`、`exp2`）更接近真实的大气散射，但它没有「到这个距离
+/// 就完全看不见了」这个硬保证——总有一点点残留。线性雾的
+/// [`far`](Self::far) 就是那个保证，正好配合远平面用。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Fog {
+    /// 雾色。通常取天空或背景色，否则远处的物体会显出一圈异色轮廓。
+    pub color: Vec3,
+    /// 从这个距离开始起雾。
+    pub near: f32,
+    /// 到这个距离完全被雾吞没。
+    pub far: f32,
+    /// 是否启用。
+    pub enabled: bool,
+}
+
+impl Default for Fog {
+    fn default() -> Self {
+        Self {
+            color: Vec3::new(0.5, 0.6, 0.7),
+            near: 20.0,
+            far: 200.0,
+            enabled: false,
+        }
+    }
+}
+
+impl Fog {
+    /// 建一团雾并启用。
+    pub fn new(color: Vec3, near: f32, far: f32) -> Self {
+        Self {
+            color,
+            near,
+            far,
+            enabled: true,
+        }
+    }
+
+    /// 某个距离处的雾浓度，0 是完全清澈、1 是完全被吞没。
+    ///
+    /// 和着色器里的算法必须一致——这个函数存在的意义就是让那段
+    /// 算法能在 CPU 上被测。
+    pub fn density_at(&self, distance: f32) -> f32 {
+        if !self.enabled {
+            return 0.0;
+        }
+        // `far` 不大于 `near` 时整段区间退化成一个点。返回 0（完全清澈）
+        // 而不是让它除以零算出 NaN——NaN 会把整个像素染成黑色。
+        let span = self.far - self.near;
+        if span <= 1e-6 {
+            return 0.0;
+        }
+        ((distance - self.near) / span).clamp(0.0, 1.0)
+    }
+}
+
 /// [`Environment`] 的 GPU 表示，与 `ibl.wgsl` 的 `Environment` 结构逐字段对应。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -183,6 +253,10 @@ pub struct GpuEnvironment {
     pub sun_direction: [f32; 4],
     /// rgb = 太阳颜色，a = 环境光整体强度。
     pub sun_color: [f32; 4],
+    /// rgb = 雾色，a = 是否启用（0/1）。
+    pub fog_color: [f32; 4],
+    /// x = 起雾距离，y = 全雾距离，zw 保留。
+    pub fog_params: [f32; 4],
 }
 
 impl Environment {
@@ -205,6 +279,12 @@ impl Environment {
                 .sun_color
                 .extend(self.intensity.max(0.0))
                 .to_array(),
+            fog_color: self
+                .fog
+                .color
+                .extend(if self.fog.enabled { 1.0 } else { 0.0 })
+                .to_array(),
+            fog_params: [self.fog.near, self.fog.far, 0.0, 0.0],
         }
     }
 }
@@ -364,5 +444,63 @@ mod test {
         env.rebuild();
 
         assert!(env.irradiance(Vec3::Y).length() < before.length());
+    }
+}
+
+#[cfg(test)]
+mod fog_test {
+    use super::*;
+
+    #[test]
+    fn fog_is_off_by_default() {
+        // 默认开着的话，每个现有场景的远处都会莫名其妙地褪色。
+        assert!(!Fog::default().enabled);
+        assert_eq!(Fog::default().density_at(1e9), 0.0);
+    }
+
+    #[test]
+    fn density_ramps_from_near_to_far() {
+        let fog = Fog::new(Vec3::ZERO, 10.0, 20.0);
+        assert_eq!(fog.density_at(5.0), 0.0, "起雾距离之前该是清澈的");
+        assert_eq!(fog.density_at(10.0), 0.0);
+        assert!((fog.density_at(15.0) - 0.5).abs() < 1e-6);
+        assert_eq!(fog.density_at(20.0), 1.0);
+        assert_eq!(fog.density_at(100.0), 1.0, "全雾距离之后不该超过 1");
+    }
+
+    #[test]
+    fn a_degenerate_range_does_not_produce_nan() {
+        // far <= near 时整段区间退化成一个点。除以零算出的 NaN
+        // 会把整个像素染黑，而且很难查到源头。
+        for (near, far) in [(10.0, 10.0), (20.0, 10.0), (0.0, 0.0)] {
+            let fog = Fog::new(Vec3::ZERO, near, far);
+            for distance in [0.0, 5.0, 15.0, 1e6] {
+                let density = fog.density_at(distance);
+                assert!(density.is_finite(), "near={near} far={far} d={distance}");
+                assert!((0.0..=1.0).contains(&density));
+            }
+        }
+    }
+
+    #[test]
+    fn disabling_wins_over_the_range() {
+        let mut fog = Fog::new(Vec3::ZERO, 1.0, 2.0);
+        fog.enabled = false;
+        assert_eq!(fog.density_at(1000.0), 0.0);
+    }
+
+    #[test]
+    fn fog_reaches_the_gpu() {
+        // 打包漏了的话着色器读到的是零，雾静默失效。
+        let mut environment = Environment::default();
+        environment.fog = Fog::new(Vec3::new(0.1, 0.2, 0.3), 7.0, 25.0);
+
+        let gpu = environment.to_gpu();
+        assert_eq!(gpu.fog_color, [0.1, 0.2, 0.3, 1.0]);
+        assert_eq!(gpu.fog_params[0], 7.0);
+        assert_eq!(gpu.fog_params[1], 25.0);
+
+        environment.fog.enabled = false;
+        assert_eq!(environment.to_gpu().fog_color[3], 0.0, "关掉了却还传了 1");
     }
 }

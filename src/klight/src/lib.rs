@@ -50,6 +50,19 @@ pub enum LightKind {
         /// 作用半径，超出后强度为 0。
         range: f32,
     },
+    /// 半球光：从天空和地面两个方向来的环境光。
+    ///
+    /// 不是一盏「有位置的灯」，而是对**环境**的粗略近似：朝上的表面
+    /// 收到天空的颜色，朝下的收到地面反射的颜色，中间按法线插值。
+    ///
+    /// 户外场景里它比一盏方向光顶用——只有太阳的话，背光面是纯黑的，
+    /// 而现实里那一面被天空和地面照亮着。
+    ///
+    /// **只贡献漫反射**，不产生高光也不投影。
+    Hemisphere {
+        /// 地面反射的颜色。天空的颜色用 [`Light::color`]。
+        ground_color: Vec3,
+    },
     /// 聚光灯：锥形光束。
     Spot {
         /// 作用半径。
@@ -68,13 +81,14 @@ impl LightKind {
             Self::Directional => 0.0,
             Self::Point { .. } => 1.0,
             Self::Spot { .. } => 2.0,
+            Self::Hemisphere { .. } => 3.0,
         }
     }
 
     /// 作用半径；方向光返回 0（不参与衰减）。
     pub fn range(&self) -> f32 {
         match self {
-            Self::Directional => 0.0,
+            Self::Directional | Self::Hemisphere { .. } => 0.0,
             Self::Point { range } | Self::Spot { range, .. } => *range,
         }
     }
@@ -119,6 +133,7 @@ impl LightKind {
             Self::Directional => 0,
             Self::Point { .. } => 1,
             Self::Spot { .. } => 2,
+            Self::Hemisphere { .. } => 3,
         }
     }
 }
@@ -143,6 +158,9 @@ impl kcore::visitor::Visit for LightKind {
                     inner_angle: 0.0,
                     outer_angle: 0.0,
                 },
+                3 => Self::Hemisphere {
+                    ground_color: Vec3::ZERO,
+                },
                 other => {
                     return Err(kcore::visitor::error::VisitError::User(format!(
                         "未知的光源类型标签 {other}"
@@ -163,6 +181,7 @@ impl kcore::visitor::Visit for LightKind {
                 inner_angle.visit("InnerAngle", &mut region)?;
                 outer_angle.visit("OuterAngle", &mut region)?;
             }
+            Self::Hemisphere { ground_color } => ground_color.visit("GroundColor", &mut region)?,
         }
 
         Ok(())
@@ -259,11 +278,20 @@ impl Light {
             _ => (1.0, 0.0),
         };
 
+        // 半球光把地面色塞在 `params.xyz` 里：它没有内外锥，那两个槽位
+        // 本来就是空的。多开一个 vec4 会让每盏灯都白涨 16 字节。
+        let params = match self.kind {
+            LightKind::Hemisphere { ground_color } => {
+                [ground_color.x, ground_color.y, ground_color.z, 0.0]
+            }
+            _ => [cos_inner, cos_outer, 0.0, 0.0],
+        };
+
         GpuLight {
             position: [position.x, position.y, position.z, self.kind.tag()],
             direction: [direction.x, direction.y, direction.z, self.kind.range()],
             color: [self.color.x, self.color.y, self.color.z, self.intensity],
-            params: [cos_inner, cos_outer, 0.0, 0.0],
+            params,
         }
     }
 }
