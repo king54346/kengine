@@ -75,7 +75,11 @@ pub struct ScriptError {
 
 impl std::fmt::Display for ScriptError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} 的 {} 抛异常：{}", self.script, self.method, self.message)
+        write!(
+            f,
+            "{} 的 {} 抛异常：{}",
+            self.script, self.method, self.message
+        )
     }
 }
 
@@ -304,7 +308,11 @@ impl ScriptRuntime {
     ///
     /// 改完脚本热重载之后用。清掉失败标记和记下的错误。
     pub fn revive(&mut self, id: InstanceId) -> bool {
-        match self.instances.get_mut(id.0 as usize).and_then(Option::as_mut) {
+        match self
+            .instances
+            .get_mut(id.0 as usize)
+            .and_then(Option::as_mut)
+        {
             Some(instance) => {
                 instance.failed = false;
                 instance.error = None;

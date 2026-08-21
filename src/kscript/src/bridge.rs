@@ -447,8 +447,9 @@ pub(crate) fn register(context: &mut Context) {
                 let playing = args.get(1).map(JsValue::to_boolean).unwrap_or(false);
                 if let Some(handle) = handle {
                     with_scene(|scene| {
-                        if let Some(player) =
-                            scene.try_get_mut(handle).and_then(kscene::Node::animator_mut)
+                        if let Some(player) = scene
+                            .try_get_mut(handle)
+                            .and_then(kscene::Node::animator_mut)
                         {
                             player.animator_mut().set_playing(playing);
                         }
@@ -465,8 +466,9 @@ pub(crate) fn register(context: &mut Context) {
                 let speed = number(args, 1, context)? as f32;
                 if let Some(handle) = handle {
                     with_scene(|scene| {
-                        if let Some(player) =
-                            scene.try_get_mut(handle).and_then(kscene::Node::animator_mut)
+                        if let Some(player) = scene
+                            .try_get_mut(handle)
+                            .and_then(kscene::Node::animator_mut)
                         {
                             player.animator_mut().set_speed(speed);
                         }

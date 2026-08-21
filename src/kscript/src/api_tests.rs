@@ -153,10 +153,7 @@ fn particle_calls_on_a_node_without_particles_do_nothing() {
     scene.add_node(Node::new("n").with_script("s.js"));
 
     let mut runtime = ScriptRuntime::new();
-    assert_eq!(
-        tick(&mut runtime, &mut scene, &manager),
-        vec!["survived:0"]
-    );
+    assert_eq!(tick(&mut runtime, &mut scene, &manager), vec!["survived:0"]);
 }
 
 // ── 音频 ──
