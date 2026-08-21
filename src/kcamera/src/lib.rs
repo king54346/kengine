@@ -24,11 +24,12 @@
 
 use kmath::{Aabb, Intersection, Mat4, Plane, Vec3};
 
-/// 常用类型的集中导出。
-mod orbit;
+/// 轨道相机。
+pub mod orbit;
 
 pub use orbit::OrbitCamera;
 
+/// 常用类型的集中导出。
 pub mod prelude {
     pub use crate::{Camera, Frustum, OrbitCamera, Projection};
     pub use kmath::Intersection;

@@ -171,7 +171,6 @@ impl Environment {
     }
 }
 
-
 /// 线性雾：距离越远，物体颜色越向雾色靠拢。
 ///
 /// # 为什么要有雾
@@ -349,8 +348,9 @@ mod test {
 
     #[test]
     fn gpu_environment_layout_is_aligned() {
-        // 9 个 vec4 + 5 个 vec4 = 224 字节，uniform 要求 16 字节对齐。
-        assert_eq!(size_of::<GpuEnvironment>(), 224);
+        // 球谐 9 个 vec4 + 天空/太阳 5 个 vec4 + 雾 2 个 vec4 = 256 字节，
+        // uniform 要求 16 字节对齐。
+        assert_eq!(size_of::<GpuEnvironment>(), 16 * (9 + 5 + 2));
         assert_eq!(size_of::<GpuEnvironment>() % 16, 0);
     }
 
@@ -492,8 +492,10 @@ mod fog_test {
     #[test]
     fn fog_reaches_the_gpu() {
         // 打包漏了的话着色器读到的是零，雾静默失效。
-        let mut environment = Environment::default();
-        environment.fog = Fog::new(Vec3::new(0.1, 0.2, 0.3), 7.0, 25.0);
+        let mut environment = Environment {
+            fog: Fog::new(Vec3::new(0.1, 0.2, 0.3), 7.0, 25.0),
+            ..Default::default()
+        };
 
         let gpu = environment.to_gpu();
         assert_eq!(gpu.fog_color, [0.1, 0.2, 0.3, 1.0]);

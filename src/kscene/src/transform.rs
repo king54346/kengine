@@ -67,6 +67,7 @@ impl Transform {
         }
     }
 
+    /// 组合成 4×4 变换矩阵（缩放 → 旋转 → 平移）。
     pub fn matrix(&self) -> Mat4 {
         Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.position)
     }

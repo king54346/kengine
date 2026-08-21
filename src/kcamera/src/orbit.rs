@@ -147,11 +147,7 @@ impl OrbitCamera {
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
 
         // 球坐标：pitch 为正时相机在目标上方。
-        let offset = Vec3::new(
-            cos_pitch * sin_yaw,
-            sin_pitch,
-            cos_pitch * cos_yaw,
-        ) * self.distance;
+        let offset = Vec3::new(cos_pitch * sin_yaw, sin_pitch, cos_pitch * cos_yaw) * self.distance;
 
         self.target + offset
     }
@@ -195,7 +191,11 @@ mod test {
     fn the_camera_sits_at_the_requested_distance() {
         let orbit = OrbitCamera::new(Vec3::new(1.0, 2.0, 3.0), 7.0);
         let offset = orbit.position() - orbit.target;
-        assert!((offset.length() - 7.0).abs() < 1e-4, "距离是 {}", offset.length());
+        assert!(
+            (offset.length() - 7.0).abs() < 1e-4,
+            "距离是 {}",
+            offset.length()
+        );
     }
 
     #[test]
@@ -326,7 +326,11 @@ mod test {
         for _ in 0..10_000 {
             orbit.rotate(1.0, 0.0);
         }
-        assert!(orbit.yaw.abs() <= std::f32::consts::TAU + 1e-4, "{}", orbit.yaw);
+        assert!(
+            orbit.yaw.abs() <= std::f32::consts::TAU + 1e-4,
+            "{}",
+            orbit.yaw
+        );
     }
 
     #[test]
