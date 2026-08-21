@@ -193,15 +193,18 @@ function emit(name, value) { __k.emit(name, value === undefined ? 0 : value); }
 //
 // 模块源码由 Rust 侧的 `ScriptRuntime::add_module` 事先塞进
 // `__moduleSources`，所以 `require` 是纯同步的查表。
-const __moduleSources = {};
-const __moduleCache = {};
+// 显式挂到 globalThis 上，不能写成顶层 `const`——顶层的 `const` 进的是
+// **全局词法作用域**，不会变成 globalThis 的属性，Rust 侧
+// `global_object().get()` 取不到它。
+globalThis.__moduleSources = {};
+globalThis.__moduleCache = {};
 
 function require(name) {
-    if (Object.prototype.hasOwnProperty.call(__moduleCache, name)) {
-        return __moduleCache[name].exports;
+    if (Object.prototype.hasOwnProperty.call(globalThis.__moduleCache, name)) {
+        return globalThis.__moduleCache[name].exports;
     }
 
-    const source = __moduleSources[name];
+    const source = globalThis.__moduleSources[name];
     if (typeof source !== "string") {
         throw new Error(
             "找不到模块「" + name + "」。模块要先用 ScriptRuntime::add_module 注册。"
@@ -212,7 +215,7 @@ function require(name) {
     // **先放进缓存再执行**：循环依赖时后来者拿到的是一份还没填完的
     // exports，而不是无限递归到栈溢出。这是 CommonJS 的标准行为，
     // 代价是循环依赖里拿到的可能是半成品——所以循环依赖仍然该避免。
-    __moduleCache[name] = module;
+    globalThis.__moduleCache[name] = module;
 
     try {
         // 用 `new Function` 而不是 eval：模块拿到的是自己的作用域，
@@ -222,7 +225,7 @@ function require(name) {
     } catch (error) {
         // 执行失败的模块要从缓存里拿掉，否则下次 require 会拿到一个
         // 空壳，报出来的错离真正的原因十万八千里。
-        delete __moduleCache[name];
+        delete globalThis.__moduleCache[name];
         throw error;
     }
 

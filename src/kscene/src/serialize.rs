@@ -1039,4 +1039,14 @@ mod test {
 
         let _ = std::fs::remove_file(&path);
     }
+
+    #[test]
+    fn probe_script_survives_save() {
+        let mut scene = Scene::new();
+        scene.add_node(Node::new("n").with_script("spin.js"));
+        let bytes = scene.save_to_vec().unwrap();
+        let loaded = Scene::load_from_slice(&bytes, None).unwrap();
+        let h = loaded.find_by_name("n").unwrap();
+        println!("PROBE 脚本槽位 = {:?}", loaded.try_get(h).unwrap().script());
+    }
 }
