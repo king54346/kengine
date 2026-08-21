@@ -55,6 +55,28 @@ struct Instance {
     /// 出过错就停掉，不再调用任何方法。
     failed: bool,
     name: String,
+    /// 停用它的那次错误。
+    ///
+    /// 只留**第一条**：脚本坏掉之后往往每帧都报同样的错，日志会被刷屏，
+    /// 真正的第一条反而找不着了。留在这里，调试面板随时能查。
+    error: Option<ScriptError>,
+}
+
+/// 一个脚本实例的失败详情。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptError {
+    /// 脚本名（文件名）。
+    pub script: String,
+    /// 出错的生命周期方法，例如 `_process`。
+    pub method: String,
+    /// 错误信息，尽量带上 JS 侧的调用栈。
+    pub message: String,
+}
+
+impl std::fmt::Display for ScriptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} 的 {} 抛异常：{}", self.script, self.method, self.message)
+    }
 }
 
 /// 一次 tick 的统计。
@@ -239,6 +261,119 @@ impl ScriptRuntime {
             .is_none_or(|instance| instance.failed)
     }
 
+    /// 一个实例是怎么挂的，没挂过时返回 [`None`]。
+    ///
+    /// 留的是**第一条**错误——脚本坏掉之后往往每帧都报同样的错，
+    /// 日志会被刷屏，真正的第一条反而找不着了。
+    pub fn error(&self, id: InstanceId) -> Option<&ScriptError> {
+        self.instances
+            .get(id.0 as usize)
+            .and_then(Option::as_ref)
+            .and_then(|instance| instance.error.as_ref())
+    }
+
+    /// 所有挂掉的实例及其错误。调试面板一次列全用。
+    pub fn errors(&self) -> Vec<(InstanceId, &ScriptError)> {
+        self.instances
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                let instance = slot.as_ref()?;
+                Some((InstanceId(index as u32), instance.error.as_ref()?))
+            })
+            .collect()
+    }
+
+    /// 一个实例挂在哪个节点上。
+    pub fn node_of(&self, id: InstanceId) -> Option<Handle<Node>> {
+        self.instances
+            .get(id.0 as usize)
+            .and_then(Option::as_ref)
+            .map(|instance| instance.node)
+    }
+
+    /// 一个实例的脚本名。
+    pub fn name_of(&self, id: InstanceId) -> Option<&str> {
+        self.instances
+            .get(id.0 as usize)
+            .and_then(Option::as_ref)
+            .map(|instance| instance.name.as_str())
+    }
+
+    /// 把一个挂掉的实例复活，让它下一帧继续跑。
+    ///
+    /// 改完脚本热重载之后用。清掉失败标记和记下的错误。
+    pub fn revive(&mut self, id: InstanceId) -> bool {
+        match self.instances.get_mut(id.0 as usize).and_then(Option::as_mut) {
+            Some(instance) => {
+                instance.failed = false;
+                instance.error = None;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 在某个实例的上下文里求值一段表达式，返回它的字符串形式。
+    ///
+    /// 调试面板的 REPL 用：跑着的时候查一个脚本此刻看到的东西。
+    ///
+    /// ```text
+    /// eval_in(id, "self.position.y")   →  "3.5"
+    /// eval_in(id, "this.hp")           →  "80"
+    /// ```
+    ///
+    /// # `this` 是那个实例
+    ///
+    /// 表达式里的 `this` 绑定到脚本返回的那个对象，所以能读它的属性和方法。
+    /// 但**读不到闭包变量**——`let hp = 100;` 那种活在闭包里，
+    /// 从外面够不着。要能查就得挂到 `this` 上。
+    ///
+    /// # 会真的改场景
+    ///
+    /// 这不是沙箱。`eval_in(id, "self.queueFree()")` 会真的删掉那个节点。
+    /// 需要场景访问，所以要传 `scene`——和一次正常的 tick 走的是同一条路。
+    pub fn eval_in(
+        &mut self,
+        id: InstanceId,
+        scene: &mut Scene,
+        expression: &str,
+    ) -> Result<String, String> {
+        let Some(instance) = self.instances.get(id.0 as usize).and_then(Option::as_ref) else {
+            return Err(format!("实例 {} 不存在", id.0));
+        };
+        let (object, node) = (instance.object.clone(), instance.node);
+
+        // 和一次正常 tick 一样把场景寄存进去，否则表达式里的 `self`、
+        // `getNode`、`raycast` 全都拿不到场景。
+        let guard = HostGuard::park(scene, &mut self.host, &mut self.spare, 0.0, 0.0);
+        with_host(|host| host.current = node);
+
+        // 包成一个函数再调，才能把 `this` 绑到实例对象上。
+        let wrapped = format!("(function(){{ return ({expression}); }})");
+        let result = match self.context.eval(Source::from_bytes(&wrapped)) {
+            Ok(value) => match value.as_callable() {
+                Some(callable) => callable
+                    .call(&object.into(), &[], &mut self.context)
+                    .map_err(|error| error.to_string()),
+                None => Err("表达式没能包成函数".to_string()),
+            },
+            Err(error) => Err(error.to_string()),
+        };
+
+        let text = result.and_then(|value| {
+            value
+                .to_string(&mut self.context)
+                .map(|s| s.to_std_string_lossy())
+                .map_err(|error| error.to_string())
+        });
+
+        // 显式收场：`guard` 析构时把场景搬回去。放在这里是为了让
+        // 顺序一目了然——求值必须在搬回去之前完成。
+        drop(guard);
+        text
+    }
+
     /// 每渲染帧调一次：实例化新脚本，调 `_ready` 与 `_process`。
     pub fn process(
         &mut self,
@@ -345,6 +480,7 @@ impl ScriptRuntime {
             ready: false,
             failed: false,
             name: script.name().to_string(),
+            error: None,
         };
 
         // 优先填回收掉的槽位，实例数才不会随反复增删无限涨。
@@ -602,6 +738,14 @@ fn fail(
     klog::error!("脚本「{name}」的 {method} 抛异常，已停用该脚本：{error}");
     if let Some(instance) = instances[index].as_mut() {
         instance.failed = true;
+        // 只留第一条。脚本坏掉之后往往每帧都报同样的错。
+        if instance.error.is_none() {
+            instance.error = Some(ScriptError {
+                script: name.to_string(),
+                method: method.to_string(),
+                message: error.to_string(),
+            });
+        }
     }
     stats.failed += 1;
 }

@@ -49,5 +49,5 @@ mod state_tests;
 #[cfg(test)]
 mod tests;
 
-pub use runtime::{InstanceId, ScriptRuntime, ScriptStats, Signal};
+pub use runtime::{InstanceId, ScriptError, ScriptRuntime, ScriptStats, Signal};
 pub use script::{SCRIPT_TYPE_UUID, Script, ScriptLoader};
