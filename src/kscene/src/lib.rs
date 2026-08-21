@@ -9,9 +9,9 @@
 #![warn(missing_docs)]
 
 mod audio;
-pub mod decal;
 mod cull;
 mod debug;
+pub mod decal;
 mod node;
 mod physics;
 mod ragdoll;
@@ -223,6 +223,8 @@ impl Scene {
             sprites: Vec::new(),
             sprite_textures: Vec::new(),
             prefiltered_environment: None,
+            reflection_probes: Vec::new(),
+            probe_settings: kpbr::prefilter::PrefilterSettings::default(),
             environment_version: 0,
         }
     }
@@ -247,6 +249,8 @@ impl Scene {
             sprites: Vec::new(),
             sprite_textures: Vec::new(),
             prefiltered_environment: None,
+            reflection_probes: Vec::new(),
+            probe_settings: kpbr::prefilter::PrefilterSettings::default(),
             environment_version: 0,
         }
     }
@@ -1273,7 +1277,78 @@ impl Scene {
         self.prefiltered_environment = Some(std::sync::Arc::new(kpbr::prefilter::prefilter(
             image, settings,
         )));
+        // 记下来给探针用。所有探针必须和全局环境同分辨率同级数，
+        // 因为它们要拼进同一张 GPU 纹理数组，而纹理数组要求每层等大。
+        self.probe_settings = settings;
+        // 换了全局环境，已有探针的分辨率就可能对不上了。留着的话
+        // 上传时会拼出一张错位的纹理数组，反射变成花屏。
+        if !self.reflection_probes.is_empty() {
+            klog::warn!(
+                "换了环境贴图，{} 个已有反射探针被清掉——它们的分辨率                 可能和新环境对不上，需要重新添加",
+                self.reflection_probes.len()
+            );
+            self.reflection_probes.clear();
+        }
         self.environment_version += 1;
+    }
+
+    /// 加一个反射探针。返回它的下标。
+    ///
+    /// # 必须先设过全局环境
+    ///
+    /// 探针和全局环境拼在同一张 GPU 纹理数组里，而纹理数组要求每层
+    /// 分辨率和 mip 级数完全一致。全局环境定下了这个规格，所以
+    /// [`Scene::set_environment_hdr`] 必须先调。没调过时返回 [`None`]。
+    ///
+    /// # 很慢
+    ///
+    /// 要跑一遍 GGX 预滤波，和 `set_environment_hdr` 一个量级。
+    /// 加载时做，别在游戏循环里做。
+    pub fn add_reflection_probe(
+        &mut self,
+        probe: kpbr::probe::ReflectionProbe,
+        image: &kpbr::hdr::HdrImage,
+    ) -> Option<usize> {
+        self.prefiltered_environment.as_ref()?;
+
+        let levels = kpbr::prefilter::prefilter(image, self.probe_settings);
+        self.reflection_probes.push(ReflectionProbeEntry {
+            probe,
+            levels: std::sync::Arc::new(levels),
+        });
+        self.environment_version += 1;
+        Some(self.reflection_probes.len() - 1)
+    }
+
+    /// 所有反射探针。
+    pub fn reflection_probes(&self) -> &[ReflectionProbeEntry] {
+        &self.reflection_probes
+    }
+
+    /// 改一个探针的参数（位置、盒子、强度）。
+    ///
+    /// 只改参数不重新预滤波，所以很快——挪一下探针位置是廉价的，
+    /// 换它的环境图不是。
+    pub fn reflection_probe_mut(
+        &mut self,
+        index: usize,
+    ) -> Option<&mut kpbr::probe::ReflectionProbe> {
+        let entry = self.reflection_probes.get_mut(index)?;
+        Some(&mut entry.probe)
+    }
+
+    /// 删掉所有反射探针。
+    pub fn clear_reflection_probes(&mut self) {
+        if !self.reflection_probes.is_empty() {
+            self.reflection_probes.clear();
+            self.environment_version += 1;
+        }
+    }
+
+    /// 管着 `point` 的探针，没有时返回 [`None`]。
+    pub fn probe_at(&self, point: kmath::Vec3) -> Option<usize> {
+        let probes: Vec<_> = self.reflection_probes.iter().map(|e| e.probe).collect();
+        kpbr::probe::select(&probes, point)
     }
 
     /// 预滤波的环境 mip 链。没设过 HDR 时为 `None`。

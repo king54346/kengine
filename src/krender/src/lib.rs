@@ -1295,8 +1295,7 @@ impl Renderer {
         let batches = build_batches(&draws, &mut instances);
         // 半透明的批次接在不透明的后面，共用同一个实例数组——
         // 实例下标是全局的，两边分开建数组的话下标会撞。
-        let transparent_batches =
-            build_transparent_batches(&mut transparent_draws, &mut instances);
+        let transparent_batches = build_transparent_batches(&mut transparent_draws, &mut instances);
         stats.draw_calls = (batches.len() + transparent_batches.len()) as u32;
         let total_draws = draws.len() + transparent_draws.len();
 
@@ -2909,7 +2908,16 @@ mod test {
             mesh_id: Uuid::from_u128(mesh),
             texture_key: [Uuid::from_u128(texture); 5],
             skinned: false,
+            depth: 0.0,
             uniforms: ObjectUniforms::zeroed(),
+        }
+    }
+
+    /// 同上，但带一个到相机的距离，用来验半透明排序。
+    fn draw_at(mesh: u128, texture: u128, depth: f32) -> DrawCall {
+        DrawCall {
+            depth,
+            ..draw(mesh, texture)
         }
     }
 
@@ -2918,6 +2926,91 @@ mod test {
         DrawCall {
             skinned: true,
             ..draw(mesh, texture)
+        }
+    }
+
+    /// 跑一遍半透明分批，返回批次和每批的第一个实例的距离。
+    fn transparent_batch(mut draws: Vec<DrawCall>) -> Vec<f32> {
+        let mut instances = Vec::new();
+        let batches = build_transparent_batches(&mut draws, &mut instances);
+        // 排序后的顺序体现在 draws 上，按批次的 first 反查。
+        batches
+            .iter()
+            .map(|b| draws[b.first as usize].depth)
+            .collect()
+    }
+
+    #[test]
+    fn transparent_draws_are_sorted_back_to_front() {
+        // 重排半透明物体会让远处的东西画在近处的上面。
+        let order = transparent_batch(vec![
+            draw_at(1, 1, 5.0),
+            draw_at(2, 2, 100.0),
+            draw_at(3, 3, 50.0),
+        ]);
+        assert_eq!(order, vec![100.0, 50.0, 5.0]);
+    }
+
+    #[test]
+    fn transparent_batches_only_merge_adjacent_items() {
+        // 同网格同贴图但距离上被别的物体隔开时，不能合并——
+        // 合并等于把中间那个的绘制顺序挪了位置。
+        let mut draws = vec![
+            draw_at(1, 1, 100.0),
+            draw_at(2, 2, 50.0),
+            draw_at(1, 1, 10.0),
+        ];
+        let mut instances = Vec::new();
+        let batches = build_transparent_batches(&mut draws, &mut instances);
+        assert_eq!(batches.len(), 3, "隔着一个物体的两项被错误合并了");
+
+        // 相邻的同类项仍然要合并。
+        let mut adjacent = vec![
+            draw_at(1, 1, 100.0),
+            draw_at(1, 1, 90.0),
+            draw_at(2, 2, 10.0),
+        ];
+        instances.clear();
+        let batches = build_transparent_batches(&mut adjacent, &mut instances);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].count, 2);
+    }
+
+    #[test]
+    fn nan_depth_does_not_panic() {
+        // 退化的变换会算出 NaN 距离。`partial_cmp().unwrap()` 会崩掉整帧。
+        let mut draws = vec![
+            draw_at(1, 1, f32::NAN),
+            draw_at(2, 2, 5.0),
+            draw_at(3, 3, f32::NAN),
+        ];
+        let mut instances = Vec::new();
+        let batches = build_transparent_batches(&mut draws, &mut instances);
+        assert_eq!(batches.len(), 3);
+        assert_eq!(instances.len(), 3);
+    }
+
+    #[test]
+    fn transparent_instances_append_after_opaque_ones() {
+        // 实例下标是全局的：两边各建一个数组的话下标会撞，
+        // 半透明物体会用上不透明物体的变换矩阵。
+        let opaque = [draw(1, 1), draw(2, 2)];
+        let mut instances = Vec::new();
+        let opaque_batches = build_batches(&opaque, &mut instances);
+        let mut transparent = vec![draw_at(3, 3, 10.0), draw_at(4, 4, 20.0)];
+        let transparent_batches = build_transparent_batches(&mut transparent, &mut instances);
+
+        assert_eq!(instances.len(), 4);
+        // 半透明的批次全部指向后两个槽位。
+        for batch in &transparent_batches {
+            assert!(
+                batch.first >= 2,
+                "半透明批次的起点 {} 撞进了不透明区",
+                batch.first
+            );
+        }
+        for batch in &opaque_batches {
+            assert!(batch.first < 2);
         }
     }
 

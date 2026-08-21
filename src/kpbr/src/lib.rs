@@ -23,6 +23,7 @@ pub mod hdr;
 pub mod ibl;
 pub mod loader;
 pub mod prefilter;
+pub mod probe;
 pub mod sky;
 
 use crate::sky::Sky;

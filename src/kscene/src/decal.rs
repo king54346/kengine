@@ -192,7 +192,11 @@ mod tests {
         // 往天上开一枪不该在场景里留下一个空节点。
         let (mut scene, _) = scene_with_floor();
         let before = scene.nodes().alive_count();
-        assert!(scene.spawn_decal(&options_at(Vec3::new(0.0, 50.0, 0.0))).is_none());
+        assert!(
+            scene
+                .spawn_decal(&options_at(Vec3::new(0.0, 50.0, 0.0)))
+                .is_none()
+        );
         assert_eq!(scene.nodes().alive_count(), before);
     }
 
@@ -209,7 +213,12 @@ mod tests {
 
         let handle = scene.spawn_decal(&options).unwrap();
         assert_eq!(
-            scene.try_get(handle).unwrap().material().unwrap().blend_mode(),
+            scene
+                .try_get(handle)
+                .unwrap()
+                .material()
+                .unwrap()
+                .blend_mode(),
             BlendMode::Alpha
         );
     }
@@ -224,7 +233,11 @@ mod tests {
         scene.update();
 
         assert!(scene.spawn_decal(&options_at(Vec3::ZERO)).is_none());
-        assert!(scene.spawn_decal(&options_at(Vec3::new(50.0, 0.0, 0.0))).is_some());
+        assert!(
+            scene
+                .spawn_decal(&options_at(Vec3::new(50.0, 0.0, 0.0)))
+                .is_some()
+        );
     }
 
     #[test]
@@ -249,7 +262,16 @@ mod tests {
 
         // 两块地板各两个三角形，都完整落在贴花体内。
         // 裁剪不共享顶点，所以是 2 块 × 2 三角形 × 3 索引。
-        assert_eq!(scene.try_get(handle).unwrap().mesh().unwrap().indices().len(), 12);
+        assert_eq!(
+            scene
+                .try_get(handle)
+                .unwrap()
+                .mesh()
+                .unwrap()
+                .indices()
+                .len(),
+            12
+        );
     }
 
     #[test]
@@ -298,7 +320,13 @@ mod tests {
         let handle = scene
             .spawn_decal(&options_at(Vec3::ZERO).with_root(group))
             .unwrap();
-        let limited = scene.try_get(handle).unwrap().mesh().unwrap().indices().len();
+        let limited = scene
+            .try_get(handle)
+            .unwrap()
+            .mesh()
+            .unwrap()
+            .indices()
+            .len();
 
         // 不限定时两块都命中，几何量正好翻倍。
         let all = scene.spawn_decal(&options_at(Vec3::ZERO)).unwrap();
@@ -325,13 +353,25 @@ mod tests {
         // 每一层都比上一层高 offset——很快就浮在半空了。
         let (mut scene, _) = scene_with_floor();
         let first = scene.spawn_decal(&options_at(Vec3::ZERO)).unwrap();
-        let baseline = scene.try_get(first).unwrap().mesh().unwrap().indices().len();
+        let baseline = scene
+            .try_get(first)
+            .unwrap()
+            .mesh()
+            .unwrap()
+            .indices()
+            .len();
         scene.update();
 
         // 第二个只该命中地板，几何量和第一个一样。
         let second = scene.spawn_decal(&options_at(Vec3::ZERO)).unwrap();
         assert_eq!(
-            scene.try_get(second).unwrap().mesh().unwrap().indices().len(),
+            scene
+                .try_get(second)
+                .unwrap()
+                .mesh()
+                .unwrap()
+                .indices()
+                .len(),
             baseline,
             "第二个贴花贴到第一个上面去了"
         );
@@ -343,7 +383,14 @@ mod tests {
         scene.update();
         let third = scene.spawn_decal(&options_at(Vec3::ZERO)).unwrap();
         assert!(
-            scene.try_get(third).unwrap().mesh().unwrap().indices().len() > baseline,
+            scene
+                .try_get(third)
+                .unwrap()
+                .mesh()
+                .unwrap()
+                .indices()
+                .len()
+                > baseline,
             "开关没起作用：贴花本来就没被当成接收面"
         );
     }

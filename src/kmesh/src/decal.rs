@@ -22,7 +22,7 @@
 //! 太大会在掠射角下看出贴花浮在表面上方。
 
 use crate::{Mesh, Vertex};
-use kmath::{Mat4, Vec2, Vec3};
+use kmath::{Mat4, Vec3};
 
 /// 一块贴花的投影体。
 ///
@@ -58,7 +58,11 @@ impl Decal {
     pub fn new(position: Vec3, normal: Vec3, size: Vec3, roll: f32) -> Self {
         let normal = normal.normalize_or(Vec3::Y);
         // 贴花沿盒子的 -Z 投影，所以盒子的 +Z 要对着表面法线。
-        let up = if normal.y.abs() > 0.99 { Vec3::X } else { Vec3::Y };
+        let up = if normal.y.abs() > 0.99 {
+            Vec3::X
+        } else {
+            Vec3::Y
+        };
         let right = up.cross(normal).normalize_or(Vec3::X);
         let up = normal.cross(right);
 
@@ -137,7 +141,10 @@ pub fn project(receiver: &Mesh, receiver_transform: Mat4, decal: &Decal) -> Opti
         }
 
         // 裁进单位立方体。
-        let local: Vec<Vec3> = corners.iter().map(|c| to_decal.transform_point3(*c)).collect();
+        let local: Vec<Vec3> = corners
+            .iter()
+            .map(|c| to_decal.transform_point3(*c))
+            .collect();
         let clipped = clip_to_unit_cube(&local);
         if clipped.len() < 3 {
             continue;
@@ -471,7 +478,11 @@ mod tests {
             Vec3::new(0.0, 2.0, 0.0),
         ];
         let clipped = clip_to_unit_cube(&triangle);
-        assert!(clipped.len() > 3, "该在交点处插顶点，实测 {} 个", clipped.len());
+        assert!(
+            clipped.len() > 3,
+            "该在交点处插顶点，实测 {} 个",
+            clipped.len()
+        );
         for point in &clipped {
             assert!(point.x <= 0.5 + 1e-4 && point.y <= 0.5 + 1e-4);
         }
