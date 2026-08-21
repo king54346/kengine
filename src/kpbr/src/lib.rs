@@ -19,7 +19,10 @@
 #![warn(missing_docs)]
 
 pub mod brdf;
+pub mod hdr;
 pub mod ibl;
+pub mod loader;
+pub mod prefilter;
 pub mod sky;
 
 use crate::sky::Sky;
@@ -118,6 +121,31 @@ impl Environment {
             intensity: 1.0,
             harmonics: ibl::SphericalHarmonics::from_sky(&sky, 48),
         }
+    }
+
+    /// 用一张实拍的 HDR 全景图当环境光。
+    ///
+    /// 程序化天空只有天顶、地平线、地面三个颜色加一个太阳，给不出
+    /// 真实场景的光照分布——窗户的方向、树荫下的绿色反射、傍晚天空的
+    /// 渐变，这些只能从实拍来。
+    ///
+    /// [`Environment::sky`] 仍然保留：它负责画背景（HDR 的镜面部分
+    /// 还没接进着色器，见 `next.md`）。想让背景也用 HDR 得等那一步。
+    ///
+    /// 采样数比程序化天空高：实拍图里有窗户、灯这类很亮很小的区域，
+    /// 采样不够会让它们时有时无。**这是一次 96×96 的球面积分，
+    /// 不要每帧调用。**
+    pub fn from_hdr(image: &hdr::HdrImage, sky: Sky) -> Self {
+        Self {
+            sky,
+            intensity: 1.0,
+            harmonics: ibl::SphericalHarmonics::from_hdr(image, 96),
+        }
+    }
+
+    /// 换一张 HDR 环境图，重算球谐。
+    pub fn set_hdr(&mut self, image: &hdr::HdrImage) {
+        self.harmonics = ibl::SphericalHarmonics::from_hdr(image, 96);
     }
 
     /// 改动 [`Environment::sky`] 之后调用，重算球谐系数。

@@ -69,6 +69,20 @@ impl SphericalHarmonics {
     /// `samples` 是每个维度的采样数，总采样量为其平方；64 已足够平滑。
     /// 太阳不计入——它通常已由一盏方向光单独表示，重复计入会过曝。
     pub fn from_sky(sky: &Sky, samples: u32) -> Self {
+        Self::project(samples, |direction| sky.sample_without_sun(direction))
+    }
+
+    /// 把一张 HDR 全景图投影成球谐。
+    ///
+    /// 采样数要比程序化天空高一些：实拍的 HDR 里有窗户、灯这类
+    /// 很亮很小的区域，采样不够会让它们时有时无——同一张图重算两次
+    /// 得到的环境光都不一样。
+    pub fn from_hdr(image: &crate::hdr::HdrImage, samples: u32) -> Self {
+        Self::project(samples, |direction| image.sample_direction(direction))
+    }
+
+    /// 球面积分的公共部分。
+    fn project(samples: u32, mut radiance_of: impl FnMut(Vec3) -> Vec3) -> Self {
         let samples = samples.max(8);
         let mut coefficients = [Vec3::ZERO; SH_COEFFICIENT_COUNT];
         let mut total_weight = 0.0f32;
@@ -83,7 +97,7 @@ impl SphericalHarmonics {
                 let (sin_phi, cos_phi) = phi.sin_cos();
 
                 let direction = Vec3::new(sin_theta * cos_phi, cos_theta, sin_theta * sin_phi);
-                let radiance = sky.sample_without_sun(direction);
+                let radiance = radiance_of(direction);
                 let basis = sh_basis(direction);
 
                 for (coefficient, basis_value) in coefficients.iter_mut().zip(basis) {

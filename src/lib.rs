@@ -121,7 +121,12 @@ pub mod prelude {
         BlendMode, Collision, CollisionResponse, ColorGradient, Curve, Emitter, EmitterShape,
         ParticleSystem, Space, SurfaceHit,
     };
-    pub use kpbr::{Environment, PbrMaterial};
+    pub use kpbr::{
+        Environment, PbrMaterial,
+        hdr::HdrImage,
+        loader::HdrLoader,
+        prefilter::{PrefilterSettings, prefilter},
+    };
     pub use kphysics::{
         BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, CollisionEvent, InteractionGroups,
         JointDesc, JointHandle, JointKind, PhysicsDebugOptions, PhysicsWorld, RayCastOptions,
