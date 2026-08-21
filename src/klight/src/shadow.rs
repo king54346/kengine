@@ -14,6 +14,14 @@ pub struct ShadowSettings {
     pub depth_bias: f32,
     /// 沿法线方向的偏移量，比纯深度偏移更不容易产生「漏光」。
     pub normal_bias: f32,
+    /// 一个物体在某级级联里投影小于多少个纹素时就不画。
+    ///
+    /// 级联的主要代价是每级一次场景遍历。远处那几级覆盖几百米，
+    /// 一个小物件投出的影子连一个纹素都占不到，画它纯属浪费。
+    ///
+    /// 设为 0 关掉。调大会让小物件在远处**先丢影子再丢自己**——
+    /// 2 个纹素基本看不出来，超过 4 就开始能注意到了。
+    pub min_shadow_texels: f32,
 }
 
 impl Default for ShadowSettings {
@@ -22,6 +30,7 @@ impl Default for ShadowSettings {
             resolution: 2048,
             depth_bias: 0.0015,
             normal_bias: 0.02,
+            min_shadow_texels: 2.0,
         }
     }
 }

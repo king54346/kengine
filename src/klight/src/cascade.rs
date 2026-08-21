@@ -246,6 +246,70 @@ fn cascade_matrix(direction: Vec3, slice: Aabb, scene: Aabb) -> Mat4 {
     projection * view
 }
 
+/// 一个物体在某一级级联里值不值得画。
+///
+/// # 为什么需要它
+///
+/// 级联最主要的代价是**每级一次完整的场景遍历**——三级就是三遍。
+/// 但远处那几级里，一个小物件投出的影子可能连一个纹素都占不到，
+/// 画它纯属浪费。近处那几级则覆盖范围很小，场景里绝大多数物体
+/// 根本不在里面。
+///
+/// 两条判据：
+///
+/// 1. **在不在这一级的范围里**——把包围盒投到光空间裁剪坐标，
+///    和裁剪立方体求交。不相交的话管线本来也会把它剔掉，
+///    只是要先跑完顶点着色器。
+/// 2. **投出来够不够大**——投影后的屏幕尺寸小于 `min_texels` 个纹素时跳过。
+///
+/// `resolution` 是阴影贴图的边长，`min_texels` 是尺寸下限
+/// （0 表示不做尺寸剔除）。
+///
+/// # 保守性
+///
+/// 这个判定**只会漏掉本来就看不见的**，不会把该画的剔掉——
+/// 用的是包围盒的裁剪空间包围盒，比真实投影大。代价是有些
+/// 完全在范围外的物体仍会被判为可见（斜着的长条物体最明显）。
+pub fn shadow_visibility(matrix: Mat4, aabb: Aabb, resolution: u32, min_texels: f32) -> bool {
+    // 空包围盒（min 是 +∞）转出来全是 NaN，NaN 的比较永远为假，
+    // 下面的求交会误判成不可见——正好是想要的，但显式挡掉更清楚。
+    if aabb.is_empty() {
+        return false;
+    }
+
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for corner in aabb.corners() {
+        let clip = matrix * corner.extend(1.0);
+        // 正交投影，w 恒为 1，不用做透视除法。级联矩阵一定是正交的
+        // （方向光没有透视），所以这里不必处理 w 为负的情况。
+        min = min.min(clip.truncate());
+        max = max.max(clip.truncate());
+    }
+
+    if !min.is_finite() || !max.is_finite() {
+        // 退化的矩阵会算出 NaN。判成不可见——画一个位置是 NaN 的
+        // 物体会让整块阴影贴图变成垃圾。
+        return false;
+    }
+
+    // 裁剪立方体：XY 是 [-1, 1]，Z 是 [0, 1]（wgpu 的深度范围）。
+    if max.x < -1.0 || min.x > 1.0 || max.y < -1.0 || min.y > 1.0 || max.z < 0.0 || min.z > 1.0 {
+        return false;
+    }
+
+    if min_texels > 0.0 {
+        // 裁剪空间的 2 个单位铺满整张贴图，所以尺寸 × 分辨率 / 2 就是纹素数。
+        let extent = (max - min).truncate();
+        let texels = extent.max_element() * resolution as f32 * 0.5;
+        if texels < min_texels {
+            return false;
+        }
+    }
+
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,5 +537,193 @@ mod tests {
         for cascade in &cascades {
             assert!(cascade.matrix.to_cols_array().iter().all(|v| v.is_finite()));
         }
+    }
+
+    /// 一个覆盖 [-10, 10]³ 的正交光矩阵，深度映到 0..1。
+    fn light_matrix() -> Mat4 {
+        Mat4::orthographic_rh(-10.0, 10.0, -10.0, 10.0, 0.0, 20.0)
+            * Mat4::look_at_rh(Vec3::new(0.0, 10.0, 0.0), Vec3::ZERO, Vec3::Z)
+    }
+
+    fn box_at(center: Vec3, half: f32) -> Aabb {
+        Aabb::from_center_half_extents(center, Vec3::splat(half))
+    }
+
+    #[test]
+    fn a_box_inside_the_cascade_is_visible() {
+        assert!(shadow_visibility(
+            light_matrix(),
+            box_at(Vec3::ZERO, 1.0),
+            1024,
+            0.0
+        ));
+    }
+
+    #[test]
+    fn a_box_outside_the_cascade_is_culled() {
+        // 级联最主要的代价是每级一次完整的场景遍历。近处那几级
+        // 覆盖范围很小，场景里绝大多数物体根本不在里面。
+        assert!(!shadow_visibility(
+            light_matrix(),
+            box_at(Vec3::new(500.0, 0.0, 0.0), 1.0),
+            1024,
+            0.0
+        ));
+        assert!(!shadow_visibility(
+            light_matrix(),
+            box_at(Vec3::new(0.0, 0.0, -500.0), 1.0),
+            1024,
+            0.0
+        ));
+    }
+
+    #[test]
+    fn a_box_straddling_the_edge_is_kept() {
+        // 判定必须保守：剔掉一个跨在边界上的物体会让它的影子
+        // 在相机移动时突然消失。
+        assert!(shadow_visibility(
+            light_matrix(),
+            box_at(Vec3::new(10.0, 0.0, 0.0), 2.0),
+            1024,
+            0.0
+        ));
+    }
+
+    #[test]
+    fn a_tiny_box_is_culled_by_size() {
+        // 一个小物件在远处那几级里投出的影子连一个纹素都占不到。
+        let matrix = light_matrix();
+        // 半径 0.001 米，在 20 米宽的级联里 = 0.0001 的裁剪空间尺寸，
+        // 1024 分辨率下约 0.05 个纹素。
+        let tiny = box_at(Vec3::ZERO, 0.001);
+        assert!(!shadow_visibility(matrix, tiny, 1024, 2.0));
+        // 关掉尺寸剔除就该画。
+        assert!(shadow_visibility(matrix, tiny, 1024, 0.0));
+    }
+
+    #[test]
+    fn size_culling_scales_with_resolution() {
+        // 同一个物体，贴图越大占的纹素越多。分辨率没进公式的话
+        // 提高阴影分辨率不会让小物件重新出现。
+        let matrix = light_matrix();
+        let small = box_at(Vec3::ZERO, 0.02);
+        assert!(!shadow_visibility(matrix, small, 256, 2.0));
+        assert!(shadow_visibility(matrix, small, 8192, 2.0));
+    }
+
+    #[test]
+    fn size_culling_scales_with_cascade_extent() {
+        // 同一个物体，级联覆盖得越远、每纹素代表的世界尺寸越大，
+        // 它占的纹素就越少。这正是「远处那几级只画大物体」的由来。
+        let near = Mat4::orthographic_rh(-10.0, 10.0, -10.0, 10.0, 0.0, 20.0)
+            * Mat4::look_at_rh(Vec3::new(0.0, 10.0, 0.0), Vec3::ZERO, Vec3::Z);
+        let far = Mat4::orthographic_rh(-500.0, 500.0, -500.0, 500.0, 0.0, 1000.0)
+            * Mat4::look_at_rh(Vec3::new(0.0, 500.0, 0.0), Vec3::ZERO, Vec3::Z);
+        let object = box_at(Vec3::ZERO, 0.15);
+
+        assert!(shadow_visibility(near, object, 1024, 2.0), "近级该画");
+        assert!(!shadow_visibility(far, object, 1024, 2.0), "远级该剔");
+    }
+
+    #[test]
+    fn a_big_box_survives_size_culling_everywhere() {
+        // 反证：大物体在任何一级都该保留，不然远处的建筑会没有影子。
+        let far = Mat4::orthographic_rh(-500.0, 500.0, -500.0, 500.0, 0.0, 1000.0)
+            * Mat4::look_at_rh(Vec3::new(0.0, 500.0, 0.0), Vec3::ZERO, Vec3::Z);
+        assert!(shadow_visibility(far, box_at(Vec3::ZERO, 50.0), 1024, 2.0));
+    }
+
+    #[test]
+    fn an_empty_aabb_is_culled() {
+        // 空包围盒的 min 是 +∞，转出来全是 NaN。
+        assert!(!shadow_visibility(light_matrix(), Aabb::EMPTY, 1024, 0.0));
+    }
+
+    #[test]
+    fn a_degenerate_matrix_is_culled() {
+        // NaN 矩阵：画一个位置是 NaN 的物体会让整块阴影贴图变成垃圾。
+        assert!(!shadow_visibility(
+            Mat4::from_cols_array(&[f32::NAN; 16]),
+            box_at(Vec3::ZERO, 1.0),
+            1024,
+            0.0
+        ));
+
+        // 零矩阵不产生 NaN——所有角点塌到原点，而原点在裁剪立方体里，
+        // 所以不开尺寸剔除时它会被判为可见。这不是漏洞：真按它画，
+        // 整个场景挤成一个点，深度图没有意义但也不会污染别处。
+        // 开了尺寸剔除的话尺寸为 0，自然被剔掉。
+        assert!(!shadow_visibility(
+            Mat4::ZERO,
+            box_at(Vec3::ZERO, 1.0),
+            1024,
+            2.0
+        ));
+    }
+
+    #[test]
+    fn a_box_behind_the_light_near_plane_is_kept() {
+        // 站在光和级联之间的物体仍然要投影。剔掉它的话，
+        // 挂在高处的东西会不投影——最典型的是屋顶。
+        //
+        // `cascade_matrix` 已经把深度往光的方向延伸过了，所以这类
+        // 物体的 z 应当落在 0..1 里。
+        let cascades = compute(camera(), light(), scene(), CascadeSettings::default());
+        let first = &cascades[0];
+
+        // 位置要**沿光方向反推**，不能随便找个高处：随便放的话它的
+        // 影子落在几十米外，本来就不该投进这一级。
+        //
+        // 取这一级中心，沿 -light 走 40 米——这个物体的影子正好
+        // 落在这一级中心。
+        let center = {
+            // 从裁剪空间原点反解出这一级覆盖区域的中心。
+            let inverse = first.matrix.inverse();
+            let point = inverse * kmath::Vec4::new(0.0, 0.0, 0.5, 1.0);
+            point.truncate() / point.w
+        };
+        let above = center - light() * 40.0;
+
+        assert!(
+            shadow_visibility(first.matrix, box_at(above, 3.0), 1024, 0.0),
+            "光和级联之间的物体被剔掉了，屋顶会不投影"
+        );
+    }
+
+    #[test]
+    fn culling_actually_removes_most_of_a_scattered_scene() {
+        // 端到端：一片撒开的小物件，近级该只留下附近那些。
+        // 这一条不成立的话说明剔除装了但没生效。
+        let cascades = compute(camera(), light(), scene(), CascadeSettings::default());
+
+        let objects: Vec<Aabb> = (0..400)
+            .map(|i| {
+                let angle = i as f32 * 0.37;
+                let radius = (i % 20) as f32 * 10.0;
+                box_at(
+                    Vec3::new(angle.cos() * radius, 0.0, angle.sin() * radius),
+                    0.5,
+                )
+            })
+            .collect();
+
+        let kept: Vec<usize> = cascades
+            .iter()
+            .map(|c| {
+                objects
+                    .iter()
+                    .filter(|a| shadow_visibility(c.matrix, **a, 2048, 2.0))
+                    .count()
+            })
+            .collect();
+
+        assert!(
+            kept[0] < objects.len() / 2,
+            "第一级留下了 {}/{}，剔除没生效",
+            kept[0],
+            objects.len()
+        );
+        // 每一级都该留下一些，不然是把该画的也剔了。
+        assert!(kept.iter().all(|n| *n > 0), "有级联一个物体都没留下：{kept:?}");
     }
 }

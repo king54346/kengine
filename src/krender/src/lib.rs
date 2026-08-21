@@ -10,6 +10,8 @@
 
 mod gizmo;
 mod particle;
+#[cfg(test)]
+mod cascade_batch_tests;
 mod post;
 mod sprite2d;
 mod tonemap;
@@ -198,6 +200,8 @@ struct DrawCall {
     ///
     /// 存平方而不是距离：只用来比大小，开方是白花的。
     depth: f32,
+    /// 世界空间包围盒，阴影的逐级剔除要用。
+    aabb: kmath::Aabb,
     uniforms: ObjectUniforms,
 }
 
@@ -236,6 +240,11 @@ pub struct RenderStats {
     pub ui_vertices: u32,
     /// 本帧走 2D 批处理管线的精灵数。
     pub sprites: u32,
+    /// 阴影 pass 提交的绘制调用数（所有级联加起来）。
+    ///
+    /// 和 [`draw_calls`](Self::draw_calls) 对比能看出逐级剔除的效果：
+    /// 不剔除的话它约等于 `draw_calls × 级数`。
+    pub shadow_draw_calls: u32,
     /// 视锥剔除耗时（微秒）。
     pub cull_micros: u32,
     /// CPU 端准备一帧的总耗时（微秒）：剔除 + 收集 + 分批 + 上传。
@@ -265,8 +274,61 @@ impl RenderStats {
 ///
 /// 排序会打乱原本的提交顺序。不透明物体有深度测试兜底，顺序无所谓；
 /// 将来加半透明时，那部分必须单独走一条按深度排序的路径。
-fn build_batches(draws: &[DrawCall], instances: &mut Vec<ObjectUniforms>) -> Vec<Batch> {
-    build_batches_into(draws, instances, true)
+fn build_batches(
+    draws: &[DrawCall],
+    instances: &mut Vec<ObjectUniforms>,
+    bounds: &mut Vec<kmath::Aabb>,
+) -> Vec<Batch> {
+    build_batches_into(draws, instances, bounds, true)
+}
+
+/// 按每个实例的包围盒，把一批拆成「本级要画的连续段」。
+///
+/// 实例下标是全局的、和主 pass 共用一个数组，所以**不能重排也不能压缩**——
+/// 只能把批次切成若干段，跳过被剔掉的那些。
+///
+/// 同一批里的实例通常在空间上是散开的（同一个网格的多个实例），
+/// 所以切出来的段数可能不少；但每段仍是一次实例化绘制，
+/// 比逐个提交好得多。
+fn cascade_batches(
+    batches: &[Batch],
+    bounds: &[kmath::Aabb],
+    matrix: kmath::Mat4,
+    resolution: u32,
+    min_texels: f32,
+) -> Vec<Batch> {
+    let mut out: Vec<Batch> = Vec::with_capacity(batches.len());
+    for batch in batches {
+        let mut run: Option<Batch> = None;
+        for offset in 0..batch.count {
+            let index = (batch.first + offset) as usize;
+            let visible = bounds
+                .get(index)
+                .is_some_and(|aabb| {
+                    klight::cascade::shadow_visibility(matrix, *aabb, resolution, min_texels)
+                });
+
+            match (visible, run.as_mut()) {
+                // 接着上一段。
+                (true, Some(current)) => current.count += 1,
+                // 开一段新的。
+                (true, None) => {
+                    run = Some(Batch {
+                        first: batch.first + offset,
+                        count: 1,
+                        ..*batch
+                    })
+                }
+                // 断了，收尾。
+                (false, Some(_)) => out.push(run.take().expect("刚判过是 Some")),
+                (false, None) => {}
+            }
+        }
+        if let Some(current) = run {
+            out.push(current);
+        }
+    }
+    out
 }
 
 /// 半透明物体的批次。
@@ -280,23 +342,27 @@ fn build_batches(draws: &[DrawCall], instances: &mut Vec<ObjectUniforms>) -> Vec
 fn build_transparent_batches(
     draws: &mut [DrawCall],
     instances: &mut Vec<ObjectUniforms>,
+    bounds: &mut Vec<kmath::Aabb>,
 ) -> Vec<Batch> {
     // 从远到近。`total_cmp` 而不是 `partial_cmp().unwrap()`：
     // 退化的变换会算出 NaN 距离，unwrap 会直接崩掉整帧。
     draws.sort_by(|a, b| b.depth.total_cmp(&a.depth));
-    build_batches_into(draws, instances, false)
+    build_batches_into(draws, instances, bounds, false)
 }
 
 /// `reorder` 为真时按网格/贴图重排以最大化合并；为假时保持传入顺序。
 fn build_batches_into(
     draws: &[DrawCall],
     instances: &mut Vec<ObjectUniforms>,
+    bounds: &mut Vec<kmath::Aabb>,
     reorder: bool,
 ) -> Vec<Batch> {
     if !reorder {
         let mut batches: Vec<Batch> = Vec::new();
         for draw in draws {
             instances.push(draw.uniforms);
+            // 和 `instances` 一一对齐：阴影逐级剔除按实例下标回查它。
+            bounds.push(draw.aabb);
             match batches.last_mut() {
                 Some(last)
                     if last.mesh_id == draw.mesh_id
@@ -316,10 +382,14 @@ fn build_batches_into(
         }
         return batches;
     }
-    build_opaque_batches(draws, instances)
+    build_opaque_batches(draws, instances, bounds)
 }
 
-fn build_opaque_batches(draws: &[DrawCall], instances: &mut Vec<ObjectUniforms>) -> Vec<Batch> {
+fn build_opaque_batches(
+    draws: &[DrawCall],
+    instances: &mut Vec<ObjectUniforms>,
+    bounds: &mut Vec<kmath::Aabb>,
+) -> Vec<Batch> {
     let mut order: Vec<u32> = (0..draws.len() as u32).collect();
     order.sort_unstable_by(|&a, &b| {
         let (a, b) = (&draws[a as usize], &draws[b as usize]);
@@ -337,6 +407,7 @@ fn build_opaque_batches(draws: &[DrawCall], instances: &mut Vec<ObjectUniforms>)
     for &index in &order {
         let draw = &draws[index as usize];
         instances.push(draw.uniforms);
+        bounds.push(draw.aabb);
         match batches.last_mut() {
             // 排序保证同一批的对象连续出现，所以只用跟上一批比。
             Some(last)
@@ -1304,6 +1375,7 @@ impl Renderer {
                 texture_key,
                 skinned: skin_offset.is_some(),
                 depth,
+                aabb: item.aabb,
                 uniforms: ObjectUniforms {
                     model: model.to_cols_array_2d(),
                     // 逆转置，保证非均匀缩放下法线方向仍然正确。
@@ -1338,10 +1410,16 @@ impl Renderer {
 
         // ── 批处理：同网格同贴图的对象合并成一次绘制 ──
         let mut instances = Vec::new();
-        let batches = build_batches(&draws, &mut instances);
+        // 和 `instances` 一一对齐的包围盒，阴影逐级剔除按实例下标回查它。
+        let mut instance_bounds = Vec::new();
+        let batches = build_batches(&draws, &mut instances, &mut instance_bounds);
         // 半透明的批次接在不透明的后面，共用同一个实例数组——
         // 实例下标是全局的，两边分开建数组的话下标会撞。
-        let transparent_batches = build_transparent_batches(&mut transparent_draws, &mut instances);
+        let transparent_batches = build_transparent_batches(
+            &mut transparent_draws,
+            &mut instances,
+            &mut instance_bounds,
+        );
         stats.draw_calls = (batches.len() + transparent_batches.len()) as u32;
         let total_draws = draws.len() + transparent_draws.len();
 
@@ -1603,10 +1681,27 @@ impl Renderer {
 
             // 每级级联跑一遍：一次 render pass 只能挂一层当深度附件。
             //
-            // 这是级联最主要的代价——N 级就是 N 次完整的场景遍历。
-            // 远处那几级其实可以只画大物体（小物件在几百米外投的影子
-            // 不到一个像素），但那需要按尺寸分级剔除，暂时没做。
+            // 这曾经是级联最主要的代价——N 级就是 N 次**完整**的场景遍历。
+            // 现在每级先剔一遍：范围外的不画，投影小于两个纹素的也不画
+            // （小物件在几百米外投的影子还不到一个像素）。
             for (index, cascade) in cascades.iter().enumerate() {
+                let cascade_batches = cascade_batches(
+                    &batches,
+                    &instance_bounds,
+                    cascade.matrix,
+                    settings.resolution.max(256),
+                    settings.min_shadow_texels,
+                );
+                stats.shadow_draw_calls += cascade_batches.len() as u32;
+                {
+                    let kept: u32 = cascade_batches.iter().map(|b| b.count).sum();
+                    let total: u32 = batches.iter().map(|b| b.count).sum();
+                    klog::info!(
+                        "[验证] 级联 {index}：实例 {kept}/{total}，批次 {}/{}",
+                        cascade_batches.len(), batches.len()
+                    );
+                }
+
                 self.queue.write_buffer(
                     &self.shadow.globals_buffer,
                     0,
@@ -1643,7 +1738,7 @@ impl Renderer {
                 // 深度 pass 与贴图无关，本可以按网格合并得更狠，
                 // 但沿用主 pass 的分批能保证两边的实例下标一一对应。
                 let mut current_skinned = None;
-                for batch in &batches {
+                for batch in &cascade_batches {
                     let Some(gpu_mesh) = self.meshes.get(&batch.mesh_id) else {
                         continue;
                     };
@@ -3004,6 +3099,7 @@ mod test {
             texture_key: [Uuid::from_u128(texture); 5],
             skinned: false,
             depth: 0.0,
+            aabb: kmath::Aabb::new(kmath::Vec3::ZERO, kmath::Vec3::ONE),
             uniforms: ObjectUniforms::zeroed(),
         }
     }
@@ -3027,7 +3123,7 @@ mod test {
     /// 跑一遍半透明分批，返回批次和每批的第一个实例的距离。
     fn transparent_batch(mut draws: Vec<DrawCall>) -> Vec<f32> {
         let mut instances = Vec::new();
-        let batches = build_transparent_batches(&mut draws, &mut instances);
+        let batches = build_transparent_batches(&mut draws, &mut instances, &mut Vec::new());
         // 排序后的顺序体现在 draws 上，按批次的 first 反查。
         batches
             .iter()
@@ -3056,7 +3152,7 @@ mod test {
             draw_at(1, 1, 10.0),
         ];
         let mut instances = Vec::new();
-        let batches = build_transparent_batches(&mut draws, &mut instances);
+        let batches = build_transparent_batches(&mut draws, &mut instances, &mut Vec::new());
         assert_eq!(batches.len(), 3, "隔着一个物体的两项被错误合并了");
 
         // 相邻的同类项仍然要合并。
@@ -3066,7 +3162,7 @@ mod test {
             draw_at(2, 2, 10.0),
         ];
         instances.clear();
-        let batches = build_transparent_batches(&mut adjacent, &mut instances);
+        let batches = build_transparent_batches(&mut adjacent, &mut instances, &mut Vec::new());
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].count, 2);
     }
@@ -3080,7 +3176,7 @@ mod test {
             draw_at(3, 3, f32::NAN),
         ];
         let mut instances = Vec::new();
-        let batches = build_transparent_batches(&mut draws, &mut instances);
+        let batches = build_transparent_batches(&mut draws, &mut instances, &mut Vec::new());
         assert_eq!(batches.len(), 3);
         assert_eq!(instances.len(), 3);
     }
@@ -3091,9 +3187,9 @@ mod test {
         // 半透明物体会用上不透明物体的变换矩阵。
         let opaque = [draw(1, 1), draw(2, 2)];
         let mut instances = Vec::new();
-        let opaque_batches = build_batches(&opaque, &mut instances);
+        let opaque_batches = build_batches(&opaque, &mut instances, &mut Vec::new());
         let mut transparent = vec![draw_at(3, 3, 10.0), draw_at(4, 4, 20.0)];
-        let transparent_batches = build_transparent_batches(&mut transparent, &mut instances);
+        let transparent_batches = build_transparent_batches(&mut transparent, &mut instances, &mut Vec::new());
 
         assert_eq!(instances.len(), 4);
         // 半透明的批次全部指向后两个槽位。
@@ -3112,7 +3208,7 @@ mod test {
     /// 跑一遍分批，返回批次与按批次排好的实例数组。
     fn batch(draws: &[DrawCall]) -> (Vec<Batch>, Vec<ObjectUniforms>) {
         let mut instances = Vec::new();
-        let batches = build_batches(draws, &mut instances);
+        let batches = build_batches(draws, &mut instances, &mut Vec::new());
         (batches, instances)
     }
 
