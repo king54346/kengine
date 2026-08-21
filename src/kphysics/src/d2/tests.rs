@@ -51,7 +51,10 @@ fn a_ball_falls_and_lands_on_the_ground() {
 #[test]
 fn a_fixed_body_does_not_move() {
     let mut world = world_with_ground();
-    let wall = world.add_body(&RigidBodyDesc::fixed().with_position(Vec2::new(5.0, 5.0)), 2);
+    let wall = world.add_body(
+        &RigidBodyDesc::fixed().with_position(Vec2::new(5.0, 5.0)),
+        2,
+    );
     world.add_collider(&ColliderDesc::cuboid(Vec2::splat(1.0)), Some(wall), 2);
     simulate(&mut world, 60);
 
@@ -69,7 +72,10 @@ fn locked_rotation_keeps_a_box_upright() {
         3,
     );
     world.add_collider(&ColliderDesc::cuboid(Vec2::splat(0.5)), Some(body), 3);
-    world.body_mut(body).unwrap().apply_torque_impulse(50.0, true);
+    world
+        .body_mut(body)
+        .unwrap()
+        .apply_torque_impulse(50.0, true);
     simulate(&mut world, 60);
 
     let rotation = world.body(body).unwrap().rotation();
@@ -81,9 +87,15 @@ fn rotation_is_free_when_not_locked() {
     // 反证：不锁的时候同样的扭矩该让它转起来。没有这一条的话，
     // 上一条在「扭矩根本没生效」的情况下也会通过。
     let mut world = world_with_ground();
-    let body = world.add_body(&RigidBodyDesc::dynamic().with_position(Vec2::new(0.0, 5.0)), 3);
+    let body = world.add_body(
+        &RigidBodyDesc::dynamic().with_position(Vec2::new(0.0, 5.0)),
+        3,
+    );
     world.add_collider(&ColliderDesc::cuboid(Vec2::splat(0.5)), Some(body), 3);
-    world.body_mut(body).unwrap().apply_torque_impulse(50.0, true);
+    world
+        .body_mut(body)
+        .unwrap()
+        .apply_torque_impulse(50.0, true);
     simulate(&mut world, 10);
 
     assert!(world.body(body).unwrap().angvel().abs() > 0.1, "扭矩没生效");
@@ -139,7 +151,11 @@ fn a_sensor_reports_overlap_without_pushing() {
     let mut saw_event = false;
     for _ in 0..300 {
         world.step(1.0 / 60.0);
-        if world.collision_events().iter().any(|e| e.sensor && e.started) {
+        if world
+            .collision_events()
+            .iter()
+            .any(|e| e.sensor && e.started)
+        {
             saw_event = true;
         }
     }
@@ -165,7 +181,10 @@ fn collision_groups_can_make_things_pass_through() {
         .unwrap();
 
     // 成员位 0b10、只和 0b10 交互——和地面互不相干。
-    let ball = world.add_body(&RigidBodyDesc::dynamic().with_position(Vec2::new(0.0, 5.0)), 1);
+    let ball = world.add_body(
+        &RigidBodyDesc::dynamic().with_position(Vec2::new(0.0, 5.0)),
+        1,
+    );
     world
         .add_collider(
             &ColliderDesc::ball(0.5).with_collision_groups(InteractionGroups::new(0b10, 0b10)),
@@ -355,9 +374,16 @@ fn restitution_makes_a_ball_bounce() {
         )
         .unwrap();
 
-    let body = world.add_body(&RigidBodyDesc::dynamic().with_position(Vec2::new(0.0, 5.0)), 1);
+    let body = world.add_body(
+        &RigidBodyDesc::dynamic().with_position(Vec2::new(0.0, 5.0)),
+        1,
+    );
     world
-        .add_collider(&ColliderDesc::ball(0.5).with_restitution(0.9), Some(body), 1)
+        .add_collider(
+            &ColliderDesc::ball(0.5).with_restitution(0.9),
+            Some(body),
+            1,
+        )
         .unwrap();
 
     // 落地之后应该反弹回来，中途出现过正的向上速度。
@@ -377,7 +403,11 @@ fn a_kinematic_body_pushes_without_being_pushed() {
     let mut world = PhysicsWorld::new();
     let platform = world.add_body(&RigidBodyDesc::kinematic_position(), 0);
     world
-        .add_collider(&ColliderDesc::cuboid(Vec2::new(5.0, 0.5)), Some(platform), 0)
+        .add_collider(
+            &ColliderDesc::cuboid(Vec2::new(5.0, 0.5)),
+            Some(platform),
+            0,
+        )
         .unwrap();
     let ball = drop_ball(&mut world, Vec2::new(0.0, 3.0), 0.5);
 

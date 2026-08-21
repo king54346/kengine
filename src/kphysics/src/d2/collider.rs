@@ -107,9 +107,7 @@ impl ColliderShape {
                 // 凸包可能失败：所有点共线时构不成多边形。
                 // 返回 None 而不是塞一个退化形状进去——退化形状会让
                 // 求解器算出 NaN，然后整个世界飞出去。
-                rg::SharedShape::convex_hull(
-                    &points.iter().map(|p| to_rv(*p)).collect::<Vec<_>>(),
-                )?
+                rg::SharedShape::convex_hull(&points.iter().map(|p| to_rv(*p)).collect::<Vec<_>>())?
             }
             ColliderShape::HalfSpace { normal } => {
                 let normalized = normal.normalize_or_zero();
@@ -372,7 +370,8 @@ pub struct ColliderMut<'a> {
 impl ColliderMut<'_> {
     /// 设置相对刚体的位置与朝向。
     pub fn set_position(&mut self, position: Vec2, rotation: f32) {
-        self.inner.set_position_wrt_parent(to_rp(position, rotation));
+        self.inner
+            .set_position_wrt_parent(to_rp(position, rotation));
     }
 
     /// 设置摩擦。

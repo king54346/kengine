@@ -123,9 +123,10 @@ mod test {
     fn syncing_writes_x_and_y_to_the_node() {
         let mut scene = Scene::new();
         let node = scene.add_node(Node::new("Sprite"));
-        let body = scene
-            .physics2d_mut()
-            .add_body(&RigidBodyDesc::fixed().with_position(Vec2::new(3.0, 4.0)), 0);
+        let body = scene.physics2d_mut().add_body(
+            &RigidBodyDesc::fixed().with_position(Vec2::new(3.0, 4.0)),
+            0,
+        );
 
         assert!(scene.sync_node_from_2d_body(node, body));
         let transform = &scene.try_get(node).unwrap().transform;
@@ -140,9 +141,10 @@ mod test {
         let node = scene.add_node(Node::new("Sprite"));
         scene.try_get_mut(node).unwrap().transform.position = Vec3::new(0.0, 0.0, -7.5);
 
-        let body = scene
-            .physics2d_mut()
-            .add_body(&RigidBodyDesc::fixed().with_position(Vec2::new(3.0, 4.0)), 0);
+        let body = scene.physics2d_mut().add_body(
+            &RigidBodyDesc::fixed().with_position(Vec2::new(3.0, 4.0)),
+            0,
+        );
         scene.sync_node_from_2d_body(node, body);
 
         assert_eq!(scene.try_get(node).unwrap().transform.position.z, -7.5);

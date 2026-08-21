@@ -15,7 +15,10 @@ fn stack(emit: bool, sensor: bool) -> Vec<CollisionEvent2d> {
 
     let mut ball_desc = ColliderDesc::ball(0.5);
     ball_desc.emit_collision_events = emit;
-    let ball = world.add_body(&RigidBodyDesc::dynamic().with_position(Vec2::new(0.0, 3.0)), 1);
+    let ball = world.add_body(
+        &RigidBodyDesc::dynamic().with_position(Vec2::new(0.0, 3.0)),
+        1,
+    );
     world.add_collider(&ball_desc, Some(ball), 1).unwrap();
 
     let mut seen = Vec::new();
@@ -61,8 +64,13 @@ fn events_are_cleared_each_step() {
             0,
         )
         .unwrap();
-    let ball = world.add_body(&RigidBodyDesc::dynamic().with_position(Vec2::new(0.0, 2.0)), 1);
-    world.add_collider(&ColliderDesc::ball(0.5), Some(ball), 1).unwrap();
+    let ball = world.add_body(
+        &RigidBodyDesc::dynamic().with_position(Vec2::new(0.0, 2.0)),
+        1,
+    );
+    world
+        .add_collider(&ColliderDesc::ball(0.5), Some(ball), 1)
+        .unwrap();
 
     // 跑到收到事件为止。
     let mut got = false;
@@ -96,8 +104,13 @@ fn both_colliders_appear_in_the_event() {
             0,
         )
         .unwrap();
-    let ball = world.add_body(&RigidBodyDesc::dynamic().with_position(Vec2::new(0.0, 3.0)), 1);
-    let ball_collider = world.add_collider(&ColliderDesc::ball(0.5), Some(ball), 1).unwrap();
+    let ball = world.add_body(
+        &RigidBodyDesc::dynamic().with_position(Vec2::new(0.0, 3.0)),
+        1,
+    );
+    let ball_collider = world
+        .add_collider(&ColliderDesc::ball(0.5), Some(ball), 1)
+        .unwrap();
 
     for _ in 0..200 {
         world.step(1.0 / 60.0);

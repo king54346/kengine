@@ -73,7 +73,10 @@ mod test {
         let three_turns = 6.0 * PI + 0.5;
         let back = from_rr(to_rr(three_turns));
         assert!(back.abs() <= PI + 1e-5, "没有归一化到主区间：{back}");
-        assert!((back - 0.5).abs() < 1e-4, "归一化后该等价于 0.5，实测 {back}");
+        assert!(
+            (back - 0.5).abs() < 1e-4,
+            "归一化后该等价于 0.5，实测 {back}"
+        );
     }
 
     #[test]
@@ -85,7 +88,10 @@ mod test {
         let expected = Vec2::new(v.x * cos - v.y * sin, v.x * sin + v.y * cos);
 
         let actual = from_rv(to_rr(angle).transform_vector(to_rv(v)));
-        assert!((actual - expected).length() < 1e-5, "{actual:?} vs {expected:?}");
+        assert!(
+            (actual - expected).length() < 1e-5,
+            "{actual:?} vs {expected:?}"
+        );
     }
 
     #[test]

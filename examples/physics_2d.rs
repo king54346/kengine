@@ -79,7 +79,11 @@ impl Physics2d {
                 0,
             );
             world
-                .add_collider(&d2::ColliderDesc::cuboid(Vec2::new(0.5, 12.0)), Some(wall), 0)
+                .add_collider(
+                    &d2::ColliderDesc::cuboid(Vec2::new(0.5, 12.0)),
+                    Some(wall),
+                    0,
+                )
                 .expect("墙");
         }
 
@@ -143,11 +147,14 @@ impl Physics2d {
         }
 
         // 用色相环上等距的颜色，相邻的物体好区分。
-        let hue = self.props.len() as f32 * 0.618;
+        // 0.618 是黄金比例的小数部分：连续取模之后分布得最均匀，
+        // 相邻的物体颜色差别最大。
+        let hue = self.props.len() as f32 * 0.618 * std::f32::consts::TAU;
+        let third = std::f32::consts::TAU / 3.0;
         let color = Vec4::new(
-            (hue * 6.28).sin() * 0.4 + 0.6,
-            (hue * 6.28 + 2.1).sin() * 0.4 + 0.6,
-            (hue * 6.28 + 4.2).sin() * 0.4 + 0.6,
+            hue.sin() * 0.4 + 0.6,
+            (hue + third).sin() * 0.4 + 0.6,
+            (hue + third * 2.0).sin() * 0.4 + 0.6,
             1.0,
         );
 
@@ -181,13 +188,13 @@ impl Plugin for Physics2d {
         self.texture = Some(texture.id());
         ctx.scene.register_sprite_texture(texture);
 
-        self.build_walls(&mut ctx.scene);
+        self.build_walls(ctx.scene);
 
         // 一开始先堆一摞盒子。
         for i in 0..12 {
             let x = (i % 4) as f32 * 1.0 - 1.5;
             let y = GROUND_Y + 1.0 + (i / 4) as f32 * 1.0;
-            self.spawn(&mut ctx.scene, Vec2::new(x, y), i % 3 == 0);
+            self.spawn(ctx.scene, Vec2::new(x, y), i % 3 == 0);
         }
 
         let b = ctx.input.bindings_mut();
@@ -208,7 +215,7 @@ impl Plugin for Physics2d {
             klog::info!("{}", if self.paused { "暂停" } else { "继续" });
         }
         if ctx.input.action_just_pressed("reset") {
-            self.reset(&mut ctx.scene);
+            self.reset(ctx.scene);
             klog::info!("已重置");
         }
 
@@ -225,10 +232,10 @@ impl Plugin for Physics2d {
         );
 
         if ctx.input.action_just_pressed("spawn_box") {
-            self.spawn(&mut ctx.scene, world_position, false);
+            self.spawn(ctx.scene, world_position, false);
         }
         if ctx.input.action_just_pressed("spawn_ball") {
-            self.spawn(&mut ctx.scene, world_position, true);
+            self.spawn(ctx.scene, world_position, true);
         }
 
         if !self.paused {
@@ -274,8 +281,12 @@ impl Plugin for Physics2d {
         let half = WORLD_WIDTH * 0.5;
         let wall_color = Vec4::new(0.25, 0.28, 0.33, 1.0);
         ctx.scene.push_sprite(
-            SpriteInstance::new(Vec2::new(0.0, GROUND_Y), Vec2::new(WORLD_WIDTH, 1.0), texture)
-                .with_color(wall_color),
+            SpriteInstance::new(
+                Vec2::new(0.0, GROUND_Y),
+                Vec2::new(WORLD_WIDTH, 1.0),
+                texture,
+            )
+            .with_color(wall_color),
         );
         for x in [-half, half] {
             ctx.scene.push_sprite(
@@ -286,12 +297,8 @@ impl Plugin for Physics2d {
 
         // 目标区（传感器）画成半透明。
         ctx.scene.push_sprite(
-            SpriteInstance::new(
-                Vec2::new(8.0, GROUND_Y + 1.5),
-                Vec2::new(4.0, 2.0),
-                texture,
-            )
-            .with_color(Vec4::new(0.3, 0.9, 0.4, 0.35)),
+            SpriteInstance::new(Vec2::new(8.0, GROUND_Y + 1.5), Vec2::new(4.0, 2.0), texture)
+                .with_color(Vec4::new(0.3, 0.9, 0.4, 0.35)),
         );
 
         // 物体。位置和角度直接从刚体读。
@@ -315,28 +322,6 @@ impl Plugin for Physics2d {
                     SpriteInstance::new(marker, Vec2::splat(0.12), texture)
                         .with_color(Vec4::new(0.1, 0.1, 0.12, 1.0))
                         .with_layer(2),
-                );
-            }
-        }
-
-        // TEMP-VALIDATION
-        {
-            static mut N: u32 = 0;
-            let n = unsafe { N += 1; N };
-            if n == 120 {
-                let live = self.props.iter().filter(|p| ctx.scene.physics2d().body(p.body).is_some()).count();
-                let resting = self.props.iter().filter(|p| {
-                    ctx.scene.physics2d().body(p.body).map_or(false, |b| b.linvel().length() < 0.1)
-                }).count();
-                let lowest = self.props.iter().filter_map(|p| {
-                    ctx.scene.physics2d().body(p.body).map(|b| b.position().y)
-                }).fold(f32::MAX, f32::min);
-                let finite = self.props.iter().all(|p| {
-                    ctx.scene.physics2d().body(p.body).map_or(true, |b| b.position().is_finite())
-                });
-                klog::info!(
-                    "[验证] 刚体 {live} 个，静止 {resting} 个，最低 y={lowest:.2}（地面 {:.1}），全部有限={finite}，精灵 {}，射线命中={:?}",
-                    GROUND_Y + 0.5, ctx.stats.sprites, self.ray_hit.is_some()
                 );
             }
         }

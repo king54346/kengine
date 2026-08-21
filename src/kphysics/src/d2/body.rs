@@ -130,7 +130,7 @@ impl RigidBodyDesc {
 
     pub(crate) fn build(&self, user_data: u128) -> rd::RigidBody {
         let mut builder = rd::RigidBodyBuilder::new(self.body_type.to_rapier2d())
-            .position(to_rp(self.position, self.rotation))
+            .pose(to_rp(self.position, self.rotation))
             .linvel(to_rv(self.linvel))
             .angvel(self.angvel)
             .linear_damping(self.linear_damping)
@@ -146,10 +146,8 @@ impl RigidBodyDesc {
         if self.locked_rotation {
             builder = builder.lock_rotations();
         }
-        builder = builder.enabled_translations(
-            !self.locked_translations[0],
-            !self.locked_translations[1],
-        );
+        builder = builder
+            .enabled_translations(!self.locked_translations[0], !self.locked_translations[1]);
         builder.build()
     }
 }
@@ -246,7 +244,8 @@ impl BodyMut<'_> {
     /// **插值过去**，于是刚体沿途会正确地推开动态物体。直接设位置的话
     /// 它会瞬移，路上的东西可能被漏掉或被挤穿。
     pub fn set_next_kinematic_position(&mut self, position: Vec2, rotation: f32) {
-        self.inner.set_next_kinematic_position(to_rp(position, rotation));
+        self.inner
+            .set_next_kinematic_position(to_rp(position, rotation));
     }
 
     /// 设置线速度。
@@ -275,7 +274,7 @@ impl BodyMut<'_> {
     /// 在某一点施加冲量，会同时产生旋转。
     pub fn apply_impulse_at_point(&mut self, impulse: Vec2, point: Vec2, wake: bool) {
         self.inner
-            .apply_impulse_at_point(to_rv(impulse), to_rv(point).into(), wake);
+            .apply_impulse_at_point(to_rv(impulse), to_rv(point), wake);
     }
 
     /// 施加一个扭矩冲量，直接改变角速度。

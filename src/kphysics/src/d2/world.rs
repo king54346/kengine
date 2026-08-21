@@ -134,8 +134,10 @@ impl PhysicsWorld {
     pub fn new() -> Self {
         let (collision_tx, collision_rx) = mpsc::channel();
         let (force_tx, contact_force_rx) = mpsc::channel();
-        let mut inner = rp::PhysicsWorld::default();
-        inner.gravity = to_rv(Vec2::new(0.0, -9.81));
+        let inner = rp::PhysicsWorld {
+            gravity: to_rv(Vec2::new(0.0, -9.81)),
+            ..Default::default()
+        };
 
         Self {
             inner,
@@ -265,7 +267,10 @@ impl PhysicsWorld {
 
     /// 只读地看一个刚体。
     pub fn body(&self, handle: BodyHandle) -> Option<BodyRef<'_>> {
-        self.inner.bodies.get(handle.0).map(|inner| BodyRef { inner })
+        self.inner
+            .bodies
+            .get(handle.0)
+            .map(|inner| BodyRef { inner })
     }
 
     /// 可写地操作一个刚体。
@@ -294,7 +299,11 @@ impl PhysicsWorld {
 
     /// 遍历所有刚体的句柄。
     pub fn body_handles(&self) -> Vec<BodyHandle> {
-        self.inner.bodies.iter().map(|(h, _)| BodyHandle(h)).collect()
+        self.inner
+            .bodies
+            .iter()
+            .map(|(h, _)| BodyHandle(h))
+            .collect()
     }
 
     /// 步进一次。
@@ -352,15 +361,17 @@ impl PhysicsWorld {
         // 还没有它——这在「加载关卡后立刻检测地面」时会静默返回 None。
         self.update_query_structures();
 
-        let ray = Ray::new(to_rv(options.origin).into(), to_rv(options.direction));
+        let ray = Ray::new(to_rv(options.origin), to_rv(options.direction));
         let filter = QueryFilter::default().groups(options.groups.to_rapier2d());
 
-        let (handle, intersection) = self.inner.query_pipeline_with_filter(filter)
+        let (handle, intersection) = self
+            .inner
+            .query_pipeline_with_filter(filter)
             .cast_ray_and_get_normal(&ray, options.max_distance, options.solid)?;
 
         Some(RayHit {
             collider: ColliderHandle(handle),
-            point: from_rv(ray.point_at(intersection.time_of_impact).into()),
+            point: from_rv(ray.point_at(intersection.time_of_impact)),
             normal: from_rv(intersection.normal),
             time_of_impact: intersection.time_of_impact,
         })
