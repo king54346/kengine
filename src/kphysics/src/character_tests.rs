@@ -34,11 +34,7 @@ fn add_character(world: &mut PhysicsWorld, position: Vec3) -> BodyHandle {
         1,
     );
     world
-        .add_collider(
-            &ColliderDesc::capsule_y(HALF_HEIGHT, RADIUS),
-            Some(body),
-            1,
-        )
+        .add_collider(&ColliderDesc::capsule_y(HALF_HEIGHT, RADIUS), Some(body), 1)
         .expect("胶囊该建得出来");
     body
 }
@@ -206,13 +202,7 @@ fn a_character_slides_along_a_wall() {
     let controller = CharacterController::default();
 
     // 斜着往墙上走：x 和 z 各一半。
-    walk(
-        &mut world,
-        &controller,
-        body,
-        Vec3::new(2.0, 0.0, 2.0),
-        120,
-    );
+    walk(&mut world, &controller, body, Vec3::new(2.0, 0.0, 2.0), 120);
 
     let p = position(&world, body);
     assert!(p.x < 2.0, "穿墙了，x={}", p.x);
@@ -245,13 +235,7 @@ fn sliding_can_be_turned_off() {
         position(&w, b).z
     };
 
-    walk(
-        &mut world,
-        &controller,
-        body,
-        Vec3::new(2.0, 0.0, 2.0),
-        120,
-    );
+    walk(&mut world, &controller, body, Vec3::new(2.0, 0.0, 2.0), 120);
     let without_slide = position(&world, body).z;
 
     assert!(
@@ -272,13 +256,7 @@ fn a_character_does_not_pass_through_a_wall() {
     let controller = CharacterController::default();
 
     // 一路顶着墙走很久。
-    walk(
-        &mut world,
-        &controller,
-        body,
-        Vec3::new(5.0, 0.0, 0.0),
-        300,
-    );
+    walk(&mut world, &controller, body, Vec3::new(5.0, 0.0, 0.0), 300);
 
     assert!(position(&world, body).x < 2.0, "穿墙了");
 }
@@ -429,7 +407,11 @@ fn the_result_stays_finite_on_a_huge_step() {
         Vec3::new(1000.0, 0.0, 0.0),
         1.0 / 60.0,
     );
-    assert!(movement.translation.is_finite(), "{:?}", movement.translation);
+    assert!(
+        movement.translation.is_finite(),
+        "{:?}",
+        movement.translation
+    );
     world.step(1.0 / 60.0);
     assert!(position(&world, body).is_finite());
 }
@@ -540,7 +522,10 @@ fn the_character_does_not_collide_with_itself() {
 fn collision_groups_let_the_character_pass_through() {
     let mut world = world_with_ground();
     // 一堵只属于组 0b01 的墙。
-    let wall = world.add_body(&RigidBodyDesc::fixed().with_position(Vec3::new(1.0, 1.0, 0.0)), 2);
+    let wall = world.add_body(
+        &RigidBodyDesc::fixed().with_position(Vec3::new(1.0, 1.0, 0.0)),
+        2,
+    );
     world.add_collider(
         &ColliderDesc::cuboid(Vec3::new(0.2, 1.0, 5.0))
             .with_groups(InteractionGroups::new(0b01, 0b01)),
@@ -550,10 +535,8 @@ fn collision_groups_let_the_character_pass_through() {
     let body = add_character(&mut world, Vec3::new(0.0, STAND_Y, 0.0));
 
     // 角色只和 0b10 交互，和那堵墙互不相干。
-    let controller =
-        CharacterController::default().with_groups(InteractionGroups::new(0b10, 0b10));
-    let movement =
-        world.move_character(&controller, body, Vec3::new(5.0, 0.0, 0.0), 1.0 / 60.0);
+    let controller = CharacterController::default().with_groups(InteractionGroups::new(0b10, 0b10));
+    let movement = world.move_character(&controller, body, Vec3::new(5.0, 0.0, 0.0), 1.0 / 60.0);
 
     assert!(
         movement.translation.x > 4.0,

@@ -43,6 +43,11 @@
 //!     if movement.grounded {
 //!         vertical = 0.0;
 //!     }
+//!
+//!     // **必须步进**：`move_character` 设的是「下一个运动学位姿」，
+//!     // 要 `step` 才真正把刚体挪过去。漏了这一步，角色一动不动，
+//!     // 而返回的 `movement` 看上去一切正常——最难查的那种。
+//!     world.step(dt);
 //! }
 //! assert!(world.body(body).unwrap().position().y < 1.5);
 //! ```
@@ -133,6 +138,18 @@ pub struct CharacterController {
     /// 不开的话下坡会变成一连串小跳——角色沿斜面水平走出去，
     /// 离地了，下一帧靠重力落回来，如此往复。
     pub snap_to_ground: Option<Length>,
+    /// 贴着表面滑动时，沿接触法线额外推开多少。
+    ///
+    /// **角色贴着墙或地面走着走着突然卡住不动**时调大它。原理是扫掠
+    /// 算出的接触点会停在「正好接触」的位置，下一次扫掠从那里出发时
+    /// 已经算穿透了，于是返回零位移——角色就此定住。这一点点额外推开
+    /// 让下一次扫掠有干净的起点。
+    ///
+    /// 代价是在平面上滑动时会产生一点人造的凸起：值越大，角色站得越高。
+    ///
+    /// 3D 用 rapier 的默认值 1e-4 实测没问题。**2D 那边需要大得多**
+    /// （见 `d2::CharacterController::nudge` 的注释）。
+    pub nudge: f32,
     /// 碰撞过滤：只和这些组交互。
     pub groups: InteractionGroups,
 }
@@ -150,6 +167,7 @@ impl Default for CharacterController {
             // 30°：比这更陡就开始下滑。留出 15° 的"能站住但爬不上去"区间。
             min_slope_slide_angle: std::f32::consts::FRAC_PI_6,
             snap_to_ground: Some(Length::Relative(0.2)),
+            nudge: 1.0e-4,
             groups: InteractionGroups::ALL,
         }
     }
@@ -189,16 +207,18 @@ impl CharacterController {
             up: to_rv(self.up.normalize_or(Vec3::Y)),
             offset: self.offset.to_rapier(),
             slide: self.slide,
-            autostep: self.autostep.map(|step| rapier3d::control::CharacterAutostep {
-                max_height: step.max_height.to_rapier(),
-                min_width: step.min_width.to_rapier(),
-                include_dynamic_bodies: step.include_dynamic_bodies,
-            }),
+            autostep: self
+                .autostep
+                .map(|step| rapier3d::control::CharacterAutostep {
+                    max_height: step.max_height.to_rapier(),
+                    min_width: step.min_width.to_rapier(),
+                    include_dynamic_bodies: step.include_dynamic_bodies,
+                }),
             max_slope_climb_angle: self.max_slope_climb_angle,
             // 夹一下：下滑角度大于爬升角度时，中间那段角色会卡住不动。
             min_slope_slide_angle: self.min_slope_slide_angle.min(self.max_slope_climb_angle),
             snap_to_ground: self.snap_to_ground.map(Length::to_rapier),
-            normal_nudge_factor: 1.0e-4,
+            normal_nudge_factor: self.nudge,
         }
     }
 }
@@ -239,8 +259,12 @@ impl crate::PhysicsWorld {
     /// `body` 应当是**运动学**刚体（[`RigidBodyDesc::kinematic_position_based`]），
     /// 而且要挂着碰撞体——角色的形状就是那个碰撞体。挂多个的话用第一个。
     ///
-    /// 算完之后会**直接把刚体挪过去**（走 `set_next_kinematic_position`，
-    /// 于是沿途能正确推开动态物体）。只想算不想动的话用
+    /// 算完之后会给刚体设上**下一个运动学位姿**（`set_next_kinematic_position`，
+    /// 于是沿途能正确推开动态物体）。**位姿要等 [`step`](Self::step) 才生效**——
+    /// 漏了那一步的话角色一动不动，而返回的 [`CharacterMovement`] 看上去
+    /// 一切正常。
+    ///
+    /// 只想算不想动的话用
     /// [`compute_character_movement`](Self::compute_character_movement)。
     ///
     /// # 重力要自己加
@@ -324,20 +348,13 @@ impl crate::PhysicsWorld {
         // 代价是每帧多一次相交查询（没有扫掠循环，很便宜）。
         let queries = self.inner.query_pipeline_with_filter(filter);
         let fix = native.move_shape(dt, &queries, &*shape, &pose, to_rv(Vec3::ZERO), |_| {});
-        let pose = rapier3d::math::Pose::from_parts(
-            pose.translation + fix.translation,
-            pose.rotation,
-        );
+        let pose =
+            rapier3d::math::Pose::from_parts(pose.translation + fix.translation, pose.rotation);
 
         let mut collisions = Vec::new();
-        let result = native.move_shape(
-            dt,
-            &queries,
-            &*shape,
-            &pose,
-            to_rv(desired),
-            |collision| collisions.push(collision),
-        );
+        let result = native.move_shape(dt, &queries, &*shape, &pose, to_rv(desired), |collision| {
+            collisions.push(collision)
+        });
 
         // 事件在扫掠结束之后再报：回调里可能会去查场景，而此刻
         // `move_shape` 还借着查询管线。
@@ -351,8 +368,8 @@ impl crate::PhysicsWorld {
             on_collision(CharacterCollision {
                 collider: ColliderHandle(collision.handle),
                 body,
-                point: from_rv(collision.hit.witness1.into()),
-                normal: from_rv(collision.hit.normal1.into()),
+                point: from_rv(collision.hit.witness1),
+                normal: from_rv(collision.hit.normal1),
                 distance: collision.hit.time_of_impact,
             });
         }

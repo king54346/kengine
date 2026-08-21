@@ -36,6 +36,16 @@ pub struct CharacterController {
     pub min_slope_slide_angle: f32,
     /// 离地多近时自动吸附到地面。
     pub snap_to_ground: Option<Length>,
+    /// 贴着表面滑动时，沿接触法线额外推开多少。
+    ///
+    /// **2D 的默认值是 1e-2，比 3D 大一百倍**，这是实测出来的：
+    /// 一个胶囊角色站在半宽 50 的地面上往前走，用 3D 的默认值 1e-4
+    /// 会在第 8 帧突然完全卡住（水平位移变成 0，而周围什么都没有）；
+    /// 把地面缩到半宽 5 就不卡，说明是大尺寸形状下的扫掠精度问题。
+    /// 1e-3 仍然卡，1e-2 才彻底解决。
+    ///
+    /// 代价是角色站得比理论位置高约 1 厘米。
+    pub nudge: f32,
     /// 碰撞过滤组。
     pub groups: InteractionGroups,
 }
@@ -50,6 +60,8 @@ impl Default for CharacterController {
             max_slope_climb_angle: std::f32::consts::FRAC_PI_4,
             min_slope_slide_angle: std::f32::consts::FRAC_PI_6,
             snap_to_ground: Some(Length::Relative(0.2)),
+            // 见字段注释：3D 的 1e-4 在 2D 里会让角色走几帧就卡死。
+            nudge: 1.0e-2,
             groups: InteractionGroups::ALL,
         }
     }
@@ -86,15 +98,17 @@ impl CharacterController {
             up: to_rv(self.up.normalize_or(Vec2::Y)),
             offset: length_to_rapier(self.offset),
             slide: self.slide,
-            autostep: self.autostep.map(|step| rapier2d::control::CharacterAutostep {
-                max_height: length_to_rapier(step.max_height),
-                min_width: length_to_rapier(step.min_width),
-                include_dynamic_bodies: step.include_dynamic_bodies,
-            }),
+            autostep: self
+                .autostep
+                .map(|step| rapier2d::control::CharacterAutostep {
+                    max_height: length_to_rapier(step.max_height),
+                    min_width: length_to_rapier(step.min_width),
+                    include_dynamic_bodies: step.include_dynamic_bodies,
+                }),
             max_slope_climb_angle: self.max_slope_climb_angle,
             min_slope_slide_angle: self.min_slope_slide_angle.min(self.max_slope_climb_angle),
             snap_to_ground: self.snap_to_ground.map(length_to_rapier),
-            normal_nudge_factor: 1.0e-4,
+            normal_nudge_factor: self.nudge,
         }
     }
 }
@@ -229,14 +243,6 @@ impl PhysicsWorld {
             });
         }
 
-        if std::env::var("KPROBE").is_ok() {
-            println!(
-                "PROBE fix=({:.5},{:.5}) result=({:.5},{:.5}) grounded={} pose=({:.4},{:.4})",
-                fix.translation.x, fix.translation.y,
-                result.translation.x, result.translation.y,
-                result.grounded, pose.translation.x, pose.translation.y
-            );
-        }
         CharacterMovement {
             translation: from_rv(fix.translation) + from_rv(result.translation),
             grounded: result.grounded,
