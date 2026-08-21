@@ -186,6 +186,10 @@ struct DrawCall {
     texture_key: [Uuid; 5],
     /// 是否走蒙皮管线。蒙皮与静态的顶点布局不同，不能混在一批里。
     skinned: bool,
+    /// 到相机的距离平方，半透明物体按它从远到近排序。
+    ///
+    /// 存平方而不是距离：只用来比大小，开方是白花的。
+    depth: f32,
     uniforms: ObjectUniforms,
 }
 
@@ -254,6 +258,60 @@ impl RenderStats {
 /// 排序会打乱原本的提交顺序。不透明物体有深度测试兜底，顺序无所谓；
 /// 将来加半透明时，那部分必须单独走一条按深度排序的路径。
 fn build_batches(draws: &[DrawCall], instances: &mut Vec<ObjectUniforms>) -> Vec<Batch> {
+    build_batches_into(draws, instances, true)
+}
+
+/// 半透明物体的批次。
+///
+/// 和不透明的关键区别：**顺序不能动**。不透明物体按网格和贴图重排能把
+/// 绘制调用降到最少，反正谁先画结果都一样；半透明物体一旦重排，
+/// 混合结果就错了——远处的东西画在近处的上面。
+///
+/// 所以这里先按距离从远到近排，再**只合并相邻的**同网格同贴图项。
+/// 合并率会低很多，但那是正确性的代价。
+fn build_transparent_batches(
+    draws: &mut [DrawCall],
+    instances: &mut Vec<ObjectUniforms>,
+) -> Vec<Batch> {
+    // 从远到近。`total_cmp` 而不是 `partial_cmp().unwrap()`：
+    // 退化的变换会算出 NaN 距离，unwrap 会直接崩掉整帧。
+    draws.sort_by(|a, b| b.depth.total_cmp(&a.depth));
+    build_batches_into(draws, instances, false)
+}
+
+/// `reorder` 为真时按网格/贴图重排以最大化合并；为假时保持传入顺序。
+fn build_batches_into(
+    draws: &[DrawCall],
+    instances: &mut Vec<ObjectUniforms>,
+    reorder: bool,
+) -> Vec<Batch> {
+    if !reorder {
+        let mut batches: Vec<Batch> = Vec::new();
+        for draw in draws {
+            instances.push(draw.uniforms);
+            match batches.last_mut() {
+                Some(last)
+                    if last.mesh_id == draw.mesh_id
+                        && last.texture_key == draw.texture_key
+                        && last.skinned == draw.skinned =>
+                {
+                    last.count += 1;
+                }
+                _ => batches.push(Batch {
+                    mesh_id: draw.mesh_id,
+                    texture_key: draw.texture_key,
+                    skinned: draw.skinned,
+                    first: instances.len() as u32 - 1,
+                    count: 1,
+                }),
+            }
+        }
+        return batches;
+    }
+    build_opaque_batches(draws, instances)
+}
+
+fn build_opaque_batches(draws: &[DrawCall], instances: &mut Vec<ObjectUniforms>) -> Vec<Batch> {
     let mut order: Vec<u32> = (0..draws.len() as u32).collect();
     order.sort_unstable_by(|&a, &b| {
         let (a, b) = (&draws[a as usize], &draws[b as usize]);
@@ -265,7 +323,6 @@ fn build_batches(draws: &[DrawCall], instances: &mut Vec<ObjectUniforms>) -> Vec
             .then_with(|| a.texture_key.cmp(&b.texture_key))
     });
 
-    instances.clear();
     instances.reserve(draws.len());
 
     let mut batches: Vec<Batch> = Vec::new();
@@ -324,6 +381,8 @@ pub struct Renderer {
     object_capacity: u64,
     /// 蒙皮管线。顶点布局多一路，只能单独开一条。
     skinned_pipeline: wgpu::RenderPipeline,
+    transparent_pipeline: wgpu::RenderPipeline,
+    skinned_transparent_pipeline: wgpu::RenderPipeline,
     /// 所有蒙皮实例的骨骼矩阵，拼在一个缓冲里。
     joint_buffer: wgpu::Buffer,
     joint_capacity: u64,
@@ -703,6 +762,7 @@ impl Renderer {
             "vs_main",
             &[Option::from(vertex_layout())],
             "kengine render pipeline",
+            kmaterial::BlendMode::Opaque,
         );
         let skinned_pipeline = create_standard_pipeline(
             &device,
@@ -711,6 +771,26 @@ impl Renderer {
             "vs_skinned",
             &[Option::from(vertex_layout()), Option::from(skin_layout())],
             "kengine skinned pipeline",
+            kmaterial::BlendMode::Opaque,
+        );
+        // 半透明版本：只有混合方式和深度写入不同，着色器完全一样。
+        let transparent_pipeline = create_standard_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            "vs_main",
+            &[Option::from(vertex_layout())],
+            "kengine transparent pipeline",
+            kmaterial::BlendMode::Alpha,
+        );
+        let skinned_transparent_pipeline = create_standard_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            "vs_skinned",
+            &[Option::from(vertex_layout()), Option::from(skin_layout())],
+            "kengine skinned transparent pipeline",
+            kmaterial::BlendMode::Alpha,
         );
 
         // ── 阴影 pass ──
@@ -863,6 +943,8 @@ impl Renderer {
             object_bind_group,
             object_capacity: Self::INITIAL_CAPACITY,
             skinned_pipeline,
+            transparent_pipeline,
+            skinned_transparent_pipeline,
             joint_buffer,
             joint_capacity: Self::INITIAL_JOINTS,
             joint_scratch: Vec::new(),
@@ -1092,6 +1174,8 @@ impl Renderer {
         // 放在循环里等于每个对象都重新分配一遍。
         let default_material = Material::standard();
         let mut draws = Vec::with_capacity(visible.len());
+        // 半透明的单独收：它们要按距离排序，混不进不透明的批次里。
+        let mut transparent_draws: Vec<DrawCall> = Vec::new();
         // 所有蒙皮实例的骨骼矩阵拼进同一个数组，各实例记下自己的起点。
         let mut joints = std::mem::take(&mut self.joint_scratch);
         joints.clear();
@@ -1164,10 +1248,19 @@ impl Renderer {
             };
 
             let model = item.transform;
-            draws.push(DrawCall {
+            // 用包围盒中心而不是变换的平移：蒙皮网格的变换是单位阵，
+            // 拿平移排序的话所有角色都会被当成在原点。
+            let depth = (item.aabb.center() - camera_position).length_squared();
+            let target = if material.blend_mode() == kmaterial::BlendMode::Alpha {
+                &mut transparent_draws
+            } else {
+                &mut draws
+            };
+            target.push(DrawCall {
                 mesh_id: mesh.id(),
                 texture_key,
                 skinned: skin_offset.is_some(),
+                depth,
                 uniforms: ObjectUniforms {
                     model: model.to_cols_array_2d(),
                     // 逆转置，保证非均匀缩放下法线方向仍然正确。
@@ -1200,7 +1293,12 @@ impl Renderer {
         // ── 批处理：同网格同贴图的对象合并成一次绘制 ──
         let mut instances = Vec::new();
         let batches = build_batches(&draws, &mut instances);
-        stats.draw_calls = batches.len() as u32;
+        // 半透明的批次接在不透明的后面，共用同一个实例数组——
+        // 实例下标是全局的，两边分开建数组的话下标会撞。
+        let transparent_batches =
+            build_transparent_batches(&mut transparent_draws, &mut instances);
+        stats.draw_calls = (batches.len() + transparent_batches.len()) as u32;
+        let total_draws = draws.len() + transparent_draws.len();
 
         // 骨骼矩阵超出容量时翻倍。它排在对象缓冲之前，
         // 因为对象绑定组引用了骨骼缓冲，换了缓冲就得重建绑定组。
@@ -1212,8 +1310,8 @@ impl Renderer {
         }
 
         // 对象数超出缓冲容量时翻倍扩容。
-        if draws.len() as u64 > self.object_capacity {
-            let capacity = (draws.len() as u64).next_power_of_two();
+        if total_draws as u64 > self.object_capacity {
+            let capacity = (total_draws as u64).next_power_of_two();
             let (buffer, bind_group) = Self::create_object_storage(
                 &self.device,
                 &self.object_layout,
@@ -1613,6 +1711,52 @@ impl Renderer {
             pass.set_bind_group(0, &self.sky_bind_group, &[]);
             pass.draw(0..3, 0..1);
 
+            // ── 半透明 ──
+            //
+            // 必须在天空之后：半透明物体要和它背后的东西混合，而天空
+            // 就是最远的那个「背后」。放在天空之前的话，天空会把已经
+            // 混好的颜色覆盖掉——因为天空的深度是 1，而半透明不写深度，
+            // 挡不住它。
+            if !transparent_batches.is_empty() {
+                pass.set_bind_group(0, &self.globals_bind_group, &[]);
+                let mut current = None;
+                for batch in &transparent_batches {
+                    let Some(gpu_mesh) = self.meshes.get(&batch.mesh_id) else {
+                        continue;
+                    };
+                    let Some(texture_bind_group) =
+                        self.material_bind_groups.get(&batch.texture_key)
+                    else {
+                        continue;
+                    };
+                    if current != Some(batch.skinned) {
+                        pass.set_pipeline(if batch.skinned {
+                            &self.skinned_transparent_pipeline
+                        } else {
+                            &self.transparent_pipeline
+                        });
+                        current = Some(batch.skinned);
+                    }
+                    pass.set_bind_group(2, texture_bind_group, &[]);
+                    pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
+                    if batch.skinned {
+                        let Some(skin) = gpu_mesh.skin_buffer.as_ref() else {
+                            continue;
+                        };
+                        pass.set_vertex_buffer(1, skin.slice(..));
+                    }
+                    pass.set_index_buffer(
+                        gpu_mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(
+                        0..gpu_mesh.index_count,
+                        0,
+                        batch.first..batch.first + batch.count,
+                    );
+                }
+            }
+
             // 2D 精灵画在天空之后、粒子之前：精灵半透明，要在不透明物体
             // 之后画；但它又该被粒子盖住（粒子通常是特效）。
             self.sprites.draw(&mut pass, &sprite_batches);
@@ -1848,7 +1992,9 @@ fn create_standard_pipeline(
     entry_point: &str,
     buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
     label: &str,
+    blend_mode: kmaterial::BlendMode,
 ) -> wgpu::RenderPipeline {
+    let transparent = blend_mode == kmaterial::BlendMode::Alpha;
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
@@ -1865,7 +2011,11 @@ fn create_standard_pipeline(
             targets: &[Some(wgpu::ColorTargetState {
                 // 主 pass 画到 HDR 离屏目标，不是直接画到屏幕。
                 format: post::HDR_FORMAT,
-                blend: Some(wgpu::BlendState::REPLACE),
+                blend: Some(if transparent {
+                    wgpu::BlendState::ALPHA_BLENDING
+                } else {
+                    wgpu::BlendState::REPLACE
+                }),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
@@ -1880,7 +2030,10 @@ fn create_standard_pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: Option::from(true),
+            // 半透明不写深度：写了的话先画的半透明物体会把后画的挡掉，
+            // 透过玻璃就看不见玻璃后面的玻璃了。仍然要**测试**深度，
+            // 不然半透明物体会画在挡着它的墙前面。
+            depth_write_enabled: Option::from(!transparent),
             depth_compare: Option::from(wgpu::CompareFunction::Less),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),

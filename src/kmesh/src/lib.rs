@@ -13,6 +13,7 @@
 
 #![warn(missing_docs)]
 
+pub mod decal;
 mod primitives;
 
 use bytemuck::{Pod, Zeroable};

@@ -24,6 +24,13 @@ pub struct Node {
     pub transform: Transform,
     /// 是否参与渲染。设为 `false` 时该节点及其子树都不会被绘制。
     pub visible: bool,
+    /// 是否能被贴花贴上。
+    ///
+    /// 贴花节点自己会被设成 `false`：不然第二发子弹打在同一处时，
+    /// 会把第一个贴花当接收面贴上去，一层层叠起来，每层都比上一层
+    /// 高一个 `offset`，很快就浮在半空了。水面、植被这类东西
+    /// 通常也该关掉。
+    pub receives_decals: bool,
 
     pub(crate) mesh: Option<Mesh>,
     pub(crate) material: Option<Material>,
@@ -71,6 +78,7 @@ impl Node {
             name: name.into(),
             transform: Transform::IDENTITY,
             visible: true,
+            receives_decals: true,
             mesh: None,
             material: None,
             camera: None,

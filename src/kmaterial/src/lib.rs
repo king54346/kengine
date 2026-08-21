@@ -37,7 +37,7 @@ pub const MATERIAL_TYPE_UUID: Uuid = uuid!("8e5c2f14-9a07-4d3b-b6e8-4c1f7a92d508
 
 /// 常用类型的集中导出。
 pub mod prelude {
-    pub use crate::{Material, MaterialValue, standard};
+    pub use crate::{BlendMode, Material, MaterialValue, standard};
 }
 
 /// 渲染器认识的标准参数名。
@@ -143,6 +143,7 @@ impl From<Resource<Texture>> for MaterialValue {
 #[derive(Debug, Clone)]
 pub struct Material {
     id: Uuid,
+    blend_mode: BlendMode,
     /// 内容版本号，每次改动 +1。
     ///
     /// 用版本号而不是「改动就换新 id」：换 id 会让渲染器把管线、绑定组
@@ -151,6 +152,21 @@ pub struct Material {
     version: u64,
     shader: Option<Resource<Shader>>,
     values: FxHashMap<String, MaterialValue>,
+}
+
+/// 材质怎么和它后面的画面混合。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlendMode {
+    /// 直接覆盖，写深度。绝大多数材质都是这种。
+    #[default]
+    Opaque,
+    /// 按 alpha 混合，**不写深度**。
+    ///
+    /// 不写深度是必须的：半透明物体互相之间不该做深度剔除，
+    /// 否则先画的那个会把后画的整块挡掉——透过玻璃看不到玻璃后面的玻璃。
+    /// 代价是半透明物体之间的前后顺序只能靠排序保证，而排序是按
+    /// 物体中心算的，两个互相穿插的半透明物体仍然会画错。
+    Alpha,
 }
 
 /// 材质的内容缓存键：同一份内容必然相等，内容一变必然不等。
@@ -167,6 +183,7 @@ impl Material {
     pub fn new() -> Self {
         Self {
             id: Uuid::new_v4(),
+            blend_mode: BlendMode::Opaque,
             version: 0,
             shader: None,
             values: FxHashMap::default(),
@@ -223,6 +240,23 @@ impl Material {
     /// 链式设置着色器。
     pub fn with_shader(mut self, shader: Resource<Shader>) -> Self {
         self.set_shader(shader);
+        self
+    }
+
+    /// 这份材质的混合方式。
+    pub fn blend_mode(&self) -> BlendMode {
+        self.blend_mode
+    }
+
+    /// 设置混合方式。
+    pub fn set_blend_mode(&mut self, mode: BlendMode) {
+        self.blend_mode = mode;
+        self.touch();
+    }
+
+    /// 链式设置混合方式。
+    pub fn with_blend_mode(mut self, mode: BlendMode) -> Self {
+        self.set_blend_mode(mode);
         self
     }
 

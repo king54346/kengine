@@ -9,6 +9,7 @@
 #![warn(missing_docs)]
 
 mod audio;
+pub mod decal;
 mod cull;
 mod debug;
 mod node;
