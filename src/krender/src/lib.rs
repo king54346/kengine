@@ -8,10 +8,10 @@
 //! - `group(1)`：每个对象的变换与材质参数，用动态偏移在一个大缓冲里寻址
 //! - `group(2)`：材质贴图与采样器，按材质缓存
 
-mod gizmo;
-mod particle;
 #[cfg(test)]
 mod cascade_batch_tests;
+mod gizmo;
+mod particle;
 mod post;
 mod sprite2d;
 mod tonemap;
@@ -302,11 +302,9 @@ fn cascade_batches(
         let mut run: Option<Batch> = None;
         for offset in 0..batch.count {
             let index = (batch.first + offset) as usize;
-            let visible = bounds
-                .get(index)
-                .is_some_and(|aabb| {
-                    klight::cascade::shadow_visibility(matrix, *aabb, resolution, min_texels)
-                });
+            let visible = bounds.get(index).is_some_and(|aabb| {
+                klight::cascade::shadow_visibility(matrix, *aabb, resolution, min_texels)
+            });
 
             match (visible, run.as_mut()) {
                 // 接着上一段。
@@ -1415,11 +1413,8 @@ impl Renderer {
         let batches = build_batches(&draws, &mut instances, &mut instance_bounds);
         // 半透明的批次接在不透明的后面，共用同一个实例数组——
         // 实例下标是全局的，两边分开建数组的话下标会撞。
-        let transparent_batches = build_transparent_batches(
-            &mut transparent_draws,
-            &mut instances,
-            &mut instance_bounds,
-        );
+        let transparent_batches =
+            build_transparent_batches(&mut transparent_draws, &mut instances, &mut instance_bounds);
         stats.draw_calls = (batches.len() + transparent_batches.len()) as u32;
         let total_draws = draws.len() + transparent_draws.len();
 
@@ -1512,6 +1507,7 @@ impl Renderer {
             &mut particle_items,
             view_proj,
             camera_to_world,
+            camera.projection_matrix(aspect),
             &mut scratch,
         );
         stats.particles = scratch.len() as u32;
@@ -1692,15 +1688,9 @@ impl Renderer {
                     settings.resolution.max(256),
                     settings.min_shadow_texels,
                 );
-                stats.shadow_draw_calls += cascade_batches.len() as u32;
-                {
-                    let kept: u32 = cascade_batches.iter().map(|b| b.count).sum();
-                    let total: u32 = batches.iter().map(|b| b.count).sum();
-                    klog::info!(
-                        "[验证] 级联 {index}：实例 {kept}/{total}，批次 {}/{}",
-                        cascade_batches.len(), batches.len()
-                    );
-                }
+                // 写 `self.stats` 而不是本地的 `stats`：后者在阴影 pass
+                // 之前就已经定格并搬进 self 了，改它不会被任何人读到。
+                self.stats.shadow_draw_calls += cascade_batches.len() as u32;
 
                 self.queue.write_buffer(
                     &self.shadow.globals_buffer,
@@ -1901,7 +1891,42 @@ impl Renderer {
             // 之后画；但它又该被粒子盖住（粒子通常是特效）。
             self.sprites.draw(&mut pass, &sprite_batches);
 
-            // 粒子最后画：它们半透明且不写深度，任何在它们之后画的不透明物体
+        }
+
+        // ── 粒子与调试线：只读深度的第二个 pass ──
+        //
+        // 拆出来是为了**软粒子**：它要把深度缓冲当纹理采样，而深度缓冲
+        // 此刻正挂在管线上当附件。WebGPU 允许「只读深度附件 + 同一张
+        // 纹理当采样源」，但前提是这个 pass 里没人写深度。
+        //
+        // 粒子和调试线本来就都只测不写（见各自管线的注释），所以拆出来
+        // 不改变任何绘制结果，代价只是多一次颜色附件的 load/store。
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("kengine overlay pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: self.post.scene_view(),
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        // 接着上一个 pass 画，不能清。
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    // `None` 表示**只读**。这一条就是软粒子能成立的原因：
+                    // 只读之后同一张深度纹理才能同时当采样源。
+                    depth_ops: None,
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            // 粒子在前：它们半透明且不写深度，任何在它们之后画的不透明物体
             // 都会把它们盖掉——包括天空。
             self.particles.draw(&mut pass, &particle_batches);
 
@@ -2117,7 +2142,10 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // 软粒子要把它当纹理采样。只写 RENDER_ATTACHMENT 的话
+            // 建绑定组时会被 wgpu 打回。
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         texture.create_view(&wgpu::TextureViewDescriptor::default())
@@ -3189,7 +3217,8 @@ mod test {
         let mut instances = Vec::new();
         let opaque_batches = build_batches(&opaque, &mut instances, &mut Vec::new());
         let mut transparent = vec![draw_at(3, 3, 10.0), draw_at(4, 4, 20.0)];
-        let transparent_batches = build_transparent_batches(&mut transparent, &mut instances, &mut Vec::new());
+        let transparent_batches =
+            build_transparent_batches(&mut transparent, &mut instances, &mut Vec::new());
 
         assert_eq!(instances.len(), 4);
         // 半透明的批次全部指向后两个槽位。

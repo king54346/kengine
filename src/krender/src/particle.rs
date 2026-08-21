@@ -23,6 +23,8 @@ struct ParticleGlobals {
     view_proj: [[f32; 4]; 4],
     camera_right: [f32; 4],
     camera_up: [f32; 4],
+    /// x = 软粒子淡出距离（0 = 关闭），y/z = 投影矩阵的深度系数
+    soft_params: [f32; 4],
 }
 
 /// 一个粒子系统对应的一次绘制。
@@ -34,6 +36,46 @@ pub(crate) struct ParticleBatch {
     count: u32,
     texture: Uuid,
     blend: BlendMode,
+}
+
+/// 建场景深度的绑定组。
+fn create_depth_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    view: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("kengine particle depth bind group"),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(view),
+        }],
+    })
+}
+
+/// 一张 1×1 的占位深度纹理。
+///
+/// 渲染器建好之后会立刻调 `set_depth_view` 换成真的，但绑定组不能
+/// 留空——wgpu 要求管线布局里的每个组在绘制时都有绑定。
+fn create_placeholder_depth(device: &wgpu::Device) -> wgpu::TextureView {
+    device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("kengine particle placeholder depth"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 /// 粒子 pass 所需的一组 GPU 资源。
@@ -53,6 +95,13 @@ pub(crate) struct ParticleResources {
     texture_layout: wgpu::BindGroupLayout,
     textures: FxHashMap<Uuid, GpuTexture>,
     bind_groups: FxHashMap<Uuid, wgpu::BindGroup>,
+
+    /// 场景深度的绑定组布局，软粒子要用。
+    depth_layout: wgpu::BindGroupLayout,
+    /// 当前深度纹理的绑定组。窗口尺寸一变就要重建。
+    depth_bind_group: wgpu::BindGroup,
+    /// 软粒子的淡出距离，0 表示关闭。
+    pub(crate) soft_fade: f32,
 }
 
 impl ParticleResources {
@@ -78,7 +127,8 @@ impl ParticleResources {
             label: Some("kengine particle globals layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // 片元着色器也要读：软粒子的参数在里面。
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -142,12 +192,30 @@ impl ParticleResources {
             ],
         });
 
+        // 场景深度：软粒子靠它判断自己离背后的几何有多近。
+        let depth_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("kengine particle depth layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    // 深度纹理是 `Depth` 采样类型，不是 `Float`——
+                    // 写错的话绑定会被 wgpu 打回。
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("kengine particle pipeline layout"),
             bind_group_layouts: &[
                 Option::from(&globals_layout),
                 Option::from(&storage_layout),
                 Option::from(&texture_layout),
+                Option::from(&depth_layout),
             ],
             immediate_size: 0,
         });
@@ -195,9 +263,17 @@ impl ParticleResources {
             "additive",
         );
 
+        let depth_bind_group =
+            create_depth_bind_group(device, &depth_layout, &create_placeholder_depth(device));
+
         let mut resources = Self {
             alpha_pipeline,
             additive_pipeline,
+            depth_layout,
+            depth_bind_group,
+            // 默认开着：粒子插进地面时露出的那条笔直交线是最显眼的
+            // 穿帮之一，而代价只是一次深度采样。
+            soft_fade: 0.5,
             globals_buffer,
             globals_bind_group,
             storage_layout,
@@ -220,6 +296,11 @@ impl ParticleResources {
     /// 收集本帧所有粒子并上传显存，返回按绘制顺序排好的批次。
     ///
     /// `items` 会被按到相机的距离**从远到近**重排。
+    /// 换一张深度纹理（窗口尺寸变化时）。
+    pub(crate) fn set_depth_view(&mut self, device: &wgpu::Device, view: &wgpu::TextureView) {
+        self.depth_bind_group = create_depth_bind_group(device, &self.depth_layout, view);
+    }
+
     pub(crate) fn prepare(
         &mut self,
         device: &wgpu::Device,
@@ -227,6 +308,7 @@ impl ParticleResources {
         items: &mut [ParticleItem<'_>],
         view_proj: Mat4,
         camera_to_world: Mat4,
+        projection: Mat4,
         scratch: &mut Vec<GpuParticle>,
     ) -> Vec<ParticleBatch> {
         scratch.clear();
@@ -286,6 +368,15 @@ impl ParticleResources {
                     .normalize_or_zero()
                     .extend(0.0)
                     .to_array(),
+                soft_params: [
+                    self.soft_fade,
+                    // 投影矩阵的深度系数，用来把深度缓冲的值还原成
+                    // 视空间距离。列主序：[2][2] 是 z_axis.z，
+                    // [3][2] 是 w_axis.z。
+                    projection.z_axis.z,
+                    projection.w_axis.z,
+                    0.0,
+                ],
                 camera_up: camera_to_world
                     .y_axis
                     .truncate()
@@ -312,6 +403,7 @@ impl ParticleResources {
             pass.set_bind_group(0, &self.globals_bind_group, &[]);
             pass.set_bind_group(1, &self.storage_bind_group, &[]);
             pass.set_bind_group(2, texture, &[]);
+            pass.set_bind_group(3, &self.depth_bind_group, &[]);
             // 六个顶点拼一个方片，几何在顶点着色器里长出来，不需要顶点缓冲。
             pass.draw(0..6, batch.first..batch.first + batch.count);
         }

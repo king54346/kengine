@@ -724,6 +724,9 @@ mod tests {
             objects.len()
         );
         // 每一级都该留下一些，不然是把该画的也剔了。
-        assert!(kept.iter().all(|n| *n > 0), "有级联一个物体都没留下：{kept:?}");
+        assert!(
+            kept.iter().all(|n| *n > 0),
+            "有级联一个物体都没留下：{kept:?}"
+        );
     }
 }

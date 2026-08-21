@@ -10,6 +10,14 @@ struct ParticleGlobals {
     // 于是无论相机怎么转，它始终正对镜头。
     camera_right: vec4<f32>,
     camera_up: vec4<f32>,
+    // 软粒子参数：
+    //   x = 淡出距离（世界单位），0 表示关闭
+    //   y = 投影矩阵的 [2][2]，z = 投影矩阵的 [3][2]
+    //   w = 保留
+    //
+    // y 和 z 用来把深度缓冲里的非线性值还原成视空间距离。直接传这两个
+    // 系数而不是 near/far：正交投影和透视投影的公式不同，传系数两边通用。
+    soft_params: vec4<f32>,
 };
 
 struct Particle {
@@ -29,12 +37,30 @@ struct Particle {
 @group(1) @binding(0) var<storage, read> particles: array<Particle>;
 @group(2) @binding(0) var particle_texture: texture_2d<f32>;
 @group(2) @binding(1) var particle_sampler: sampler;
+// 不透明几何的深度。粒子 pass 用**只读**深度附件，所以同一张纹理
+// 既当深度测试的对象又当采样源——WebGPU 明确允许这种用法。
+@group(3) @binding(0) var scene_depth: texture_depth_2d;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
 };
+
+// 把深度缓冲里的值还原成视空间的距离（正数，越远越大）。
+//
+// 透视投影下深度是 `(a * z + b) / -z` 的形式，反解得到 `z = b / (depth - a)`。
+// 传进来的 a 是 `projection[2][2]`，b 是 `projection[3][2]`。
+fn linear_depth(depth: f32, a: f32, b: f32) -> f32 {
+    let denominator = depth - a;
+    // 正交投影时 b 为 0、denominator 可能为 0。返回一个很大的值，
+    // 效果是「背景无穷远」，粒子不淡出——比返回 NaN 强，
+    // NaN 会让整个粒子变成黑洞。
+    if (abs(denominator) < 1e-9) {
+        return 1e9;
+    }
+    return abs(b / denominator);
+}
 
 @vertex
 fn particle_vs(
@@ -75,7 +101,34 @@ fn particle_vs(
 @fragment
 fn particle_fs(in: VertexOutput) -> @location(0) vec4<f32> {
     let texel = textureSample(particle_texture, particle_sampler, in.uv);
-    let color = in.color * texel;
+    var color = in.color * texel;
+
+    // ── 软粒子 ──
+    //
+    // 粒子是个方片，插进地面时会露出一条**笔直的交线**——一眼就能
+    // 看出它是张纸。做法是：比较粒子自身的深度和它背后不透明几何的
+    // 深度，两者越接近就越透明，交线因此被抹掉。
+    let fade_distance = particle_globals.soft_params.x;
+    if (fade_distance > 0.0) {
+        // `clip_position` 在片元阶段已经是屏幕坐标（像素），
+        // 直接当纹素坐标用，不需要再做一次投影除法。
+        let coord = vec2<i32>(i32(in.clip_position.x), i32(in.clip_position.y));
+        let scene = linear_depth(
+            textureLoad(scene_depth, coord, 0),
+            particle_globals.soft_params.y,
+            particle_globals.soft_params.z,
+        );
+        let particle = linear_depth(
+            in.clip_position.z,
+            particle_globals.soft_params.y,
+            particle_globals.soft_params.z,
+        );
+
+        // 粒子在几何**前面**多远。为负说明粒子在几何后面，
+        // 那本来就会被深度测试剔掉，这里夹到 0 不影响。
+        let gap = scene - particle;
+        color.a = color.a * clamp(gap / fade_distance, 0.0, 1.0);
+    }
 
     // 输出预乘 alpha 的颜色：这样「普通半透明」与「相加」两种混合
     // 只差一个混合状态，片元着色器可以完全共用。

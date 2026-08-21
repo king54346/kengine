@@ -151,27 +151,6 @@ impl Plugin for TerrainDemo {
                 .and_then(Node::terrain)
                 .map_or(0, |t| t.chunks().len())
         );
-        // TEMP-VALIDATION：撒一堆小物件，看逐级剔除省了多少。
-        {
-            let mesh = Mesh::cube();
-            for i in 0..300 {
-                let angle = i as f32 * 0.61;
-                let radius = (i % 30) as f32 * 12.0;
-                let x = 200.0 + angle.cos() * radius;
-                let z = 200.0 + angle.sin() * radius;
-                let y = ctx.scene.try_get(self.terrain).and_then(Node::terrain)
-                    .map_or(0.0, |t| t.heightmap().sample(x, z));
-                ctx.scene.add_node(
-                    Node::new("Prop")
-                        .with_mesh(mesh.clone())
-                        .with_material(PbrMaterial::metal(Vec3::new(0.7, 0.6, 0.2), 0.4))
-                        .with_position(Vec3::new(x, y + 0.4, z))
-                        .with_scale(Vec3::splat(0.4)),
-                );
-            }
-            klog::info!("[验证] 撒了 300 个小物件");
-        }
-
         klog::info!("WASD/QE 移动，左键抬升、右键下压、中键抹平，[ ] 改笔刷，H 看分块，空格丢球");
     }
 
