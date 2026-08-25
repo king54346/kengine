@@ -38,6 +38,12 @@
 
 #![warn(missing_docs)]
 
+/// 对话框的位置：拖动、夹进屏幕、居中。
+pub mod dialog;
+/// 菜单的键盘导航：方向键跳到哪一项。
+pub mod menu;
+/// 浮层定位：下拉框、菜单、提示气泡的摆放。
+pub mod popover;
 pub mod text_edit;
 pub mod widgets;
 

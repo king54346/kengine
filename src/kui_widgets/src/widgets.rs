@@ -24,6 +24,12 @@ use kmath::{Vec2, Vec4};
 use kui::{AlignCross, Direction, Edges, Id, Justify, LayoutNode, Length, Style};
 use kui::{Rect, Response, Ui};
 
+/// 滚动条的厚度。
+const SCROLLBAR_THICKNESS: f32 = 10.0;
+
+/// 滑块的最短长度。内容极长时滑块会算得很短，短到抓不住。
+const SCROLLBAR_MIN_THUMB: f32 = 24.0;
+
 /// 控件的配色与尺寸。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Theme {
@@ -45,6 +51,9 @@ pub struct Theme {
     pub outline: Vec4,
     /// 焦点框颜色。
     pub focus: Vec4,
+    /// 模态遮罩色。半透明的黑，压暗背景但不完全盖住——
+    /// 全黑的话用户会以为界面卡死了。
+    pub modal: Vec4,
     /// 圆角半径。
     pub radius: f32,
     /// 控件内边距。
@@ -67,6 +76,7 @@ impl Default for Theme {
             dim: Vec4::new(0.55, 0.58, 0.66, 1.0),
             outline: Vec4::new(1.0, 1.0, 1.0, 0.14),
             focus: Vec4::new(0.45, 0.70, 1.00, 0.9),
+            modal: Vec4::new(0.0, 0.0, 0.0, 0.55),
             radius: 6.0,
             padding: Edges::axes(12.0, 6.0),
             font_size: 15.0,
@@ -94,6 +104,16 @@ enum Widget {
     Slider { value: f32 },
     /// 可折叠分组的标题条。
     Folder { text: String, open: bool },
+    /// 单选按钮。和复选框的区别是它画成圆的，而且语义上「一组里只能选一个」。
+    Radio { text: String, selected: bool },
+    /// 列表里的一行。
+    ListItem { text: String, selected: bool },
+    /// 模态遮罩：铺满整屏、压暗背景、吃掉所有点击。
+    Modal { color: Vec4 },
+    /// 对话框的标题栏。可拖动，右端一个关闭按钮。
+    DialogTitle { text: String },
+    /// 滚动条。`fraction` 是滑块占轨道的比例，`offset` 是滑块起点的比例。
+    Scrollbar { fraction: f32, offset: f32 },
     /// 文本框。
     TextInput {
         /// 当前内容的一份快照。绘制期要用。
@@ -313,6 +333,91 @@ impl WidgetUi {
             Widget::Checkbox {
                 text: text.into(),
                 checked,
+            },
+        )
+    }
+
+    /// 一个单选按钮。
+    ///
+    /// 和 [`checkbox`](Self::checkbox) 一样，选中状态由调用方保管——
+    /// 一组单选按钮的「选中项」天然是**一个**值，存在每个按钮里反而
+    /// 要维护「只有一个为真」这条不变量。
+    ///
+    /// ```ignore
+    /// for (index, name) in ["低", "中", "高"].iter().enumerate() {
+    ///     let r = w.radio(&format!("q{index}"), *name, self.quality == index);
+    ///     if w.response(r).clicked {
+    ///         self.quality = index;
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// 注意**没有**「取消选中」——点已经选中的那个不会把它取消。
+    /// 这是单选组和复选框的根本区别：一组里必须有一个是选中的。
+    pub fn radio(&mut self, id: &str, text: impl Into<String>, selected: bool) -> Id {
+        self.push(
+            id,
+            Widget::Radio {
+                text: text.into(),
+                selected,
+            },
+        )
+    }
+
+    /// 列表里的一行。
+    ///
+    /// 选中项同样由调用方保管。多选时就存一个集合——控件这一层
+    /// 不需要知道是单选还是多选。
+    pub fn list_item(&mut self, id: &str, text: impl Into<String>, selected: bool) -> Id {
+        self.push(
+            id,
+            Widget::ListItem {
+                text: text.into(),
+                selected,
+            },
+        )
+    }
+
+    /// 一层模态遮罩：铺满整屏、压暗背景、吃掉所有点击。
+    ///
+    /// **必须最先声明**——它靠「后声明的画在上面」来盖住背景，而命中
+    /// 测试是从后往前找的，所以它自然会把点击让给之后声明的对话框。
+    ///
+    /// 返回的 id 上 `clicked` 为真表示点在了遮罩上（也就是对话框外面），
+    /// 通常用来关闭对话框。
+    pub fn modal(&mut self, id: &str) -> Id {
+        let color = self.theme.modal;
+        self.push(id, Widget::Modal { color })
+    }
+
+    /// 对话框的标题栏：一条可拖动的横条。
+    ///
+    /// 位置由调用方保管：
+    ///
+    /// ```ignore
+    /// let title = w.dialog_title("t", "设置");
+    /// self.dialog_position += w.response(title).drag;
+    /// ```
+    ///
+    /// 拖动增量而不是绝对位置——绝对位置要求控件知道自己「本该」在哪，
+    /// 而那正是调用方在管的事。
+    pub fn dialog_title(&mut self, id: &str, text: impl Into<String>) -> Id {
+        self.push(id, Widget::DialogTitle { text: text.into() })
+    }
+
+    /// 一根滚动条。
+    ///
+    /// `fraction` 是可见部分占全部内容的比例（滑块多长），
+    /// `offset` 是已经滚过的比例（滑块在哪）。两者都是 0..=1。
+    ///
+    /// 滚轮由 [`begin_scroll`](Self::begin_scroll) 处理；这根条是给
+    /// **鼠标拖动**用的，也让「内容还有多少没看到」变得可见。
+    pub fn scrollbar(&mut self, id: &str, fraction: f32, offset: f32) -> Id {
+        self.push(
+            id,
+            Widget::Scrollbar {
+                fraction: fraction.clamp(0.0, 1.0),
+                offset: offset.clamp(0.0, 1.0),
             },
         )
     }
@@ -654,7 +759,12 @@ impl WidgetUi {
         let mut style = Style {
             width: match declared.widget {
                 // 滑条和文本框都要占满一行才好用。
-                Widget::Slider { .. } | Widget::TextInput { .. } => Length::Percent(1.0),
+                Widget::Slider { .. }
+                | Widget::TextInput { .. }
+                | Widget::ListItem { .. }
+                | Widget::Modal { .. }
+                | Widget::DialogTitle { .. }
+                | Widget::Scrollbar { .. } => Length::Percent(1.0),
                 _ => Length::Auto,
             },
             min_size: Vec2::new(0.0, theme.row_height),
@@ -752,6 +862,20 @@ impl WidgetUi {
                 // 左边给三角形留位置。
                 Vec2::new(size.x + theme.row_height, size.y)
             }
+            Widget::Radio { text, .. } => {
+                let text_size = ui.measure(text, &style(theme.font_size), None).size;
+                Vec2::new(text_size.x + theme.row_height, text_size.y)
+            }
+            Widget::ListItem { text, .. } => ui.measure(text, &style(theme.font_size), None).size,
+            // 遮罩由布局撑满，自身不要求任何尺寸。
+            Widget::Modal { .. } => Vec2::ZERO,
+            Widget::DialogTitle { text } => {
+                let text_size = ui.measure(text, &style(theme.font_size), None).size;
+                // 右端给关闭按钮留位置。
+                Vec2::new(text_size.x + theme.row_height, text_size.y)
+            }
+            // 滚动条只要够厚能点中；长度由布局给。
+            Widget::Scrollbar { .. } => Vec2::new(0.0, SCROLLBAR_THICKNESS),
             Widget::TextInput { text, placeholder } => {
                 // 按内容和提示里较宽的那个量，但至少留出一段可打字的宽度——
                 // 空文本框宽度为零的话根本点不进去。
@@ -969,6 +1093,160 @@ impl WidgetUi {
                     ui.rounded_rect(knob, knob_radius, fill);
                 }
 
+                Widget::Radio { text, selected } => {
+                    // 和复选框同样大小，但画成圆的。形状是单选和多选
+                    // 唯一的视觉区别，两者混在一起时全靠它区分。
+                    let size = theme.row_height * 0.6;
+                    let radius = size * 0.5;
+                    let center = Vec2::new(rect.min.x + radius, rect.center().y);
+                    let outer = Rect {
+                        min: center - Vec2::splat(radius),
+                        max: center + Vec2::splat(radius),
+                    };
+                    let fill = if response.hovered {
+                        theme.hovered
+                    } else {
+                        theme.surface
+                    };
+                    ui.rounded_rect(outer, radius, fill);
+                    ui.border(outer, radius, 1.0, theme.outline);
+                    if *selected {
+                        // 圆心一个实心点。用主色而不是白色，好让它和
+                        // 复选框的白勾在同一个面板里也能区分开。
+                        let dot = radius * 0.5;
+                        ui.rounded_rect(
+                            Rect {
+                                min: center - Vec2::splat(dot),
+                                max: center + Vec2::splat(dot),
+                            },
+                            dot,
+                            theme.accent,
+                        );
+                    }
+                    if response.focused {
+                        ui.border(outer.shrink(-2.0), radius + 2.0, 2.0, theme.focus);
+                    }
+                    ui.text(
+                        Vec2::new(outer.max.x + 8.0, rect.center().y - theme.font_size * 0.6),
+                        text,
+                        &TextStyle {
+                            size: theme.font_size,
+                            ..Default::default()
+                        },
+                        theme.text,
+                        None,
+                    );
+                }
+
+                Widget::ListItem { text, selected } => {
+                    // 选中的整行铺主色。悬停只铺一层浅的——两者叠在
+                    // 一起时选中要压过悬停，否则鼠标扫过就看不出选了谁。
+                    if *selected {
+                        ui.rounded_rect(rect, theme.radius * 0.5, theme.accent);
+                    } else if response.hovered {
+                        ui.rounded_rect(rect, theme.radius * 0.5, theme.hovered);
+                    }
+                    if response.focused && !*selected {
+                        ui.border(rect, theme.radius * 0.5, 1.0, theme.focus);
+                    }
+                    ui.text(
+                        Vec2::new(rect.min.x, rect.center().y - theme.font_size * 0.6),
+                        text,
+                        &TextStyle {
+                            size: theme.font_size,
+                            ..Default::default()
+                        },
+                        theme.text,
+                        Some(rect.size().x),
+                    );
+                }
+
+                Widget::Modal { color } => {
+                    // 铺满整个窗口，不是铺满这个节点——遮罩的意义就是
+                    // 挡住**外面**的东西，缩在布局框里就没用了。
+                    ui.rect(
+                        Rect {
+                            min: Vec2::ZERO,
+                            max: self.screen,
+                        },
+                        *color,
+                    );
+                }
+
+                Widget::DialogTitle { text } => {
+                    let fill = if response.held {
+                        theme.active
+                    } else if response.hovered {
+                        theme.hovered
+                    } else {
+                        theme.surface
+                    };
+                    ui.rect(rect, fill);
+                    ui.text(
+                        Vec2::new(
+                            rect.min.x + theme.padding.left,
+                            rect.center().y - theme.font_size * 0.6,
+                        ),
+                        text,
+                        &TextStyle {
+                            size: theme.font_size,
+                            ..Default::default()
+                        },
+                        theme.text,
+                        // 给关闭按钮让出宽度，否则长标题会把叉盖住。
+                        Some((rect.size().x - theme.row_height).max(0.0)),
+                    );
+                    // 右端的关闭标记。画成一个方块——真正的叉要画两条
+                    // 斜线，和复选框的勾一样缺非矩形图元。
+                    let mark = theme.font_size * 0.4;
+                    let center = Vec2::new(rect.max.x - theme.row_height * 0.5, rect.center().y);
+                    ui.rounded_rect(
+                        Rect {
+                            min: center - Vec2::splat(mark * 0.5),
+                            max: center + Vec2::splat(mark * 0.5),
+                        },
+                        1.0,
+                        theme.dim,
+                    );
+                }
+
+                Widget::Scrollbar { fraction, offset } => {
+                    // 竖着还是横着看布局给的形状，不额外加参数——
+                    // 一根又高又窄的条只可能是竖的。
+                    let size = rect.size();
+                    let vertical = size.y >= size.x;
+                    let track_len = if vertical { size.y } else { size.x };
+                    // 滑块再短也要能点中。太短的话内容一多就变成一根
+                    // 抓不住的线。
+                    let thumb_len = (track_len * fraction).max(SCROLLBAR_MIN_THUMB.min(track_len));
+                    // 滑块缩短了多少，可走的行程就少多少，否则滑到底时
+                    // 滑块会探出轨道。
+                    let travel = (track_len - thumb_len).max(0.0);
+                    let start = travel * offset;
+
+                    ui.rounded_rect(rect, size.min_element() * 0.5, theme.surface);
+
+                    let thumb = if vertical {
+                        Rect {
+                            min: Vec2::new(rect.min.x, rect.min.y + start),
+                            max: Vec2::new(rect.max.x, rect.min.y + start + thumb_len),
+                        }
+                    } else {
+                        Rect {
+                            min: Vec2::new(rect.min.x + start, rect.min.y),
+                            max: Vec2::new(rect.min.x + start + thumb_len, rect.max.y),
+                        }
+                    };
+                    let fill = if response.held {
+                        Vec4::ONE
+                    } else if response.hovered {
+                        theme.text
+                    } else {
+                        theme.dim
+                    };
+                    ui.rounded_rect(thumb, thumb.size().min_element() * 0.5, fill);
+                }
+
                 Widget::TextInput { text, placeholder } => {
                     let fill = if response.focused {
                         theme.active
@@ -1070,9 +1348,12 @@ mod tests {
     use kui::{PointerButton, UiInput};
 
     /// 一个不带字体的 UI。文字量出来是零尺寸，但布局与交互照常。
+    /// 测试用的窗口大小。
+    const SCREEN: Vec2 = Vec2::new(800.0, 600.0);
+
     fn ui() -> Ui {
         let mut ui = Ui::new();
-        ui.begin_frame(Vec2::new(800.0, 600.0), 1.0);
+        ui.begin_frame(SCREEN, 1.0);
         ui
     }
 
@@ -1189,6 +1470,187 @@ mod tests {
         assert!(!ui.draw_list().is_empty(), "控件该画出东西来");
         // 没有裁剪、没有换纹理，一次绘制画完。
         assert_eq!(ui.draw_list().batches().len(), 1);
+    }
+
+    /// 选中的单选按钮要比没选中的多画一个圆点，否则一组按钮
+    /// 看上去全都一样，用户不知道自己选了哪个。
+    #[test]
+    fn a_selected_radio_draws_more_than_an_unselected_one() {
+        let count = |selected: bool| {
+            let mut ui = ui();
+            let mut w = WidgetUi::default();
+            w.begin();
+            w.radio("r", "选项", selected);
+            w.finish(&mut ui, &UiInput::default());
+            ui.end_frame();
+            ui.draw_list().indices().len()
+        };
+        assert!(count(true) > count(false));
+    }
+
+    /// 一组单选按钮各自独立响应，点第二个不会连带点到第一个。
+    #[test]
+    fn radios_in_a_group_are_independent() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        w.begin();
+        let a = w.radio("a", "甲", true);
+        let b = w.radio("b", "乙", false);
+        w.finish(&mut ui, &UiInput::default());
+
+        // 点击要按下、松开两帧才算数。
+        let target = w.response(b).rect.center();
+        for frame in 0..2 {
+            let mut input = at(target.x, target.y);
+            if frame == 0 {
+                input.pressed.push(PointerButton::Primary);
+            } else {
+                input.released.push(PointerButton::Primary);
+            }
+            w.begin();
+            w.radio("a", "甲", true);
+            w.radio("b", "乙", false);
+            w.finish(&mut ui, &input);
+        }
+
+        assert!(w.response(b).clicked);
+        assert!(!w.response(a).clicked);
+    }
+
+    /// 选中的列表行要画出底色。不画的话选了等于没选。
+    #[test]
+    fn a_selected_list_item_draws_a_background() {
+        let count = |selected: bool| {
+            let mut ui = ui();
+            let mut w = WidgetUi::default();
+            w.begin();
+            w.list_item("i", "一行", selected);
+            w.finish(&mut ui, &UiInput::default());
+            ui.end_frame();
+            ui.draw_list().indices().len()
+        };
+        assert!(count(true) > count(false));
+    }
+
+    /// 遮罩铺满整个窗口，不是铺满它那个布局节点——
+    /// 缩在节点里的话背景根本挡不住。
+    #[test]
+    fn a_modal_covers_the_whole_window() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        w.begin();
+        w.modal("m");
+        w.finish(&mut ui, &UiInput::default());
+        ui.end_frame();
+
+        let vertices = ui.draw_list().vertices();
+        let min_x = vertices.iter().fold(f32::MAX, |a, v| a.min(v.position[0]));
+        let min_y = vertices.iter().fold(f32::MAX, |a, v| a.min(v.position[1]));
+        let max_x = vertices.iter().fold(f32::MIN, |a, v| a.max(v.position[0]));
+        let max_y = vertices.iter().fold(f32::MIN, |a, v| a.max(v.position[1]));
+        assert_eq!((min_x, min_y), (0.0, 0.0));
+        assert_eq!((max_x, max_y), (SCREEN.x, SCREEN.y));
+    }
+
+    /// 遮罩之后声明的东西要能点得到——遮罩挡的是它**下面**的，
+    /// 不是它上面的对话框。命中测试从后往前找，这一条就是在钉这个顺序。
+    #[test]
+    fn a_modal_does_not_block_what_comes_after_it() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        w.begin();
+        w.modal("m");
+        let b = w.button("ok", "确定");
+        w.finish(&mut ui, &UiInput::default());
+
+        let target = w.response(b).rect.center();
+        for frame in 0..2 {
+            let mut input = at(target.x, target.y);
+            if frame == 0 {
+                input.pressed.push(PointerButton::Primary);
+            } else {
+                input.released.push(PointerButton::Primary);
+            }
+            w.begin();
+            w.modal("m");
+            w.button("ok", "确定");
+            w.finish(&mut ui, &input);
+        }
+
+        assert!(w.response(b).clicked, "对话框上的按钮被遮罩吃掉了");
+    }
+
+    /// 拖标题栏得到位移增量，调用方拿它挪对话框。
+    #[test]
+    fn dragging_a_dialog_title_reports_the_delta() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        w.begin();
+        let t = w.dialog_title("t", "设置");
+        w.finish(&mut ui, &UiInput::default());
+
+        let start = w.response(t).rect.center();
+        let mut input = at(start.x, start.y);
+        input.pressed.push(PointerButton::Primary);
+        w.begin();
+        w.dialog_title("t", "设置");
+        w.finish(&mut ui, &input);
+
+        // 按住不放地挪：这一帧既没按下也没松开，按住的状态由内部记着。
+        let input = at(start.x + 40.0, start.y + 25.0);
+        w.begin();
+        w.dialog_title("t", "设置");
+        w.finish(&mut ui, &input);
+
+        let drag = w.response(t).drag;
+        assert!((drag.x - 40.0).abs() < 0.01, "横向位移是 {}", drag.x);
+        assert!((drag.y - 25.0).abs() < 0.01, "纵向位移是 {}", drag.y);
+    }
+
+    /// 内容越多滑块越短，但短到一定程度就不再短了——
+    /// 一根抓不住的线等于没有滚动条。
+    #[test]
+    fn a_scrollbar_thumb_never_gets_too_short() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        w.begin();
+        // 万分之一的可见比例：朴素算法会得到零点几像素。
+        let bar = w.scrollbar("s", 0.0001, 0.0);
+        w.finish(&mut ui, &UiInput::default());
+        ui.end_frame();
+
+        let track = w.response(bar).rect;
+        // 找出画在轨道之外的最右一点，也就是滑块的末端。
+        let vertices = ui.draw_list().vertices();
+        let widest = vertices.iter().fold(f32::MIN, |a, v| a.max(v.position[0]));
+        let thumb_len = widest - track.min.x;
+        assert!(
+            thumb_len >= SCROLLBAR_MIN_THUMB.min(track.size().x) - 0.01,
+            "滑块只有 {thumb_len} 长",
+        );
+    }
+
+    /// 滑到底时滑块的末端正好贴着轨道末端，不探出去。
+    ///
+    /// 这一条盯着的是「行程 = 轨道长 − 滑块长」：忘了减滑块长度的话，
+    /// offset 为 1 会把滑块整个推出轨道。
+    #[test]
+    fn a_scrollbar_thumb_stops_at_the_end_of_the_track() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        w.begin();
+        let bar = w.scrollbar("s", 0.25, 1.0);
+        w.finish(&mut ui, &UiInput::default());
+        ui.end_frame();
+
+        let track = w.response(bar).rect;
+        let vertices = ui.draw_list().vertices();
+        let widest = vertices.iter().fold(f32::MIN, |a, v| a.max(v.position[0]));
+        assert!(
+            widest <= track.max.x + 0.01,
+            "滑块探出轨道 {} 像素",
+            widest - track.max.x,
+        );
     }
 
     #[test]

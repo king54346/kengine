@@ -48,6 +48,8 @@ pub mod draw;
 pub mod interact;
 /// 界面标记语言的解析。
 pub mod markup;
+/// 标记属性到样式的转换。
+pub mod style_attr;
 
 mod layout;
 
@@ -57,6 +59,7 @@ pub use interact::{EditAction, Interaction, PointerButton, Response, UiInput};
 pub use layout::{
     AlignCross, Direction, Edges, Id, Justify, LayoutNode, Length, MAX_DEPTH, Solved, Style, solve,
 };
+pub use style_attr::{Applied, Selector, StyleError, Visual};
 
 /// UI 着色器源码，由 `krender` 编译。
 pub const UI_WGSL: &str = include_str!("ui.wgsl");
