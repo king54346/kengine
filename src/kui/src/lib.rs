@@ -1,7 +1,20 @@
-//! kui — 用户界面
+//! kui —— 界面**核心**：布局、样式、绘制图元、命中测试、标记语言。
 //!
-//! 目前是**即时模式的绘制层**：矩形、圆角、边框、裁剪、文字、贴图。
-//! 布局（taffy）、事件路由、控件还没做，见 `next.md`。
+//! # 三层分工
+//!
+//! 对着 Bevy 的 `bevy_ui` / `bevy_ui_render` / `bevy_ui_widgets`：
+//!
+//! | 层 | 这里对应的 | 管什么 |
+//! |---|---|---|
+//! | 核心 | **本 crate** | 布局（taffy）、[`Style`]、[`DrawList`]、[`Interaction`]、[`markup`] |
+//! | 渲染 | `krender::ui` | 把绘制列表传上显存、画到屏幕 |
+//! | 控件 | `kui_widgets` | 按钮、复选框、滑条、文本框、滚动区 |
+//!
+//! 分开的实际好处：只想画个血条或准星的项目，链进这一层就够了，
+//! 不必把一整套控件、文本编辑、输入法处理一起背上。反过来，控件层
+//! 能大改甚至整个换掉，而不动核心。
+//!
+//! **这一层不认识「按钮」是什么**——它只知道矩形、文字、和一次命中测试。
 //!
 //! # 一张纹理画完一整个界面
 //!
@@ -33,9 +46,10 @@
 mod context;
 pub mod draw;
 pub mod interact;
-pub mod layout;
-pub mod text_edit;
-pub mod widgets;
+/// 界面标记语言的解析。
+pub mod markup;
+
+mod layout;
 
 pub use context::Ui;
 pub use draw::{DrawBatch, DrawList, Rect, UiVertex};
@@ -43,8 +57,6 @@ pub use interact::{EditAction, Interaction, PointerButton, Response, UiInput};
 pub use layout::{
     AlignCross, Direction, Edges, Id, Justify, LayoutNode, Length, MAX_DEPTH, Solved, Style, solve,
 };
-pub use text_edit::TextEdit;
-pub use widgets::{Theme, WidgetUi};
 
 /// UI 着色器源码，由 `krender` 编译。
 pub const UI_WGSL: &str = include_str!("ui.wgsl");

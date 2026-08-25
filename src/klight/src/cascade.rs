@@ -780,7 +780,10 @@ mod tests {
         let large = compute(
             camera(),
             light(),
-            Aabb::new(Vec3::new(-500.0, -1.0, -500.0), Vec3::new(500.0, 3.0, 500.0)),
+            Aabb::new(
+                Vec3::new(-500.0, -1.0, -500.0),
+                Vec3::new(500.0, 3.0, 500.0),
+            ),
             CascadeSettings::default(),
         );
 

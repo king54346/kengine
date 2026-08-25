@@ -646,8 +646,6 @@ impl MaterialPipelines {
 
 /// 阴影 pass 所需的一组 GPU 资源。
 struct ShadowResources {
-    /// TEMP-PROBE
-    texture: wgpu::Texture,
     settings: ShadowSettings,
     /// 级联参数。
     cascades: klight::cascade::CascadeSettings,
@@ -2315,74 +2313,6 @@ impl Renderer {
             );
         }
 
-        // TEMP-PROBE：把级联 0 画成 ASCII
-        {
-            static mut FRAME: u32 = 0;
-            let frame = unsafe {
-                FRAME += 1;
-                FRAME
-            };
-            if frame == 120 {
-                let res = self.shadow.settings.resolution.max(256);
-                let bytes = (res * res * 4) as u64;
-                let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("probe"),
-                    size: bytes,
-                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                    mapped_at_creation: false,
-                });
-                encoder.copy_texture_to_buffer(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.shadow.texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::DepthOnly,
-                    },
-                    wgpu::TexelCopyBufferInfo {
-                        buffer: &readback,
-                        layout: wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(res * 4),
-                            rows_per_image: Some(res),
-                        },
-                    },
-                    wgpu::Extent3d { width: res, height: res, depth_or_array_layers: 1 },
-                );
-                self.queue.submit(std::iter::once(encoder.finish()));
-                readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-                let _ = self.device.poll(wgpu::PollType::Wait {
-                    submission_index: None,
-                    timeout: None,
-                });
-                let data = readback.slice(..).get_mapped_range().unwrap();
-                let depth = |x: u32, y: u32| -> f32 {
-                    let i = ((y * res + x) * 4) as usize;
-                    f32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]])
-                };
-                let cell = res / 48;
-                let mut art = String::new();
-                for row in 0..40u32 {
-                    for col in 0..48u32 {
-                        let mut occupied = false;
-                        for dy in 0..cell.max(1) {
-                            for dx in 0..cell.max(1) {
-                                let (x, y) = (col * cell + dx, row * cell + dy);
-                                if x < res && y < res && depth(x, y) < 0.999 {
-                                    occupied = true;
-                                }
-                            }
-                        }
-                        art.push(if occupied { '#' } else { '.' });
-                    }
-                    art.push(char::from(10));
-                }
-                klog::info!("[验证] 级联 0 的阴影图占用：{}{art}", char::from(10));
-                drop(data);
-                readback.unmap();
-                return RenderOutcome::Ok;
-            }
-        }
-
         self.queue.submit(std::iter::once(encoder.finish()));
         self.queue.present(output);
 
@@ -2773,9 +2703,7 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Depth32Float,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_SRC,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     // 采样用的是整个数组的视图。
@@ -2923,7 +2851,6 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
     );
 
     ShadowResources {
-        texture: texture.clone(),
         settings,
         cascades: klight::cascade::CascadeSettings::default(),
         pipeline,

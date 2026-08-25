@@ -1,7 +1,7 @@
 //! 基础控件。
 //!
-//! 这一层把前三块串起来：[`layout`](crate::layout) 算矩形、
-//! [`interact`](crate::interact) 判交互、[`draw`](crate::draw) 出几何。
+//! 这一层把前三块串起来：[`布局`](kui::solve) 算矩形、
+//! [`interact`](kui::interact) 判交互、[`draw`](kui::draw) 出几何。
 //!
 //! # 三段式
 //!
@@ -19,10 +19,10 @@
 //! `ui.finish()` 之后才能查到它被点了。对 HUD 与菜单这不构成问题；
 //! 这一点在 [`WidgetUi::response`] 上写明了。
 
-use crate::layout::{AlignCross, Direction, Edges, Id, Justify, LayoutNode, Length, Style};
-use crate::{Rect, Response, Ui};
 use kfont::TextStyle;
 use kmath::{Vec2, Vec4};
+use kui::{AlignCross, Direction, Edges, Id, Justify, LayoutNode, Length, Style};
+use kui::{Rect, Response, Ui};
 
 /// 控件的配色与尺寸。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -92,6 +92,8 @@ enum Widget {
     Checkbox { text: String, checked: bool },
     /// 滑条。`value` 已归一化到 0..=1。
     Slider { value: f32 },
+    /// 可折叠分组的标题条。
+    Folder { text: String, open: bool },
     /// 文本框。
     TextInput {
         /// 当前内容的一份快照。绘制期要用。
@@ -124,7 +126,8 @@ struct Declared {
 /// 每帧的用法：
 ///
 /// ```no_run
-/// # use kui::{widgets::WidgetUi, Ui, UiInput};
+/// # use kui::{Ui, UiInput};
+/// # use kui_widgets::WidgetUi;
 /// # let mut ui = Ui::new();
 /// # let mut widgets = WidgetUi::default();
 /// # let input = UiInput::default();
@@ -146,9 +149,9 @@ pub struct WidgetUi {
     /// 根容器的样式。**跨帧保留**，`begin` 不会清它。
     root_style: Style,
     /// 交互状态，跨帧。
-    interaction: crate::Interaction,
+    interaction: kui::Interaction,
     /// 上一次求解的结果。
-    solved: crate::layout::Solved,
+    solved: kui::Solved,
     /// 当前打开的行号；[`None`] 表示不在行里。
     open_row: Option<usize>,
     /// 本帧已经开过几行，用来发行号。
@@ -163,6 +166,19 @@ pub struct WidgetUi {
     edits: std::collections::HashMap<Id, crate::TextEdit>,
     /// 每个滚动区的滚动位置，跨帧。
     scroll: std::collections::HashMap<Id, f32>,
+    /// 每个折叠分组开着还是收着，跨帧。
+    ///
+    /// 状态放在这里而不是让调用方保管：折叠纯粹是**外观**，和游戏逻辑
+    /// 无关。让调用方为每个分组存一个 bool，只会让每个面板都多出一堆
+    /// 和业务无关的字段。
+    folders: std::collections::HashMap<Id, bool>,
+    /// 上一次 `finish` 时的窗口尺寸。滚动区靠它夹住自己，不越界。
+    screen: Vec2,
+    /// 当前折叠分组收着——接下来声明的控件直接丢弃。
+    ///
+    /// 丢弃而不是「声明了但不画」：不画的话它们仍然占布局空间，
+    /// 收起来的分组会留下一大片空白。
+    collapsed: bool,
 }
 
 /// 本帧的滚动区。
@@ -205,6 +221,9 @@ impl Default for WidgetUi {
             rects: Vec::new(),
             edits: Default::default(),
             scroll: Default::default(),
+            folders: Default::default(),
+            screen: Vec2::ZERO,
+            collapsed: false,
         }
     }
 }
@@ -217,6 +236,7 @@ impl WidgetUi {
         self.open_row = None;
         self.rows = 0;
         self.row_first = false;
+        self.collapsed = false;
         // **不重置 `root_style`**：它是配置，不是每帧的声明。
         //
         // 之前这里会把它清回默认值，于是「先 `root_style` 再 `begin`」
@@ -322,7 +342,7 @@ impl WidgetUi {
         id: &str,
         text: &mut String,
         placeholder: impl Into<String>,
-        input: &crate::UiInput,
+        input: &kui::UiInput,
     ) -> Id {
         let id = Id::new(id);
         let focused = self.interaction.focused() == Some(id);
@@ -403,6 +423,11 @@ impl WidgetUi {
 
     fn push(&mut self, id: &str, widget: Widget) -> Id {
         let id = Id::new(id);
+        // 收起来的分组里的控件直接不声明。声明了再藏的话它们仍然占
+        // 布局空间，收起来的分组会留下一大片空白。
+        if self.collapsed {
+            return id;
+        }
         let row = self.open_row;
         // 行内的第一个控件占据剩余空间，把后面的挤到右边。
         let grow = row.is_some() && self.row_first;
@@ -416,6 +441,63 @@ impl WidgetUi {
             grow,
         });
         id
+    }
+
+    /// 开一个可折叠分组，返回标题条的 id。
+    ///
+    /// 点标题条切换展开 / 收起。收起时**里面的控件根本不会被声明**——
+    /// 不占布局、不参与交互、不出几何。
+    ///
+    /// ```no_run
+    /// # let mut w = kui_widgets::WidgetUi::default();
+    /// w.begin();
+    /// if w.folder("visibility", "Visibility") {
+    ///     w.checkbox("a", "show model", true);
+    /// }
+    /// w.end_folder();
+    /// ```
+    ///
+    /// 返回值是「现在开着吗」，方便用 `if` 把内容包起来——虽然收起时
+    /// 声明了也会被丢弃，但用 `if` 能顺带省掉构造那些字符串的开销。
+    ///
+    /// 不支持嵌套：嵌套折叠的缩进规则和点击热区很快就说不清了，
+    /// 而 HUD 与调试面板用不到。
+    pub fn folder(&mut self, id: &str, text: impl Into<String>) -> bool {
+        let key = Id::new(id);
+        // 默认展开：一个所有分组都收着的面板，第一眼看不出能点开。
+        let open = *self.folders.entry(key).or_insert(true);
+
+        // 标题条本身不受折叠影响——它是那个开关。
+        let was_collapsed = self.collapsed;
+        self.collapsed = false;
+        let text = text.into();
+        self.declared.push(Declared {
+            id: key,
+            widget: Widget::Folder { text, open },
+            row: None,
+            grow: false,
+        });
+        self.collapsed = was_collapsed;
+
+        // 上一层已经收起来时，里面的分组一律当收起处理。
+        let effective = open && !was_collapsed;
+        self.collapsed = !effective;
+        effective
+    }
+
+    /// 收一个折叠分组。
+    pub fn end_folder(&mut self) {
+        self.collapsed = false;
+    }
+
+    /// 一个折叠分组现在开着吗。
+    pub fn folder_open(&self, id: Id) -> bool {
+        self.folders.get(&id).copied().unwrap_or(true)
+    }
+
+    /// 直接设置某个折叠分组的开合。
+    pub fn set_folder_open(&mut self, id: Id, open: bool) {
+        self.folders.insert(id, open);
     }
 
     /// 开一行：接下来声明的控件横着排，第一个占满剩余宽度。
@@ -452,10 +534,11 @@ impl WidgetUi {
     /// 排版、判交互、出几何。一帧的收尾。
     ///
     /// `origin` 由根样式的外边距决定；整棵树从屏幕左上角开始排。
-    pub fn finish(&mut self, ui: &mut Ui, input: &crate::UiInput) {
+    pub fn finish(&mut self, ui: &mut Ui, input: &kui::UiInput) {
         let screen = ui.screen();
+        self.screen = screen;
         let root = self.build_tree(ui);
-        self.solved = crate::layout::solve(&root, screen);
+        self.solved = kui::solve(&root, screen);
 
         self.rects = self
             .declared
@@ -477,11 +560,28 @@ impl WidgetUi {
             .collect();
         self.interaction.update(&hits, input);
 
+        // 折叠开关在这里翻转，不在 `folder()` 里——`folder()` 跑在声明期，
+        // 那时本帧的点击还没判出来。在这里翻的话下一帧就是新状态，
+        // 和别的控件「响应滞后一帧」的约定一致。
+        //
+        // 收集到临时表再写：`declared` 正被借着。
+        let toggled: Vec<Id> = self
+            .declared
+            .iter()
+            .filter(|d| matches!(d.widget, Widget::Folder { .. }))
+            .filter(|d| self.interaction.response(d.id).clicked)
+            .map(|d| d.id)
+            .collect();
+        for id in toggled {
+            let open = self.folders.entry(id).or_insert(true);
+            *open = !*open;
+        }
+
         self.paint(ui);
     }
 
     /// 处理滚轮、夹取偏移，并把滚动区里的矩形整体上移。
-    fn apply_scroll(&mut self, input: &crate::UiInput) {
+    fn apply_scroll(&mut self, input: &kui::UiInput) {
         let Some(frame) = self.scroll_frame else {
             return;
         };
@@ -518,7 +618,7 @@ impl WidgetUi {
         let frame = self.scroll_frame?;
         let end = frame.last.min(self.rects.len());
         let first = self.rects.get(frame.first)?;
-        Some(Rect {
+        let mut viewport = Rect {
             min: Vec2::new(first.min.x, first.min.y),
             max: Vec2::new(
                 self.rects[frame.first..end]
@@ -526,7 +626,26 @@ impl WidgetUi {
                     .fold(first.max.x, |w, r| w.max(r.max.x)),
                 first.min.y + frame.height,
             ),
-        })
+        };
+
+        // **夹进窗口**。
+        //
+        // 调用方给的高度是「我想要这么高」，但滚动区的起点由排版决定
+        // （标题多一行、分组多一个，起点就往下挪）。让调用方自己算准
+        // 剩余空间是算不准的——漏算一次，列表最后几行就画到窗口外面去了，
+        // 而且看不出是被截断还是本来就没有。
+        //
+        // 夹在这里，任何面板都不会越界。
+        if self.screen.y > 0.0 {
+            viewport.max.y = viewport.max.y.min(self.screen.y);
+            viewport.max.x = viewport.max.x.min(self.screen.x);
+        }
+        // 夹完之后高度可能变成负的（起点已经在窗口外）。收成零高度，
+        // 内容整个不画，比画出一片翻转的矩形强。
+        viewport.max.y = viewport.max.y.max(viewport.min.y);
+        viewport.max.x = viewport.max.x.max(viewport.min.x);
+
+        Some(viewport)
     }
 
     /// 把一个声明变成叶子节点。
@@ -628,6 +747,11 @@ impl WidgetUi {
                 Vec2::new(text_size.x + theme.row_height, text_size.y)
             }
             Widget::Slider { .. } => Vec2::new(120.0, theme.font_size),
+            Widget::Folder { text, .. } => {
+                let size = ui.measure(text, &style(theme.font_size), None).size;
+                // 左边给三角形留位置。
+                Vec2::new(size.x + theme.row_height, size.y)
+            }
             Widget::TextInput { text, placeholder } => {
                 // 按内容和提示里较宽的那个量，但至少留出一段可打字的宽度——
                 // 空文本框宽度为零的话根本点不进去。
@@ -687,6 +811,67 @@ impl WidgetUi {
                         },
                         *color,
                         Some(rect.size().x),
+                    );
+                }
+
+                Widget::Folder { text, open } => {
+                    // 标题条：一条比面板稍亮的横杠，左端一个三角形。
+                    let fill = if response.hovered {
+                        theme.hovered
+                    } else {
+                        theme.surface
+                    };
+                    ui.rect(rect, fill);
+
+                    // 三角形用两条不同长度的短横线拼——引擎的 UI 图元只有
+                    // 矩形和圆角矩形，画不出真三角形。收起时是 `>`（两段
+                    // 竖向错开），展开时是 `v`（两段横向错开）。
+                    let mark = theme.row_height * 0.28;
+                    let center = Vec2::new(rect.min.x + theme.row_height * 0.5, rect.center().y);
+                    let arm = mark * 0.5;
+                    if *open {
+                        // ▼：上面一横宽、下面一横窄。
+                        ui.rect(
+                            Rect {
+                                min: Vec2::new(center.x - mark, center.y - arm * 0.5),
+                                max: Vec2::new(center.x + mark, center.y + arm * 0.5),
+                            },
+                            theme.dim,
+                        );
+                        ui.rect(
+                            Rect {
+                                min: Vec2::new(center.x - arm, center.y + arm * 0.5),
+                                max: Vec2::new(center.x + arm, center.y + arm * 1.5),
+                            },
+                            theme.dim,
+                        );
+                    } else {
+                        // ▶：左边一竖长、右边一竖短。
+                        ui.rect(
+                            Rect {
+                                min: Vec2::new(center.x - arm * 0.5, center.y - mark),
+                                max: Vec2::new(center.x + arm * 0.5, center.y + mark),
+                            },
+                            theme.dim,
+                        );
+                        ui.rect(
+                            Rect {
+                                min: Vec2::new(center.x + arm * 0.5, center.y - arm),
+                                max: Vec2::new(center.x + arm * 1.5, center.y + arm),
+                            },
+                            theme.dim,
+                        );
+                    }
+
+                    ui.text(
+                        Vec2::new(rect.min.x + theme.row_height, rect.min.y),
+                        text,
+                        &TextStyle {
+                            size: theme.font_size,
+                            ..Default::default()
+                        },
+                        theme.text,
+                        Some(rect.size().x - theme.row_height),
                     );
                 }
 
@@ -864,8 +1049,8 @@ impl WidgetUi {
 }
 
 /// 把一个编辑动作应用到状态上。
-fn apply_edit(edit: &mut crate::TextEdit, text: &mut String, action: crate::EditAction) {
-    use crate::EditAction as A;
+fn apply_edit(edit: &mut crate::TextEdit, text: &mut String, action: kui::EditAction) {
+    use kui::EditAction as A;
     match action {
         A::Backspace => edit.backspace(text),
         A::Delete => edit.delete(text),
@@ -882,7 +1067,7 @@ fn apply_edit(edit: &mut crate::TextEdit, text: &mut String, action: crate::Edit
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PointerButton, UiInput};
+    use kui::{PointerButton, UiInput};
 
     /// 一个不带字体的 UI。文字量出来是零尺寸，但布局与交互照常。
     fn ui() -> Ui {
@@ -1192,7 +1377,7 @@ mod tests {
         });
         // 光标要先到末尾。
         let to_end = UiInput {
-            edits: vec![crate::EditAction::End { select: false }],
+            edits: vec![kui::EditAction::End { select: false }],
             ..Default::default()
         };
         w.begin();
@@ -1200,7 +1385,7 @@ mod tests {
         w.finish(&mut ui, &to_end);
 
         let backspace = UiInput {
-            edits: vec![crate::EditAction::Backspace],
+            edits: vec![kui::EditAction::Backspace],
             ..Default::default()
         };
         w.begin();
@@ -1222,7 +1407,7 @@ mod tests {
             w.text_input("t", &mut scratch, "", &UiInput::default());
         });
         let to_end = UiInput {
-            edits: vec![crate::EditAction::End { select: false }],
+            edits: vec![kui::EditAction::End { select: false }],
             ..Default::default()
         };
         w.begin();
@@ -1424,7 +1609,7 @@ mod tests {
         let label = w.label("a", "hi");
 
         let mut ui = ui();
-        w.finish(&mut ui, &crate::UiInput::default());
+        w.finish(&mut ui, &kui::UiInput::default());
 
         let rect = w.response(label).rect;
         assert!(
@@ -1446,7 +1631,7 @@ mod tests {
         w.end_row();
 
         let mut ui = ui();
-        w.finish(&mut ui, &crate::UiInput::default());
+        w.finish(&mut ui, &kui::UiInput::default());
 
         let name_rect = w.response(name).rect;
         let control_rect = w.response(control).rect;
@@ -1479,7 +1664,7 @@ mod tests {
         w.end_row();
 
         let mut ui = ui();
-        w.finish(&mut ui, &crate::UiInput::default());
+        w.finish(&mut ui, &kui::UiInput::default());
 
         let control_rect = w.response(control).rect;
         assert!(
@@ -1498,7 +1683,7 @@ mod tests {
         let b = w.label("b", "two");
 
         let mut ui = ui();
-        w.finish(&mut ui, &crate::UiInput::default());
+        w.finish(&mut ui, &kui::UiInput::default());
 
         let (ra, rb) = (w.response(a).rect, w.response(b).rect);
         assert!(rb.min.y >= ra.max.y - 1.0, "竖排被破坏了：{ra:?} / {rb:?}");
@@ -1516,7 +1701,7 @@ mod tests {
         let footer = w.label("f", "end");
 
         let mut ui = ui();
-        w.finish(&mut ui, &crate::UiInput::default());
+        w.finish(&mut ui, &kui::UiInput::default());
 
         let (t, n, f) = (
             w.response(title).rect,
@@ -1542,9 +1727,194 @@ mod tests {
         let b = w.label("b", "two");
 
         let mut ui = ui();
-        w.finish(&mut ui, &crate::UiInput::default());
+        w.finish(&mut ui, &kui::UiInput::default());
 
         let (ra, rb) = (w.response(a).rect, w.response(b).rect);
         assert!(rb.min.y >= ra.max.y - 1.0, "上一帧没收的行漏到了这一帧");
+    }
+
+    #[test]
+    fn a_folder_starts_open() {
+        // 所有分组都收着的面板，第一眼看不出能点开。
+        let mut w = WidgetUi::default();
+        w.begin();
+        assert!(w.folder("f", "Section"));
+        w.end_folder();
+    }
+
+    #[test]
+    fn a_collapsed_folder_declares_nothing_inside() {
+        // 收起时里面的控件**根本不声明**。声明了再藏的话它们仍然占布局
+        // 空间，收起来的分组会留下一大片空白。
+        let mut w = WidgetUi::default();
+        w.begin();
+        let header = w.folder("f", "Section");
+        assert!(header);
+        w.label("inside", "hi");
+        w.end_folder();
+
+        let mut ui = ui();
+        w.finish(&mut ui, &kui::UiInput::default());
+        let open_height = w.response(Id::new("inside")).rect.size().y;
+        assert!(open_height > 0.0, "展开时里面的控件该有高度");
+
+        // 收起来。
+        w.set_folder_open(Id::new("f"), false);
+        w.begin();
+        w.folder("f", "Section");
+        w.label("inside", "hi");
+        w.end_folder();
+        w.finish(&mut ui, &kui::UiInput::default());
+
+        assert_eq!(
+            w.response(Id::new("inside")).rect.size(),
+            Vec2::ZERO,
+            "收起来了，里面的控件却还占着地方"
+        );
+    }
+
+    #[test]
+    fn a_collapsed_folder_shrinks_the_panel() {
+        // 端到端：收起之后整体高度必须变小，否则折叠没有意义。
+        let mut ui = ui();
+
+        let mut w = WidgetUi::default();
+        w.begin();
+        w.folder("f", "Section");
+        for i in 0..8 {
+            w.label(&format!("row{i}"), "content");
+        }
+        w.end_folder();
+        let tail_open = w.label("tail", "after");
+        w.finish(&mut ui, &kui::UiInput::default());
+        let open_bottom = w.response(tail_open).rect.max.y;
+
+        w.set_folder_open(Id::new("f"), false);
+        w.begin();
+        w.folder("f", "Section");
+        for i in 0..8 {
+            w.label(&format!("row{i}"), "content");
+        }
+        w.end_folder();
+        let tail_closed = w.label("tail", "after");
+        w.finish(&mut ui, &kui::UiInput::default());
+        let closed_bottom = w.response(tail_closed).rect.max.y;
+
+        assert!(
+            closed_bottom < open_bottom,
+            "收起来之后面板没变矮：{closed_bottom} vs {open_bottom}"
+        );
+    }
+
+    #[test]
+    fn the_folder_header_itself_is_always_declared() {
+        // 标题条是那个开关，收起时它自己必须还在，否则再也点不开了。
+        let mut w = WidgetUi::default();
+        w.set_folder_open(Id::new("f"), false);
+        w.begin();
+        let header = w.folder("f", "Section");
+        assert!(!header);
+        w.label("inside", "hi");
+        w.end_folder();
+
+        let mut ui = ui();
+        w.finish(&mut ui, &kui::UiInput::default());
+        assert!(
+            w.response(Id::new("f")).rect.size().y > 0.0,
+            "收起来之后标题条也没了，再也点不开"
+        );
+    }
+
+    #[test]
+    fn end_folder_restores_declaring() {
+        // 收完之后的控件不受影响。
+        let mut w = WidgetUi::default();
+        w.set_folder_open(Id::new("f"), false);
+        w.begin();
+        w.folder("f", "Section");
+        w.label("inside", "hidden");
+        w.end_folder();
+        let after = w.label("after", "visible");
+
+        let mut ui = ui();
+        w.finish(&mut ui, &kui::UiInput::default());
+        assert!(
+            w.response(after).rect.size().y > 0.0,
+            "分组之后的控件被吞了"
+        );
+    }
+
+    #[test]
+    fn a_forgotten_end_folder_does_not_leak_into_the_next_frame() {
+        // 忘了 `end_folder` 是常见手误。`begin` 必须把折叠状态清掉，
+        // 否则下一帧整个面板都是空的——而且看不出原因。
+        let mut w = WidgetUi::default();
+        w.set_folder_open(Id::new("f"), false);
+        w.begin();
+        w.folder("f", "Section");
+        w.label("inside", "hidden");
+        // 故意不调 end_folder
+
+        w.begin();
+        let normal = w.label("normal", "visible");
+
+        let mut ui = ui();
+        w.finish(&mut ui, &kui::UiInput::default());
+        assert!(
+            w.response(normal).rect.size().y > 0.0,
+            "上一帧没收的折叠漏到了这一帧，整个面板是空的"
+        );
+    }
+
+    #[test]
+    fn a_scroll_area_never_extends_past_the_window() {
+        // 调用方给的高度是「我想要这么高」，但滚动区的起点由排版决定。
+        // 让调用方自己算准剩余空间是算不准的——漏算一次，列表最后几行
+        // 就画到窗口外面去了，而且看不出是被截断还是本来就没有。
+        let mut w = WidgetUi::default();
+        w.begin();
+        w.label("title", "Controls");
+        // 故意要一个比窗口还高的滚动区。
+        w.begin_scroll("s", 10_000.0);
+        for i in 0..40 {
+            w.label(&format!("row{i}"), "content");
+        }
+        w.end_scroll();
+
+        let mut ui = ui();
+        w.finish(&mut ui, &kui::UiInput::default());
+
+        let viewport = w.scroll_viewport().expect("该有视口");
+        assert!(
+            viewport.max.y <= 600.0 + 1e-3,
+            "视口底边跑到窗口外面了：{}",
+            viewport.max.y
+        );
+    }
+
+    #[test]
+    fn a_scroll_area_starting_offscreen_collapses_to_nothing() {
+        // 起点已经在窗口外时，夹完高度会变成负的。收成零高度，
+        // 内容整个不画，比画出一片翻转的矩形强。
+        let mut w = WidgetUi::default();
+        w.root_style(Style {
+            margin: Edges {
+                left: 0.0,
+                top: 5_000.0,
+                right: 0.0,
+                bottom: 0.0,
+            },
+            ..Default::default()
+        });
+        w.begin();
+        w.begin_scroll("s", 200.0);
+        w.label("a", "x");
+        w.end_scroll();
+
+        let mut ui = ui();
+        w.finish(&mut ui, &kui::UiInput::default());
+
+        let viewport = w.scroll_viewport().expect("该有视口");
+        assert!(viewport.max.y >= viewport.min.y, "视口翻转了：{viewport:?}");
     }
 }

@@ -82,6 +82,7 @@ pub use ktask;
 pub use kterrain;
 pub use ktexture;
 pub use kui;
+pub use kui_widgets;
 pub use kwinit;
 
 mod task;
@@ -144,9 +145,12 @@ pub mod prelude {
         Anchor, Atlas, PlayMode, Slices, Sprite, SpriteAnimation, SpriteRegion, TileMap,
     };
     pub use ktexture::{Sampler, Texture, TextureLoader};
+    // 核心层：布局、样式、绘制图元。
     pub use kui::{
-        Rect as UiRect, Theme as UiTheme, Ui, UiInput, WidgetUi,
-        layout::{AlignCross, Direction as UiDirection, Edges, Id as UiId, Justify, Length},
+        AlignCross, Direction as UiDirection, Edges, Id as UiId, Justify, Length, Rect as UiRect,
+        Ui, UiInput,
     };
+    // 控件层。
+    pub use kui_widgets::{Theme as UiTheme, WidgetUi};
     pub use winit::event::WindowEvent;
 }

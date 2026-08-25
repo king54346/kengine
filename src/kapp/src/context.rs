@@ -77,7 +77,7 @@ pub struct Context<'a> {
     pub ui: &'a mut Ui,
     /// 本帧翻译好的 UI 输入（指针、按键、滚轮、Tab）。
     ///
-    /// 交给 [`WidgetUi::finish`](kui::WidgetUi::finish)。位置已经换算成
+    /// 交给 [`WidgetUi::finish`](kui_widgets::WidgetUi::finish)。位置已经换算成
     /// 逻辑像素，和 `ui.screen()` 同一套坐标。
     pub ui_input: &'a UiInput,
     /// 后处理设置：Bloom、色调映射、抗锯齿。

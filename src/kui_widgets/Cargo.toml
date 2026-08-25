@@ -1,0 +1,10 @@
+[package]
+name = "kui_widgets"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# 控件建在核心之上：布局、绘制图元、命中测试都来自那一层。
+kui = { path = "../kui" }
+kfont = { path = "../kfont" }
+kmath = { path = "../kmath" }

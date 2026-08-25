@@ -1809,6 +1809,7 @@ dependencies = [
  "kterrain",
  "ktexture",
  "kui",
+ "kui_widgets",
  "kwinit",
  "winit",
 ]
@@ -2093,6 +2094,15 @@ dependencies = [
  "ktexture",
  "naga",
  "taffy",
+]
+
+[[package]]
+name = "kui_widgets"
+version = "0.1.0"
+dependencies = [
+ "kfont",
+ "kmath",
+ "kui",
 ]
 
 [[package]]
