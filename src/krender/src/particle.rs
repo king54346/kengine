@@ -58,7 +58,7 @@ fn create_depth_bind_group(
 ///
 /// 渲染器建好之后会立刻调 `set_depth_view` 换成真的，但绑定组不能
 /// 留空——wgpu 要求管线布局里的每个组在绘制时都有绑定。
-fn create_placeholder_depth(device: &wgpu::Device) -> wgpu::TextureView {
+pub(crate) fn create_placeholder_depth(device: &wgpu::Device) -> wgpu::TextureView {
     device
         .create_texture(&wgpu::TextureDescriptor {
             label: Some("kengine particle placeholder depth"),

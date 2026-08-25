@@ -18,6 +18,8 @@ struct Globals {
     shadow_params: vec4<f32>,
     // x = 预滤波环境图的 mip 数（0 表示没有 HDR），其余保留
     ibl_params: vec4<f32>,
+    // x/y = 投影矩阵的深度系数，用于把深度缓冲还原成视空间距离
+    depth_params: vec4<f32>,
     // x = 启动至今的秒数，y = 上一帧的间隔，zw = 视口宽高（像素）
     //
     // 时间和视口尺寸是自定义材质最常要的两样东西：没有时间做不了流动，
@@ -92,6 +94,14 @@ struct MorphDelta {
 // 标志位跳过采样——绑空的绑定组在 wgpu 里是非法的。
 @group(3) @binding(4) var prefiltered_env: texture_2d_array<f32>;
 @group(3) @binding(5) var prefiltered_sampler: sampler;
+// 不透明几何与天空画完之后拷出来的一份颜色。
+//
+// 只对**半透明**物体有意义：不透明 pass 自己还没画完，读到的是上一帧
+// 的残留。引擎不拦这件事——拦的话就得为两条路各编译一套着色器。
+@group(3) @binding(6) var scene_color_texture: texture_2d<f32>;
+// 不透明几何的深度。半透明 pass 用只读深度附件，所以同一张纹理
+// 既当深度测试的对象又当采样源。
+@group(3) @binding(7) var scene_depth_texture: texture_depth_2d;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -233,6 +243,49 @@ fn vs_skinned(
     return out;
 }
 
+// ── 给材质钩子用的工具函数 ──
+
+// 采样场景颜色（半透明物体背后的样子）。
+//
+// `uv` 是屏幕空间坐标，左上 (0,0)、右下 (1,1)。把它偏移一点就是
+// **屏幕空间折射**：水面、玻璃看到的背后景物随之扭曲。
+//
+// 用 `textureLoad` 而不是 `textureSample`：这张图和屏幕是 1:1 的，
+// 不需要过滤，而且 `textureSample` 在有分支的代码里会因为求不出
+// 屏幕导数而报错。
+fn scene_color(uv: vec2<f32>) -> vec3<f32> {
+    let size = vec2<f32>(textureDimensions(scene_color_texture));
+    let coord = vec2<i32>(clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * size);
+    return textureLoad(scene_color_texture, coord, 0).rgb;
+}
+
+// 场景深度还原成视空间距离（正数，越远越大）。
+//
+// 拿它减去自己的深度就是「我和背后的东西隔多远」——水的分层、
+// 玻璃的厚度、软边缘都靠这个差值。
+fn scene_depth(uv: vec2<f32>) -> f32 {
+    let size = vec2<f32>(textureDimensions(scene_depth_texture));
+    let coord = vec2<i32>(clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * size);
+    return linearize_depth(textureLoad(scene_depth_texture, coord, 0));
+}
+
+// 把深度缓冲里的非线性值还原成视空间距离。
+//
+// 透视投影下 `clip.z = a*z + b`、`clip.w = -z`，所以
+// `depth = (a*z+b)/(-z)`，解出 `z = -b/(depth+a)`。
+// 系数从投影矩阵里取，正交投影下这个公式不成立（`clip.w` 恒为 1）。
+fn linearize_depth(depth: f32) -> f32 {
+    let a = globals.depth_params.x;
+    let b = globals.depth_params.y;
+    let denominator = depth + a;
+    // 退化时返回一个很大的值（「背后无穷远」），不能返回 NaN——
+    // NaN 会让那个像素变成黑洞，还会顺着 Bloom 扩散开。
+    if (abs(denominator) < 1e-9) {
+        return 1e9;
+    }
+    return abs(b / denominator);
+}
+
 // 归一化，长度为零时退回一个已知可用的方向。
 //
 // 钩子返回零向量时 `normalize` 给出 NaN，那个像素连同它周围被 Bloom
@@ -284,6 +337,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // `clip_position` 在片元阶段已经是像素坐标，除以视口尺寸得到 0..1。
     surface.screen_uv = in.clip_position.xy / max(globals.frame_params.zw, vec2<f32>(1.0));
     surface.time = globals.frame_params.x;
+    // 和 `scene_depth()` 用同一个还原函数，两者才能直接相减。
+    surface.view_depth = linearize_depth(in.clip_position.z);
 
     surface.base_color = object.base_color * sampled * vec4<f32>(in.color, 1.0);
     surface.normal = mapped_normal;

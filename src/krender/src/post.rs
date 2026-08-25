@@ -72,6 +72,11 @@ struct PostParams {
 /// 一组尺寸相关的离屏纹理。窗口尺寸变化时整体重建。
 struct Targets {
     hdr: wgpu::TextureView,
+    /// HDR 纹理本体。
+    ///
+    /// 视图没法当拷贝的源，而不透明 pass 画完之后要把它整个拷一份出去
+    /// 给材质采样（屏幕空间折射）。
+    hdr_texture: wgpu::Texture,
     /// 色调映射之后、抗锯齿之前的 LDR 缓冲。
     ///
     /// FXAA 必须在色调映射之后跑：它靠亮度差找边缘，而 HDR 里一个高光
@@ -370,6 +375,11 @@ impl PostProcess {
     }
 
     /// 主 pass 应当渲染到的 HDR 目标。
+    /// HDR 目标的纹理本体，拷贝场景颜色时用。
+    pub(crate) fn hdr_texture(&self) -> &wgpu::Texture {
+        &self.targets.hdr_texture
+    }
+
     pub(crate) fn hdr_target(&self) -> &wgpu::TextureView {
         &self.targets.hdr
     }
@@ -645,18 +655,41 @@ fn create_targets(
                 dimension: wgpu::TextureDimension::D2,
                 format,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    // 场景颜色要从 HDR 目标拷出去，所有目标一起开着，
+                    // 省得为 hdr 单开一条构造路径。
+                    | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             })
             .create_view(&wgpu::TextureViewDescriptor::default())
     };
+
+    // HDR 目标要单独造一次：上面那个闭包只返回视图，而拷贝需要纹理本体。
+    let hdr_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("kengine hdr target"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let hdr = hdr_texture.create_view(&wgpu::TextureViewDescriptor::default());
     let make = |label: &str, w: u32, h: u32| make_with(label, w, h, HDR_FORMAT);
 
     let bloom_width = width / BLOOM_DOWNSCALE;
     let bloom_height = height / BLOOM_DOWNSCALE;
 
     Targets {
-        hdr: make("kengine hdr target", width, height),
+        hdr,
+        hdr_texture,
         // LDR 缓冲的格式跟交换链走：FXAA 之后要直接拷到屏幕上，
         // 格式不一致的话每帧多一次转换。
         ldr: make_with("kengine ldr target", width, height, ldr_format),

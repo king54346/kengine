@@ -10,6 +10,7 @@ use kmath::{Aabb, Vec3};
 fn batch_of(first: u32, count: u32) -> Batch {
     Batch {
         mesh_id: Uuid::from_u128(1),
+        shader_id: Uuid::nil(),
         texture_key: [Uuid::from_u128(1); 5],
         skinned: false,
         first,

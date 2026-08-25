@@ -11,6 +11,8 @@
 #[cfg(test)]
 mod cascade_batch_tests;
 mod gizmo;
+#[cfg(test)]
+mod material_shader_tests;
 mod particle;
 mod post;
 mod sprite2d;
@@ -65,11 +67,12 @@ fn skin_layout() -> wgpu::VertexBufferLayout<'static> {
     }
 }
 use bytemuck::{Pod, Zeroable};
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap, FxHashSet};
 use kcore::uuid::Uuid;
 use kmaterial::Material;
 use kmath::{Mat4, Vec3};
 use kpbr::GpuEnvironment;
+use kshader::Shader;
 use ktexture::{FilterMode, Texture, TextureFormat, WrapMode};
 use std::{num::NonZeroU64, sync::Arc, time::Instant};
 use wgpu::util::DeviceExt;
@@ -93,6 +96,11 @@ struct Globals {
     shadow_params: [f32; 4],
     /// x = 预滤波环境图的 mip 数（0 表示没有 HDR），其余保留
     ibl_params: [f32; 4],
+    /// x/y = 投影矩阵的深度系数（`[2][2]` 与 `[3][2]`）。
+    ///
+    /// 材质钩子拿它把场景深度还原成视空间距离——水的分层、玻璃的厚度
+    /// 都要这个。
+    depth_params: [f32; 4],
     /// x = 启动至今的秒数，y = 帧间隔，zw = 视口宽高（像素）。
     ///
     /// 自定义材质最常要的两样：没有时间做不了流动，没有视口尺寸
@@ -197,6 +205,11 @@ struct GpuMesh {
 /// 本帧一个待绘制对象。
 struct DrawCall {
     mesh_id: Uuid,
+    /// 自定义材质钩子的 id；[`Uuid::nil`] 表示用标准着色器。
+    ///
+    /// 参与批次键：两个材质的钩子不同就得用不同的管线，合批的话
+    /// 后一个会被前一个的着色器画出来。
+    shader_id: Uuid,
     /// 材质贴图绑定组的缓存键（五张贴图 id 的组合）。
     texture_key: [Uuid; 5],
     /// 是否走蒙皮管线。蒙皮与静态的顶点布局不同，不能混在一批里。
@@ -217,6 +230,8 @@ struct DrawCall {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Batch {
     mesh_id: Uuid,
+    /// 自定义材质钩子的 id；[`Uuid::nil`] 表示标准着色器。
+    shader_id: Uuid,
     texture_key: [Uuid; 5],
     /// 是否走蒙皮管线。
     skinned: bool,
@@ -370,12 +385,14 @@ fn build_batches_into(
                 Some(last)
                     if last.mesh_id == draw.mesh_id
                         && last.texture_key == draw.texture_key
-                        && last.skinned == draw.skinned =>
+                        && last.skinned == draw.skinned
+                        && last.shader_id == draw.shader_id =>
                 {
                     last.count += 1;
                 }
                 _ => batches.push(Batch {
                     mesh_id: draw.mesh_id,
+                    shader_id: draw.shader_id,
                     texture_key: draw.texture_key,
                     skinned: draw.skinned,
                     first: instances.len() as u32 - 1,
@@ -400,6 +417,8 @@ fn build_opaque_batches(
         // 先按它分开能把管线切换降到一次。
         a.skinned
             .cmp(&b.skinned)
+            // 着色器排在网格之前：换管线比换顶点缓冲贵。
+            .then_with(|| a.shader_id.cmp(&b.shader_id))
             .then_with(|| a.mesh_id.cmp(&b.mesh_id))
             .then_with(|| a.texture_key.cmp(&b.texture_key))
     });
@@ -416,12 +435,14 @@ fn build_opaque_batches(
             Some(last)
                 if last.mesh_id == draw.mesh_id
                     && last.texture_key == draw.texture_key
-                    && last.skinned == draw.skinned =>
+                    && last.skinned == draw.skinned
+                    && last.shader_id == draw.shader_id =>
             {
                 last.count += 1;
             }
             _ => batches.push(Batch {
                 mesh_id: draw.mesh_id,
+                shader_id: draw.shader_id,
                 texture_key: draw.texture_key,
                 skinned: draw.skinned,
                 first: instances.len() as u32 - 1,
@@ -510,6 +531,43 @@ pub struct Renderer {
     brdf_layout: wgpu::BindGroupLayout,
     /// 重建天空绑定组时要用。
     sky_layout: wgpu::BindGroupLayout,
+    /// group(3) 的**半透明**版本：binding 7 绑的是真的场景深度。
+    ///
+    /// 为什么要两份：深度纹理在不透明 pass 里是**写入**附件，同一个
+    /// pass 里再把它当采样源绑着，wgpu 会直接拒绝（写入是独占用途）。
+    /// 半透明 pass 用的是只读深度附件，那时才允许同时采样。
+    ///
+    /// 于是不透明那份在 binding 7 绑一张 1×1 的占位深度——绑定组不能
+    /// 留空，而占位图不会和任何附件冲突。
+    brdf_bind_group_transparent: wgpu::BindGroup,
+    /// 1×1 的占位深度，给不透明 pass 的 group(3) 填位。
+    placeholder_depth: wgpu::TextureView,
+    /// 当前绑着的预滤波环境图视图。
+    ///
+    /// 留一份是因为 group(3) 里同时绑着环境图、场景颜色和深度，
+    /// 后两者会随窗口尺寸变化重建——重建绑定组时得把环境图原样带上。
+    environment_view: wgpu::TextureView,
+    /// 不透明 pass 画完之后拷出来的场景颜色。
+    ///
+    /// 自定义材质靠它做屏幕空间折射：水、玻璃要看到自己背后的东西，
+    /// 而正在渲染的颜色缓冲不能同时当采样源。
+    scene_color: wgpu::Texture,
+    scene_color_view: wgpu::TextureView,
+    /// 自定义材质钩子编译出来的管线，按钩子的 id 缓存。
+    ///
+    /// 编译一条管线是毫秒级的事，绝不能每帧做。材质的着色器换了会换 id，
+    /// 于是自然地编译出新的一份。
+    material_pipelines: FxHashMap<Uuid, MaterialPipelines>,
+    /// 编译失败过的着色器 id。
+    ///
+    /// 记下来是为了**不每帧重试**——一个写错的着色器每帧重编译一次会
+    /// 让帧率掉到个位数，而错误日志会刷屏到看不见别的东西。
+    failed_shaders: FxHashSet<Uuid>,
+    /// 建管线变体时要用的布局，和标准管线共用一个。
+    ///
+    /// 共用是有意的：自定义钩子只能改表面属性，碰不到绑定组，
+    /// 所以布局必然相同。这也意味着钩子里写错绑定号会在编译时就被拦下。
+    pipeline_layout: wgpu::PipelineLayout,
     /// 渲染器自己的时钟。
     ///
     /// 不从 `render` 的参数里传：那会改动一个所有调用方都要跟着改的
@@ -562,6 +620,29 @@ struct DefaultTextures {
 /// `min_uniform_buffer_offset_alignment` 的倍数——各家硬件普遍是 256，
 /// WebGPU 的下限保证也是 256，直接按它对齐最省事。
 const SHADOW_GLOBALS_STRIDE: u64 = 256;
+
+/// 一份自定义材质钩子编译出来的四条管线。
+///
+/// 四条是「静态 / 蒙皮」× 「不透明 / 半透明」的组合。它们只差顶点布局和
+/// 混合状态，着色器是同一份。
+struct MaterialPipelines {
+    opaque: wgpu::RenderPipeline,
+    skinned: wgpu::RenderPipeline,
+    transparent: wgpu::RenderPipeline,
+    skinned_transparent: wgpu::RenderPipeline,
+}
+
+impl MaterialPipelines {
+    /// 按「是否蒙皮 / 是否半透明」取一条。
+    fn pick(&self, skinned: bool, transparent: bool) -> &wgpu::RenderPipeline {
+        match (skinned, transparent) {
+            (false, false) => &self.opaque,
+            (true, false) => &self.skinned,
+            (false, true) => &self.transparent,
+            (true, true) => &self.skinned_transparent,
+        }
+    }
+}
 
 /// 阴影 pass 所需的一组 GPU 资源。
 struct ShadowResources {
@@ -835,6 +916,31 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // 场景颜色：不透明几何和天空画完之后拷出来的一份。
+                // 自定义材质靠它做屏幕空间折射。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // 场景深度。半透明 pass 用只读深度附件，所以同一张深度
+                // 纹理可以在这里当采样源——按水深分层就靠它。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        // 深度纹理是 `Depth` 采样类型，写成 `Float` 会被拒。
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         // 阴影贴图与 BRDF LUT 同属 group(3)，需要等阴影资源建好后一起绑定。
@@ -1002,12 +1108,27 @@ impl Renderer {
             ),
         };
 
+        let (scene_color, scene_color_view) =
+            create_scene_color(&device, config.width, config.height);
+
+        let placeholder_depth = particle::create_placeholder_depth(&device);
         let brdf_bind_group = create_brdf_lut(
             &device,
             &queue,
             &brdf_layout,
             &shadow.depth_view,
             &placeholder_environment,
+            &scene_color_view,
+            &placeholder_depth,
+        );
+        let brdf_bind_group_transparent = create_brdf_lut(
+            &device,
+            &queue,
+            &brdf_layout,
+            &shadow.depth_view,
+            &placeholder_environment,
+            &scene_color_view,
+            &depth_view,
         );
         let post = PostProcess::new(&device, config.width, config.height, config.format);
         // 粒子画在主 pass 里，因此目标格式与深度格式都要与主 pass 一致。
@@ -1066,6 +1187,14 @@ impl Renderer {
             environment_version: 0,
             brdf_layout,
             sky_layout,
+            brdf_bind_group_transparent,
+            placeholder_depth,
+            environment_view: placeholder_environment,
+            scene_color,
+            scene_color_view,
+            material_pipelines: FxHashMap::default(),
+            failed_shaders: FxHashSet::default(),
+            pipeline_layout,
             started: std::time::Instant::now(),
             last_frame: std::time::Instant::now(),
             sky_pipeline,
@@ -1084,6 +1213,129 @@ impl Renderer {
             .particles
             .set_depth_view(&renderer.device, &renderer.depth_view);
         renderer
+    }
+
+    /// 重建 group(3) 的两份绑定组。
+    ///
+    /// 环境图、场景颜色、场景深度里任何一个换了都要调。
+    fn rebuild_scene_bind_groups(&mut self) {
+        self.brdf_bind_group = create_brdf_lut(
+            &self.device,
+            &self.queue,
+            &self.brdf_layout,
+            &self.shadow.depth_view,
+            &self.environment_view,
+            &self.scene_color_view,
+            &self.placeholder_depth,
+        );
+        self.brdf_bind_group_transparent = create_brdf_lut(
+            &self.device,
+            &self.queue,
+            &self.brdf_layout,
+            &self.shadow.depth_view,
+            &self.environment_view,
+            &self.scene_color_view,
+            &self.depth_view,
+        );
+    }
+
+    /// 确保这份材质的管线变体存在，返回它的着色器 id。
+    ///
+    /// 没有自定义着色器时返回 [`Uuid::nil`]，走标准管线。
+    ///
+    /// # 编译失败时
+    ///
+    /// 记一条错误日志并**退回标准管线**，同时把这个 id 记进缓存，
+    /// 于是不会每帧重试一次编译——一个写错的着色器不该让帧率掉到个位数。
+    fn ensure_material_pipelines(&mut self, material: &Material) -> Uuid {
+        let Some(shader) = material.shader() else {
+            return Uuid::nil();
+        };
+        let Some(data) = shader.data_ref() else {
+            // 还在异步加载。这一帧先用标准管线画，下一帧再看。
+            return Uuid::nil();
+        };
+        let id = data.id();
+
+        if self.material_pipelines.contains_key(&id) || self.failed_shaders.contains(&id) {
+            return if self.failed_shaders.contains(&id) {
+                Uuid::nil()
+            } else {
+                id
+            };
+        }
+
+        let source = material_shader_source(data.source());
+        // 先自己校验一遍再交给 wgpu：wgpu 的校验失败会**直接 panic**
+        // 掉整个进程，而用户写的着色器出错是常态，不该是致命的。
+        if let Err(error) = Shader::from_wgsl(source.clone()) {
+            klog::error!("自定义材质着色器编译失败，退回标准管线：{error}");
+            self.failed_shaders.insert(id);
+            return Uuid::nil();
+        }
+
+        let module = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("kengine material shader"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+
+        let pipelines = MaterialPipelines {
+            opaque: create_standard_pipeline(
+                &self.device,
+                &self.pipeline_layout,
+                &module,
+                "vs_main",
+                &[Option::from(vertex_layout())],
+                "kengine material pipeline",
+                kmaterial::BlendMode::Opaque,
+            ),
+            skinned: create_standard_pipeline(
+                &self.device,
+                &self.pipeline_layout,
+                &module,
+                "vs_skinned",
+                &[Option::from(vertex_layout()), Option::from(skin_layout())],
+                "kengine material skinned pipeline",
+                kmaterial::BlendMode::Opaque,
+            ),
+            transparent: create_standard_pipeline(
+                &self.device,
+                &self.pipeline_layout,
+                &module,
+                "vs_main",
+                &[Option::from(vertex_layout())],
+                "kengine material transparent pipeline",
+                kmaterial::BlendMode::Alpha,
+            ),
+            skinned_transparent: create_standard_pipeline(
+                &self.device,
+                &self.pipeline_layout,
+                &module,
+                "vs_skinned",
+                &[Option::from(vertex_layout()), Option::from(skin_layout())],
+                "kengine material skinned transparent pipeline",
+                kmaterial::BlendMode::Alpha,
+            ),
+        };
+
+        klog::debug!("编译了一份自定义材质着色器 {id}");
+        self.material_pipelines.insert(id, pipelines);
+        id
+    }
+
+    /// 按批次选管线。
+    fn pipeline_for(&self, batch: &Batch, transparent: bool) -> &wgpu::RenderPipeline {
+        match self.material_pipelines.get(&batch.shader_id) {
+            Some(pipelines) => pipelines.pick(batch.skinned, transparent),
+            None => match (batch.skinned, transparent) {
+                (false, false) => &self.pipeline,
+                (true, false) => &self.skinned_pipeline,
+                (false, true) => &self.transparent_pipeline,
+                (true, true) => &self.skinned_transparent_pipeline,
+            },
+        }
     }
 
     /// 登记一张给 UI 用的贴图。
@@ -1144,10 +1396,18 @@ impl Renderer {
         self.config.height = new_size.height;
         self.surface.configure(&self.device, &self.config);
         self.depth_view = Self::create_depth_view(&self.device, &self.config);
+        // 场景颜色必须和 HDR 目标同尺寸，否则拷贝会被 wgpu 拒绝。
+        let (scene_color, scene_color_view) =
+            create_scene_color(&self.device, self.config.width, self.config.height);
+        self.scene_color = scene_color;
+        self.scene_color_view = scene_color_view;
         // 软粒子采样的就是这张纹理。不换绑定组的话，改窗口大小之后
         // 粒子会按旧尺寸的深度去淡出——表现为淡出边界整体错位。
         self.particles
             .set_depth_view(&self.device, &self.depth_view);
+        // group(3) 里绑着场景颜色和深度，两者都刚换过。不重建的话
+        // 自定义材质会按旧尺寸采样，折射整体错位。
+        self.rebuild_scene_bind_groups();
         self.post
             .resize(&self.device, new_size.width, new_size.height);
     }
@@ -1170,7 +1430,8 @@ impl Renderer {
         let view = camera_to_world.inverse();
         let camera_position = camera_to_world.to_scale_rotation_translation().2;
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-        let view_proj = camera.projection_matrix(aspect) * view;
+        let projection = camera.projection_matrix(aspect);
+        let view_proj = projection * view;
 
         // 收集光源，超出容量的部分丢弃并告警。
         //
@@ -1222,13 +1483,8 @@ impl Renderer {
                 None => (create_placeholder_environment(&self.device), 0),
             };
             self.environment_mips = mips;
-            self.brdf_bind_group = create_brdf_lut(
-                &self.device,
-                &self.queue,
-                &self.brdf_layout,
-                &self.shadow.depth_view,
-                &view,
-            );
+            self.environment_view = view.clone();
+            self.rebuild_scene_bind_groups();
             // 天空 pass 也要跟着换：不换的话反射来自新 HDR、
             // 天上还是旧的那张，两者对不上。
             self.sky_bind_group =
@@ -1274,6 +1530,7 @@ impl Renderer {
                 light_view_proj,
                 cascade_splits,
                 ibl_params: [self.environment_mips as f32, 0.0, 0.0, 0.0],
+                depth_params: [projection.z_axis.z, projection.w_axis.z, 0.0, 0.0],
                 frame_params: [
                     self.started.elapsed().as_secs_f32(),
                     frame_delta,
@@ -1371,6 +1628,7 @@ impl Renderer {
 
             let material = item.material.unwrap_or(&default_material);
             let texture_key = self.ensure_material_textures(material);
+            let shader_id = self.ensure_material_pipelines(material);
 
             // 形变权重逐实例写进权重缓冲：同一个网格的两个实例可以有不同的表情。
             let morph = self
@@ -1429,6 +1687,7 @@ impl Renderer {
             };
             target.push(DrawCall {
                 mesh_id: mesh.id(),
+                shader_id,
                 texture_key,
                 skinned: skin_offset.is_some(),
                 depth,
@@ -1874,7 +2133,7 @@ impl Renderer {
             pass.set_bind_group(1, &self.object_bind_group, &[]);
             pass.set_bind_group(3, &self.brdf_bind_group, &[]);
 
-            let mut current_skinned = Some(false);
+            let mut current_pipeline: Option<(bool, Uuid)> = None;
             for batch in &batches {
                 let Some(gpu_mesh) = self.meshes.get(&batch.mesh_id) else {
                     continue;
@@ -1884,14 +2143,13 @@ impl Renderer {
                     continue;
                 };
 
-                if current_skinned != Some(batch.skinned) {
-                    pass.set_pipeline(if batch.skinned {
-                        &self.skinned_pipeline
-                    } else {
-                        &self.pipeline
-                    });
+                // 换管线的判据是「蒙皮与否 + 着色器」这一对。只看蒙皮的话，
+                // 相邻两个自定义材质会共用前一个的着色器。
+                let key = (batch.skinned, batch.shader_id);
+                if current_pipeline != Some(key) {
+                    pass.set_pipeline(self.pipeline_for(batch, false));
                     // 换管线不影响已绑定的组，它们的布局是同一个。
-                    current_skinned = Some(batch.skinned);
+                    current_pipeline = Some(key);
                 }
 
                 pass.set_bind_group(2, texture_bind_group, &[]);
@@ -1916,16 +2174,66 @@ impl Renderer {
             pass.set_pipeline(&self.sky_pipeline);
             pass.set_bind_group(0, &self.sky_bind_group, &[]);
             pass.draw(0..3, 0..1);
+        }
 
-            // ── 半透明 ──
-            //
-            // 必须在天空之后：半透明物体要和它背后的东西混合，而天空
-            // 就是最远的那个「背后」。放在天空之前的话，天空会把已经
-            // 混好的颜色覆盖掉——因为天空的深度是 1，而半透明不写深度，
-            // 挡不住它。
+        // ── 拷一份场景颜色 ──
+        //
+        // 不透明几何和天空都画完了，此刻的颜色缓冲就是「半透明物体背后
+        // 的样子」。拷出来给材质采样，屏幕空间折射、玻璃、水的分层
+        // 全靠它。
+        //
+        // 为什么必须**拷贝**而不是直接绑：一张纹理不能同时当颜色附件和
+        // 采样源，wgpu 会直接拒绝。
+        encoder.copy_texture_to_texture(
+            self.post.hdr_texture().as_image_copy(),
+            self.scene_color.as_image_copy(),
+            wgpu::Extent3d {
+                width: self.config.width.max(1),
+                height: self.config.height.max(1),
+                depth_or_array_layers: 1,
+            },
+        );
+
+        // ── 半透明、精灵、粒子、调试线：只读深度的第二个 pass ──
+        //
+        // 合成一个 pass 的前提是这里**没人写深度**：半透明、精灵、粒子、
+        // 调试线四者的管线都是只测不写（见各自管线的注释）。
+        //
+        // 只读深度换来两件事：软粒子能把深度当纹理采样；自定义材质能同时
+        // 读场景颜色和场景深度，做出按水深分层的效果。
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("kengine transparent pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: self.post.hdr_target(),
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        // 接着上一个 pass 画，不能清。
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    // `None` = 只读。这一条就是软粒子和折射能成立的原因。
+                    depth_ops: None,
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            // 半透明必须在天空之后：它要和背后的东西混合，而天空就是
+            // 最远的那个「背后」。
             if !transparent_batches.is_empty() {
                 pass.set_bind_group(0, &self.globals_bind_group, &[]);
-                let mut current = None;
+                pass.set_bind_group(1, &self.object_bind_group, &[]);
+                // 换成带真实场景深度的那份：这个 pass 用只读深度附件，
+                // 允许同一张纹理既当附件又当采样源。
+                pass.set_bind_group(3, &self.brdf_bind_group_transparent, &[]);
+                let mut current: Option<(bool, Uuid)> = None;
                 for batch in &transparent_batches {
                     let Some(gpu_mesh) = self.meshes.get(&batch.mesh_id) else {
                         continue;
@@ -1935,13 +2243,10 @@ impl Renderer {
                     else {
                         continue;
                     };
-                    if current != Some(batch.skinned) {
-                        pass.set_pipeline(if batch.skinned {
-                            &self.skinned_transparent_pipeline
-                        } else {
-                            &self.transparent_pipeline
-                        });
-                        current = Some(batch.skinned);
+                    let key = (batch.skinned, batch.shader_id);
+                    if current != Some(key) {
+                        pass.set_pipeline(self.pipeline_for(batch, true));
+                        current = Some(key);
                     }
                     pass.set_bind_group(2, texture_bind_group, &[]);
                     pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
@@ -1963,46 +2268,12 @@ impl Renderer {
                 }
             }
 
-            // 2D 精灵画在天空之后、粒子之前：精灵半透明，要在不透明物体
-            // 之后画；但它又该被粒子盖住（粒子通常是特效）。
+            // 2D 精灵画在半透明之后、粒子之前：精灵该被粒子盖住
+            // （粒子通常是特效）。
             self.sprites.draw(&mut pass, &sprite_batches);
-        }
 
-        // ── 粒子与调试线：只读深度的第二个 pass ──
-        //
-        // 拆出来是为了**软粒子**：它要把深度缓冲当纹理采样，而深度缓冲
-        // 此刻正挂在管线上当附件。WebGPU 允许「只读深度附件 + 同一张
-        // 纹理当采样源」，但前提是这个 pass 里没人写深度。
-        //
-        // 粒子和调试线本来就都只测不写（见各自管线的注释），所以拆出来
-        // 不改变任何绘制结果，代价只是多一次颜色附件的 load/store。
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("kengine overlay pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: self.post.hdr_target(),
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        // 接着上一个 pass 画，不能清。
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    // `None` 表示**只读**。这一条就是软粒子能成立的原因：
-                    // 只读之后同一张深度纹理才能同时当采样源。
-                    depth_ops: None,
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            // 粒子在前：它们半透明且不写深度，任何在它们之后画的不透明物体
-            // 都会把它们盖掉——包括天空。
+            // 粒子在精灵之后：它们半透明且不写深度，任何在它们之后画的
+            // 不透明物体都会把它们盖掉——包括天空。
             self.particles.draw(&mut pass, &particle_batches);
 
             // 调试线放在最后：它要盖在所有东西上面，而且不写深度，
@@ -2706,6 +2977,8 @@ fn create_brdf_lut(
     layout: &wgpu::BindGroupLayout,
     shadow_view: &wgpu::TextureView,
     environment_view: &wgpu::TextureView,
+    scene_color_view: &wgpu::TextureView,
+    scene_depth_view: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     const SIZE: u32 = 64;
 
@@ -2819,6 +3092,14 @@ fn create_brdf_lut(
                 binding: 5,
                 resource: wgpu::BindingResource::Sampler(&environment_sampler),
             },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(scene_color_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(scene_depth_view),
+            },
         ],
     })
 }
@@ -2860,6 +3141,32 @@ fn create_sky_bind_group(
             },
         ],
     })
+}
+
+/// 建场景颜色的拷贝目标。
+///
+/// 格式必须和 HDR 目标一致——`copy_texture_to_texture` 要求两边格式相同。
+fn create_scene_color(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("kengine scene color"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: post::HDR_FORMAT,
+        usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
 }
 
 /// 一张 1×1 的黑色占位环境图。
@@ -3158,7 +3465,7 @@ mod test {
             size_of::<Globals>(),
             64 + 16 * 3
                 + 64 * klight::cascade::MAX_CASCADES
-                + 16 * 3
+                + 16 * 5
                 + size_of::<GpuEnvironment>()
                 + 64 * MAX_LIGHTS
         );
@@ -3233,6 +3540,7 @@ mod test {
     fn draw(mesh: u128, texture: u128) -> DrawCall {
         DrawCall {
             mesh_id: Uuid::from_u128(mesh),
+            shader_id: Uuid::nil(),
             texture_key: [Uuid::from_u128(texture); 5],
             skinned: false,
             depth: 0.0,

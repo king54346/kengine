@@ -18,6 +18,9 @@ kscene = { path = "../kscene" }
 ksprite = { path = "../ksprite" }
 ktexture = { path = "../ktexture" }
 kui = { path = "../kui" }
+# 自定义材质着色器要在交给 wgpu 之前先自己校验一遍——
+# wgpu 的校验失败会直接 panic 掉整个进程，而用户写错着色器是常态。
+kshader = { path = "../kshader" }
 bytemuck = { version = "1.25.2", features = ["derive"] }
 # 每帧要按网格/贴图查几万次缓存，标准库默认的 SipHash 在这里太重。
 fxhash = "0.2"
@@ -26,6 +29,5 @@ wgpu = "30.0.0"
 winit = "0.30.13"
 
 [dev-dependencies]
-kshader = { path = "../kshader" }
 # 测试里解析 WGSL，核对着色器入口与顶点布局。
 naga = { version = "30", features = ["wgsl-in"] }

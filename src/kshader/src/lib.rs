@@ -128,6 +128,25 @@ impl Shader {
         })
     }
 
+    /// 一段**片段**着色器代码，不做独立校验。
+    ///
+    /// 材质钩子（`fn material_surface(...)`）引用引擎定义的 `Surface`
+    /// 结构和各个绑定，单独拿去解析必然报「找不到标识符」。真正的校验
+    /// 发生在渲染器把它和标准着色器拼起来之后——那时上下文才完整。
+    ///
+    /// # 代价
+    ///
+    /// 语法错误要到第一次用上这份材质时才会报出来，而不是加载时。
+    /// 报错信息里的行号是**拼接之后**的，和源文件对不上。
+    pub fn snippet(source: impl Into<String>) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            source: source.into(),
+            // 片段里没有入口点，拼进主着色器之后用的是引擎的那些。
+            entry_points: Vec::new(),
+        }
+    }
+
     /// 着色器源码，交给 wgpu 创建 `ShaderModule`。
     pub fn source(&self) -> &str {
         &self.source
