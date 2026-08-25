@@ -47,9 +47,30 @@ fn shadow_factor_cascade(
         return 1.0;
     }
 
+    // ── 偏移换算到归一化深度 ──
+    //
+    // `depth_bias` 是**世界单位（米）**。直接当归一化深度用的话，
+    // 它的实际大小会随级联的深度范围漂移——而那个范围又随场景大小走。
+    // 症状：把地面从 10×10 换成 100×100，角色的脚和小腿的阴影就没了，
+    // 因为偏移从 2 厘米涨到了 22 厘米。
+    //
+    // 光空间矩阵的第三行 = 光的前向方向 / (far-near)，这一行的空间分量
+    // 长度就是 1/(far-near)，取反得到深度范围。从矩阵里取而不是再传一个
+    // uniform：这样级联各自的范围天然是对的。
+    //
+    // 注意不能只取 `m[2][2]`：它只含前向方向的 z 分量，光斜射时会把范围
+    // 放大 1/|方向.z| 倍，偏移跟着变小——斜光下阴影痤疮更重；正下方向的光
+    // （方向.z = 0）甚至会把范围算成无穷，偏移直接归零。
+    let light_z_row = vec3<f32>(
+        light_view_proj[0][2],
+        light_view_proj[1][2],
+        light_view_proj[2][2],
+    );
+    let depth_range = 1.0 / max(length(light_z_row), 1e-9);
+
     // 掠射角下同一个纹素跨越的深度差更大，偏移需要随之放大。
     let slope = clamp(1.0 - n_dot_l, 0.0, 1.0);
-    let bias = depth_bias * (1.0 + slope * 4.0);
+    let bias = (depth_bias / depth_range) * (1.0 + slope * 4.0);
     let compare = depth - bias;
 
     let texel = 1.0 / max(resolution, 1.0);

@@ -444,6 +444,22 @@ pub fn solve(root: &LayoutNode, available: Vec2) -> Solved {
 
     let mut solved = Solved::default();
     collect(&taffy, taffy_root, root, &mut solved);
+
+    // 根节点的 margin 要自己补上。
+    //
+    // taffy 只在**父容器**排列子节点时用 margin，而根节点没有父容器，
+    // 它的 location 恒为 (0,0)——于是「用 margin 把整个面板挪到屏幕右侧」
+    // 这个再自然不过的用法会静默失效，面板画在右边、控件排在左上角。
+    //
+    // 补在这里而不是外面包一层容器：包容器会多一个节点，而那个节点
+    // 又要有自己的 id 和样式，`Solved` 里凭空多一项。
+    let offset = Vec2::new(root.style.margin.left, root.style.margin.top);
+    if offset != Vec2::ZERO {
+        for (_, rect) in &mut solved.entries {
+            rect.min += offset;
+            rect.max += offset;
+        }
+    }
     solved
 }
 

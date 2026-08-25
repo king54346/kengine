@@ -729,4 +729,90 @@ mod tests {
             "有级联一个物体都没留下：{kept:?}"
         );
     }
+
+    /// 从光空间矩阵反解深度范围，和着色器里的算法一致。
+    ///
+    /// 第三行的空间分量 = 光的前向方向 / (far-near)，其长度 = 1/(far-near)，
+    /// 取反就是 (far-near)。只取 `m[2][2]` 的话，斜射的光会按 1/|方向.z|
+    /// 放大结果，所以这里取整行长度。
+    fn depth_range_of(matrix: Mat4) -> f32 {
+        1.0 / matrix.row(2).truncate().length().max(1e-9)
+    }
+
+    #[test]
+    fn the_recovered_depth_range_is_independent_of_light_direction() {
+        // `depth_range_of` 从矩阵反解深度范围，让世界单位的偏移在着色器里
+        // 换算成归一化深度。反解必须和光照方向无关——深度范围只由场景和
+        // 切片决定，斜射的光不会改变它。
+        //
+        // 早先的写法取 `1/|m[2][2]|`：那只在光沿世界 Z 轴时才等于深度范围。
+        // 光斜射时 `m[2][2]` 只含前向方向的 z 分量，范围被放大 1/|方向.z| 倍，
+        // 偏移就跟着变小——斜光下阴影痤疮更重。
+        let mut ranges = Vec::new();
+        for direction in [
+            Vec3::NEG_Y,
+            Vec3::new(-0.4, -1.0, -0.3).normalize(),
+            Vec3::new(1.0, -0.1, 0.0).normalize(),
+            Vec3::new(0.0, -0.2, -1.0).normalize(),
+        ] {
+            let cascades = compute(camera(), direction, scene(), CascadeSettings::default());
+            ranges.push(depth_range_of(cascades[0].matrix));
+        }
+
+        let smallest = ranges.iter().copied().fold(f32::MAX, f32::min);
+        let largest = ranges.iter().copied().fold(0.0_f32, f32::max);
+        assert!(
+            largest < smallest * 1.05,
+            "深度范围随光照方向漂移：{ranges:?}"
+        );
+    }
+
+    #[test]
+    fn the_scene_size_changes_the_depth_range() {
+        // 同上的另一面：范围随**场景**大小走，所以归一化偏移在不同关卡里
+        // 表现不同——换个更大的地面，贴地的阴影就没了。
+        let small = compute(
+            camera(),
+            light(),
+            Aabb::new(Vec3::new(-5.0, -1.0, -5.0), Vec3::new(5.0, 3.0, 5.0)),
+            CascadeSettings::default(),
+        );
+        let large = compute(
+            camera(),
+            light(),
+            Aabb::new(Vec3::new(-500.0, -1.0, -500.0), Vec3::new(500.0, 3.0, 500.0)),
+            CascadeSettings::default(),
+        );
+
+        let ratio = depth_range_of(large[0].matrix) / depth_range_of(small[0].matrix);
+        assert!(
+            ratio > 2.0,
+            "换个大场景深度范围只变了 {ratio} 倍，前提不成立"
+        );
+    }
+
+    #[test]
+    fn the_depth_range_can_be_recovered_from_the_matrix() {
+        // 着色器靠 `1/m[2][2]` 反解深度范围，不再额外传一个 uniform。
+        // 这条盯着那个恒等式——`orthographic_rh` 换个约定的话它会挂。
+        for (near, far) in [(0.0_f32, 10.0), (0.0, 145.0), (1.0, 50.0)] {
+            let matrix = Mat4::orthographic_rh(-1.0, 1.0, -1.0, 1.0, near, far);
+            let recovered = depth_range_of(matrix);
+            assert!(
+                (recovered - (far - near)).abs() < 1e-3,
+                "范围 {} 反解成了 {recovered}",
+                far - near
+            );
+        }
+    }
+
+    #[test]
+    fn every_cascade_has_a_finite_depth_range() {
+        // 范围为零会让着色器除以零，偏移变成 inf，整个画面进阴影。
+        let cascades = compute(camera(), light(), scene(), CascadeSettings::default());
+        for cascade in &cascades {
+            let range = depth_range_of(cascade.matrix);
+            assert!(range.is_finite() && range > 0.0, "深度范围是 {range}");
+        }
+    }
 }

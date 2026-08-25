@@ -96,3 +96,7 @@ harness = false
 [[example]]
 name = "backdrop_water"
 path = "examples/kengine/backdrop_water.rs"
+
+[[example]]
+name = "skinning_blending"
+path = "examples/kengine/skinning_blending.rs"

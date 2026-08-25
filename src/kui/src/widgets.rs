@@ -106,6 +106,17 @@ enum Widget {
 struct Declared {
     id: Id,
     widget: Widget,
+    /// 这个控件属于哪一行。[`None`] 表示直接挂在根上。
+    ///
+    /// 行是**扁平表示**的：声明列表仍然是一条线，行号只是个分组标记，
+    /// 建树时把连号的合成一个子容器。这样 `response` / `rects` 那套
+    /// 按下标索引的逻辑一个字都不用改。
+    row: Option<usize>,
+    /// 在行内是否占据剩余空间。
+    ///
+    /// lil-gui 那种「标签在左、控件在右」的行，靠的就是让标签把剩下的
+    /// 空间全占了，把控件挤到右边。
+    grow: bool,
 }
 
 /// 在 [`Ui`] 之上叠一层控件能力。
@@ -126,18 +137,24 @@ struct Declared {
 ///     // 注意：这是**上一帧**声明的那个按钮的结果，见下面的说明。
 /// }
 /// ```
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct WidgetUi {
     /// 配色。
     pub theme: Theme,
     /// 本帧声明的控件，按声明顺序。
     declared: Vec<Declared>,
-    /// 本帧的根节点样式。
+    /// 根容器的样式。**跨帧保留**，`begin` 不会清它。
     root_style: Style,
     /// 交互状态，跨帧。
     interaction: crate::Interaction,
     /// 上一次求解的结果。
     solved: crate::layout::Solved,
+    /// 当前打开的行号；[`None`] 表示不在行里。
+    open_row: Option<usize>,
+    /// 本帧已经开过几行，用来发行号。
+    rows: usize,
+    /// 当前行还没有控件——下一个进来的要占满剩余宽度。
+    row_first: bool,
     /// 本帧生效的滚动区（`begin` 时从 `open_scroll` 取过来）。
     scroll_frame: Option<ScrollFrame>,
     /// 各控件本帧的最终矩形（已经算上滚动偏移）。
@@ -163,18 +180,48 @@ struct ScrollFrame {
     last: usize,
 }
 
+impl Default for WidgetUi {
+    fn default() -> Self {
+        Self {
+            theme: Theme::default(),
+            declared: Vec::new(),
+            // 一个能直接用的根样式：竖排、留边、控件之间有间隔。
+            //
+            // 放在这里而不是 `begin` 里：`begin` 每帧都跑，在那儿重置的话
+            // 调用方设的样式会被静默吃掉。
+            root_style: Style {
+                direction: Direction::Column,
+                align: AlignCross::Start,
+                padding: Edges::all(16.0),
+                gap: 8.0,
+                ..Default::default()
+            },
+            interaction: Default::default(),
+            solved: Default::default(),
+            open_row: None,
+            rows: 0,
+            row_first: false,
+            scroll_frame: None,
+            rects: Vec::new(),
+            edits: Default::default(),
+            scroll: Default::default(),
+        }
+    }
+}
+
 impl WidgetUi {
     /// 开一帧，清掉上一帧的声明。
     pub fn begin(&mut self) {
         self.declared.clear();
         self.scroll_frame = None;
-        self.root_style = Style {
-            direction: Direction::Column,
-            align: AlignCross::Start,
-            padding: Edges::all(16.0),
-            gap: 8.0,
-            ..Default::default()
-        };
+        self.open_row = None;
+        self.rows = 0;
+        self.row_first = false;
+        // **不重置 `root_style`**：它是配置，不是每帧的声明。
+        //
+        // 之前这里会把它清回默认值，于是「先 `root_style` 再 `begin`」
+        // 这个再自然不过的写法会被静默丢弃——面板背景画在右边、
+        // 控件却排在屏幕最左角，而且不报任何错。
     }
 
     /// 改根容器的样式（方向、间隔、内边距）。
@@ -295,12 +342,19 @@ impl WidgetUi {
         }
 
         let snapshot = text.clone();
+        let row = self.open_row;
+        let grow = row.is_some() && self.row_first;
+        if row.is_some() {
+            self.row_first = false;
+        }
         self.declared.push(Declared {
             id,
             widget: Widget::TextInput {
                 text: snapshot,
                 placeholder: placeholder.into(),
             },
+            row,
+            grow,
         });
         id
     }
@@ -349,8 +403,42 @@ impl WidgetUi {
 
     fn push(&mut self, id: &str, widget: Widget) -> Id {
         let id = Id::new(id);
-        self.declared.push(Declared { id, widget });
+        let row = self.open_row;
+        // 行内的第一个控件占据剩余空间，把后面的挤到右边。
+        let grow = row.is_some() && self.row_first;
+        if row.is_some() {
+            self.row_first = false;
+        }
+        self.declared.push(Declared {
+            id,
+            widget,
+            row,
+            grow,
+        });
         id
+    }
+
+    /// 开一行：接下来声明的控件横着排，第一个占满剩余宽度。
+    ///
+    /// 这正是 lil-gui 那种「名字在左、控件在右」的行：
+    ///
+    /// ```text
+    /// ┌──────────────────────────────────┐
+    /// │ modify time scale    [====|    ] │
+    /// └──────────────────────────────────┘
+    /// ```
+    ///
+    /// 不支持嵌套——行里再开行的排版规则很快就说不清了，而 HUD 与
+    /// 调试面板用不到。重复调用等于先收上一行。
+    pub fn begin_row(&mut self) {
+        self.rows += 1;
+        self.open_row = Some(self.rows);
+        self.row_first = true;
+    }
+
+    /// 收一行。
+    pub fn end_row(&mut self) {
+        self.open_row = None;
     }
 
     /// 某个声明是不是在滚动区里。
@@ -441,43 +529,84 @@ impl WidgetUi {
         })
     }
 
-    /// 把声明变成布局树。
-    fn build_tree(&self, ui: &Ui) -> LayoutNode {
+    /// 把一个声明变成叶子节点。
+    fn leaf_of(&self, ui: &Ui, declared: &Declared) -> LayoutNode {
         let theme = self.theme;
-        let children = self.declared.iter().map(|declared| {
-            let style = Style {
-                width: match declared.widget {
-                    // 滑条要占满一行才好拖。
-                    // 滑条和文本框都要占满一行才好用。
-                    Widget::Slider { .. } | Widget::TextInput { .. } => Length::Percent(1.0),
-                    _ => Length::Auto,
-                },
-                min_size: Vec2::new(0.0, theme.row_height),
-                padding: match declared.widget {
-                    // 文字不加内边距——加了之后一行文字看着像个按钮。
-                    Widget::Label { .. } => Edges::default(),
-                    _ => theme.padding,
-                },
-                justify: Justify::Center,
-                align: AlignCross::Center,
-                ..Default::default()
+        let mut style = Style {
+            width: match declared.widget {
+                // 滑条和文本框都要占满一行才好用。
+                Widget::Slider { .. } | Widget::TextInput { .. } => Length::Percent(1.0),
+                _ => Length::Auto,
+            },
+            min_size: Vec2::new(0.0, theme.row_height),
+            padding: match declared.widget {
+                // 文字不加内边距——加了之后一行文字看着像个按钮。
+                Widget::Label { .. } => Edges::default(),
+                _ => theme.padding,
+            },
+            justify: Justify::Center,
+            align: AlignCross::Center,
+            ..Default::default()
+        };
+
+        // 行内的第一个控件把剩余空间吃掉，把后面的挤到右边。
+        if declared.grow {
+            style.grow = 1.0;
+        }
+
+        // 内容的固有尺寸。文字节点不给的话 flexbox 认为它零尺寸，
+        // 整行塌陷，界面上什么都看不见。
+        let content = self.content_size(ui, &declared.widget);
+        // 最小宽度也按内容兜底。
+        //
+        // 固有尺寸只在宽度是 `Auto` 时生效，而滑条和文本框用的是
+        // `Percent(1.0)`——在宽度不确定的父容器里，百分比解析成 0，
+        // 于是一个空文本框会塌成零宽，根本点不进去。
+        style.min_size.x = style
+            .min_size
+            .x
+            .max(content.x + theme.padding.left + theme.padding.right);
+        LayoutNode::leaf(declared.id, style, content)
+    }
+
+    /// 把声明变成布局树。
+    ///
+    /// 声明列表是扁平的，但带着行号。这里把**连号**的合并成一个横排的
+    /// 子容器——于是 `response` / `rects` 那套按下标索引的逻辑不用改，
+    /// 而排版上多了一层。
+    fn build_tree(&self, ui: &Ui) -> LayoutNode {
+        let mut children: Vec<LayoutNode> = Vec::new();
+        let mut index = 0;
+
+        while index < self.declared.len() {
+            let declared = &self.declared[index];
+            let Some(row) = declared.row else {
+                children.push(self.leaf_of(ui, declared));
+                index += 1;
+                continue;
             };
 
-            // 内容的固有尺寸。文字节点不给的话 flexbox 认为它零尺寸，
-            // 整行塌陷，界面上什么都看不见。
-            let content = self.content_size(ui, &declared.widget);
-            let mut style = style;
-            // 最小宽度也按内容兜底。
-            //
-            // 固有尺寸只在宽度是 `Auto` 时生效，而滑条和文本框用的是
-            // `Percent(1.0)`——在宽度不确定的父容器里，百分比解析成 0，
-            // 于是一个空文本框会塌成零宽，根本点不进去。
-            style.min_size.x = style
-                .min_size
-                .x
-                .max(content.x + theme.padding.left + theme.padding.right);
-            LayoutNode::leaf(declared.id, style, content)
-        });
+            // 把这一行的所有控件收进一个横排容器。
+            let mut row_children = Vec::new();
+            while index < self.declared.len() && self.declared[index].row == Some(row) {
+                row_children.push(self.leaf_of(ui, &self.declared[index]));
+                index += 1;
+            }
+
+            let style = Style {
+                direction: Direction::Row,
+                align: AlignCross::Center,
+                width: Length::Percent(1.0),
+                gap: 6.0,
+                ..Default::default()
+            };
+            // 行容器自己也要一个 id，不然 `Solved` 里查不到它——
+            // 但它不是控件，不参与交互。用行号编一个不会和用户撞的。
+            children.push(
+                LayoutNode::new(Id::new(&format!("__ui_row_{row}")), style)
+                    .with_children(row_children),
+            );
+        }
 
         LayoutNode::new(Id::new("__ui_root"), self.root_style).with_children(children)
     }
@@ -1274,5 +1403,148 @@ mod tests {
     fn an_undeclared_id_reports_nothing() {
         let w = WidgetUi::default();
         assert!(!w.response(Id::new("不存在")).clicked);
+    }
+
+    #[test]
+    fn begin_does_not_discard_the_root_style() {
+        // 这条记录的是一个真实的 bug：`begin` 曾经把 `root_style` 重置回
+        // 默认值，于是「先 root_style 再 begin」这个再自然不过的写法会被
+        // **静默丢弃**——面板背景画在右边，控件却排在屏幕最左角。
+        let mut w = WidgetUi::default();
+        w.root_style(Style {
+            margin: Edges {
+                left: 400.0,
+                top: 50.0,
+                right: 0.0,
+                bottom: 0.0,
+            },
+            ..Default::default()
+        });
+        w.begin();
+        let label = w.label("a", "hi");
+
+        let mut ui = ui();
+        w.finish(&mut ui, &crate::UiInput::default());
+
+        let rect = w.response(label).rect;
+        assert!(
+            rect.min.x >= 400.0,
+            "root_style 的左边距没生效，控件在 x={}",
+            rect.min.x
+        );
+        assert!(rect.min.y >= 50.0, "上边距没生效，控件在 y={}", rect.min.y);
+    }
+
+    #[test]
+    fn a_row_puts_widgets_side_by_side() {
+        // lil-gui 那种「名字在左、控件在右」的行。
+        let mut w = WidgetUi::default();
+        w.begin();
+        w.begin_row();
+        let name = w.label("name", "time scale");
+        let control = w.slider("s", 0.5);
+        w.end_row();
+
+        let mut ui = ui();
+        w.finish(&mut ui, &crate::UiInput::default());
+
+        let name_rect = w.response(name).rect;
+        let control_rect = w.response(control).rect;
+
+        // 横着排：控件在标签右边，而且两者竖直方向重叠。
+        assert!(
+            control_rect.min.x >= name_rect.max.x - 1.0,
+            "没横着排：标签 {name_rect:?}，控件 {control_rect:?}"
+        );
+        assert!(
+            name_rect.min.y < control_rect.max.y && control_rect.min.y < name_rect.max.y,
+            "两者不在同一行"
+        );
+    }
+
+    #[test]
+    fn the_first_widget_in_a_row_takes_the_slack() {
+        // 第一个控件吃掉剩余空间，把后面的挤到右边——这是「右对齐」
+        // 的实现方式。不这么做的话标签和控件会挤在左边。
+        let mut w = WidgetUi::default();
+        w.root_style(Style {
+            width: Length::Px(400.0),
+            padding: Edges::default(),
+            ..Default::default()
+        });
+        w.begin();
+        w.begin_row();
+        w.label("name", "x");
+        let control = w.button("b", "go");
+        w.end_row();
+
+        let mut ui = ui();
+        w.finish(&mut ui, &crate::UiInput::default());
+
+        let control_rect = w.response(control).rect;
+        assert!(
+            control_rect.max.x > 300.0,
+            "控件没被挤到右边，右边缘在 x={}",
+            control_rect.max.x
+        );
+    }
+
+    #[test]
+    fn widgets_outside_a_row_still_stack_vertically() {
+        // 不开行的控件行为不能变。
+        let mut w = WidgetUi::default();
+        w.begin();
+        let a = w.label("a", "one");
+        let b = w.label("b", "two");
+
+        let mut ui = ui();
+        w.finish(&mut ui, &crate::UiInput::default());
+
+        let (ra, rb) = (w.response(a).rect, w.response(b).rect);
+        assert!(rb.min.y >= ra.max.y - 1.0, "竖排被破坏了：{ra:?} / {rb:?}");
+    }
+
+    #[test]
+    fn rows_and_loose_widgets_can_be_mixed() {
+        let mut w = WidgetUi::default();
+        w.begin();
+        let title = w.label("title", "Controls");
+        w.begin_row();
+        let name = w.label("n", "speed");
+        w.slider("s", 0.5);
+        w.end_row();
+        let footer = w.label("f", "end");
+
+        let mut ui = ui();
+        w.finish(&mut ui, &crate::UiInput::default());
+
+        let (t, n, f) = (
+            w.response(title).rect,
+            w.response(name).rect,
+            w.response(footer).rect,
+        );
+        assert!(n.min.y >= t.max.y - 1.0, "行没排在标题下面");
+        assert!(f.min.y >= n.max.y - 1.0, "行尾的控件没排在行下面");
+    }
+
+    #[test]
+    fn an_unclosed_row_does_not_swallow_later_frames() {
+        // 忘了 `end_row` 是很常见的手误。`begin` 必须把它清掉，
+        // 否则下一帧所有控件都会挤进那一行。
+        let mut w = WidgetUi::default();
+        w.begin();
+        w.begin_row();
+        w.label("a", "x");
+        // 故意不调 end_row
+
+        w.begin();
+        let a = w.label("a", "one");
+        let b = w.label("b", "two");
+
+        let mut ui = ui();
+        w.finish(&mut ui, &crate::UiInput::default());
+
+        let (ra, rb) = (w.response(a).rect, w.response(b).rect);
+        assert!(rb.min.y >= ra.max.y - 1.0, "上一帧没收的行漏到了这一帧");
     }
 }

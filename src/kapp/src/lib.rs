@@ -304,6 +304,10 @@ impl App {
         let stats = runtime.renderer.stats();
 
         let mut exit_requested = false;
+        // 后处理设置从渲染器取出来交给插件改，跑完再写回去。
+        // 直接借渲染器的话会和 `runtime.scene` 的可变借用打架。
+        let mut post = runtime.renderer.post_settings();
+
         for (system_stage, system) in &mut self.systems {
             if *system_stage != stage {
                 continue;
@@ -321,9 +325,13 @@ impl App {
                 debug: &mut runtime.debug,
                 ui: &mut runtime.ui,
                 ui_input: &runtime.ui_input,
+                post: &mut post,
                 exit_requested: &mut exit_requested,
             };
             system(&mut context);
+        }
+        if post != runtime.renderer.post_settings() {
+            runtime.renderer.set_post_settings(post);
         }
 
         exit_requested
@@ -350,6 +358,10 @@ impl App {
         let elapsed = now.duration_since(runtime.start_time).as_secs_f32();
         let stats = runtime.renderer.stats();
 
+        // 后处理设置交给插件改，跑完写回。直接借渲染器会和
+        // `runtime.scene` 的可变借用打架。
+        let mut post = runtime.renderer.post_settings();
+
         let mut exit_requested = false;
         for plugin in &mut self.plugins {
             let mut context = Context {
@@ -365,9 +377,13 @@ impl App {
                 debug: &mut runtime.debug,
                 ui: &mut runtime.ui,
                 ui_input: &runtime.ui_input,
+                post: &mut post,
                 exit_requested: &mut exit_requested,
             };
             callback(plugin, &mut context);
+        }
+        if post != runtime.renderer.post_settings() {
+            runtime.renderer.set_post_settings(post);
         }
 
         exit_requested

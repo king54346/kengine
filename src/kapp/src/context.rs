@@ -80,6 +80,11 @@ pub struct Context<'a> {
     /// 交给 [`WidgetUi::finish`](kui::WidgetUi::finish)。位置已经换算成
     /// 逻辑像素，和 `ui.screen()` 同一套坐标。
     pub ui_input: &'a UiInput,
+    /// 后处理设置：Bloom、色调映射、抗锯齿。
+    ///
+    /// 改了立刻生效，下一帧就是新的。移植别的引擎的场景时经常要动它——
+    /// 那些例子多半没开辉光，而这边默认开着。
+    pub post: &'a mut krender::PostSettings,
     pub(crate) exit_requested: &'a mut bool,
 }
 

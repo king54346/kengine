@@ -121,6 +121,26 @@ impl AnimationState {
     }
 }
 
+/// 正在进行的交叉淡化。
+///
+/// 淡化期间每个状态的权重由「开始时的权重」到「目标权重」逐帧线性插值，
+/// 目标权重对 [`Crossfade::target`] 是 1，对其它状态是 0。
+#[derive(Debug, Clone)]
+struct Crossfade {
+    /// 淡入的目标状态序号。
+    target: usize,
+    /// 淡出的起始状态序号。warp 调速与结束时恢复速度都用它。
+    source: usize,
+    /// 每个状态淡化开始时的权重，下标即状态序号。
+    from: Vec<f32>,
+    /// `source` 在淡化开始前的速度，结束时恢复。
+    source_speed: f32,
+    /// 已经过的时间（秒）。
+    elapsed: f32,
+    /// 总时长（秒）。
+    duration: f32,
+}
+
 /// 动画播放器。
 ///
 /// 剪辑表用 [`Arc`] 共享：同一个模型的多个实例各有自己的播放进度，
@@ -137,6 +157,8 @@ pub struct Animator {
     speed: f32,
     /// 是否整体推进。
     playing: bool,
+    /// 正在进行的交叉淡化；没有时为 [`None`]。
+    crossfade: Option<Crossfade>,
 }
 
 impl Animator {
@@ -150,6 +172,7 @@ impl Animator {
             scratch: Pose::with_targets(targets),
             speed: 1.0,
             playing: true,
+            crossfade: None,
         }
     }
 
@@ -205,6 +228,7 @@ impl Animator {
     /// 只播这一个剪辑，清掉其它状态。
     pub fn play(&mut self, clip: usize) -> Option<usize> {
         self.states.clear();
+        self.crossfade = None;
         self.add_state(clip)
     }
 
@@ -217,6 +241,7 @@ impl Animator {
     /// 清空所有播放状态。
     pub fn clear(&mut self) {
         self.states.clear();
+        self.crossfade = None;
         self.pose.reset();
     }
 
@@ -226,6 +251,9 @@ impl Animator {
     /// 没出现的状态权重清零但**保留**——它的播放进度还在，
     /// 过渡回去时能接着上次的位置播，而不是从头开始。
     pub fn apply_weights(&mut self, weights: &[(usize, f32)]) {
+        // 手动喂权重等于接管控制权：进行中的交叉淡化作废。
+        self.crossfade = None;
+
         for state in &mut self.states {
             state.weight = 0.0;
         }
@@ -246,17 +274,120 @@ impl Animator {
     }
 
     /// 推进一帧并重新混合出姿态。
+    ///
+    /// 暂停（[`set_playing`](Self::set_playing) 为 `false`）时既不推进时间
+    /// 也不推进交叉淡化，只重算一次姿态——姿态保持不变。
     pub fn tick(&mut self, dt: f32) {
         if self.playing {
-            for index in 0..self.states.len() {
-                let clip = self.states[index].clip;
-                let duration = self.clips[clip].duration();
-                let speed = self.speed;
-                self.states[index].advance(dt * speed, duration);
-            }
+            self.advance(dt);
+        }
+        self.rebuild_pose();
+    }
+
+    /// 无视 [`playing`](Self::is_playing) 状态，强制推进 `dt` 秒并重新混合。
+    ///
+    /// 单步模式用：动画整体暂停，用户点一下就走一步，其余帧保持冻结。
+    /// 引擎每帧仍会调用 [`tick`](Self::tick)，但在暂停态下它什么都不做，
+    /// 所以只有这里显式调用时时间才前进。
+    pub fn step(&mut self, dt: f32) {
+        self.advance(dt);
+        self.rebuild_pose();
+    }
+
+    /// 推进所有状态的时间与交叉淡化，不重建姿态。
+    fn advance(&mut self, dt: f32) {
+        for index in 0..self.states.len() {
+            let clip = self.states[index].clip;
+            let duration = self.clips[clip].duration();
+            let speed = self.speed;
+            self.states[index].advance(dt * speed, duration);
+        }
+        self.advance_crossfade(dt);
+    }
+
+    /// 推进交叉淡化：按已过时间线性更新各状态权重，结束后恢复淡出状态的速度。
+    fn advance_crossfade(&mut self, dt: f32) {
+        let Some(fade) = &mut self.crossfade else {
+            return;
+        };
+        fade.elapsed += dt;
+        let t = if fade.duration > 0.0 {
+            (fade.elapsed / fade.duration).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+
+        for (index, state) in self.states.iter_mut().enumerate() {
+            let from = fade.from.get(index).copied().unwrap_or(0.0);
+            let target = if index == fade.target { 1.0 } else { 0.0 };
+            state.weight = from + (target - from) * t;
         }
 
-        self.rebuild_pose();
+        if t >= 1.0 {
+            // warp 改过淡出状态的速度，淡出后它权重为 0，这时恢复成原值
+            // 看不见，却能保证它下次再入场时不是被上一次 warp 搅乱的速度。
+            if let Some(source) = self.states.get_mut(fade.source) {
+                source.speed = fade.source_speed;
+            }
+            self.crossfade = None;
+        }
+    }
+
+    /// 在 `duration` 秒内把 `from` 状态的权重线性降到 0、`to` 状态升到 1，
+    /// 其余状态保持不动。对应 three.js `AnimationAction::crossFadeTo`。
+    ///
+    /// `warp` 为真时（three.js 的默认）做两件「时间同步」的事：`to` 的时间
+    /// 归零（入场的剪辑从头播），`from` 的速度调成 `from 时长 / to 时长`
+    /// （退场的剪辑按比例加速或减速，淡化期间两段的相位对齐，走路的脚
+    /// 不会突然错拍）。淡化结束会恢复 `from` 原来的速度。
+    ///
+    /// 与 three.js 的一个有意差异：它还会把入场的 `to` 按反比再调一遍速度
+    /// （`endStartRatio`），这里不碰 `to`，让它保持调用方设置的自然节奏。
+    ///
+    /// 手动喂权重（[`apply_weights`](Self::apply_weights) 或 [`play`](Self::play)）
+    /// 会取消进行中的淡化。返回 `false` 表示序号无效或 `from == to`。
+    pub fn crossfade(&mut self, from: usize, to: usize, duration: f32, warp: bool) -> bool {
+        if from >= self.states.len() || to >= self.states.len() || from == to {
+            return false;
+        }
+
+        let from_weights: Vec<f32> = self.states.iter().map(|state| state.weight).collect();
+        let from_duration = self.clips[self.states[from].clip].duration();
+        let to_duration = self.clips[self.states[to].clip].duration();
+
+        let source_speed = self.states[from].speed;
+        if warp {
+            if from_duration > 0.0 && to_duration > 0.0 {
+                self.states[from].speed = from_duration / to_duration;
+            }
+            self.states[to].time = 0.0;
+        }
+
+        self.crossfade = Some(Crossfade {
+            target: to,
+            source: from,
+            from: from_weights,
+            source_speed,
+            elapsed: 0.0,
+            duration: duration.max(0.0),
+        });
+        true
+    }
+
+    /// 是否正在交叉淡化。
+    pub fn is_crossfading(&self) -> bool {
+        self.crossfade.is_some()
+    }
+
+    /// 交叉淡化的进度，`0` 是刚开始、`1` 是完成；不在淡化中返回 [`None`]。
+    pub fn crossfade_progress(&self) -> Option<f32> {
+        self.crossfade.as_ref().map(|fade| {
+            if fade.duration > 0.0 {
+                (fade.elapsed / fade.duration).clamp(0.0, 1.0)
+            } else {
+                1.0
+            }
+        })
     }
 
     /// 只重新混合，不推进时间。手动改了权重之后可以调它。
@@ -540,5 +671,169 @@ mod test {
         animator.rebuild_pose();
 
         assert_eq!(position(&animator), Vec3::new(0.0, 10.0, 0.0));
+    }
+
+    /// 两个时长不同的剪辑：A 2 秒，B 1 秒，各自驱动目标 0 的位移。
+    fn uneven_animator() -> Animator {
+        Animator::new(Arc::new(vec![
+            AnimationClip::new(
+                "A",
+                vec![Track {
+                    target: 0,
+                    channel: Channel::Position(
+                        Curve::new(
+                            vec![0.0, 2.0],
+                            vec![Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0)],
+                            Interpolation::Linear,
+                        )
+                        .unwrap(),
+                    ),
+                }],
+            ),
+            AnimationClip::new(
+                "B",
+                vec![Track {
+                    target: 0,
+                    channel: Channel::Position(
+                        Curve::new(
+                            vec![0.0, 1.0],
+                            vec![Vec3::ZERO, Vec3::new(0.0, 10.0, 0.0)],
+                            Interpolation::Linear,
+                        )
+                        .unwrap(),
+                    ),
+                }],
+            ),
+        ]))
+    }
+
+    #[test]
+    fn crossfade_ramps_weights_over_duration() {
+        let mut animator = animator();
+        let a = animator.add_state(0).unwrap();
+        let b = animator.add_state(1).unwrap();
+        animator.state_mut(a).unwrap().set_weight(1.0);
+        animator.state_mut(b).unwrap().set_weight(0.0);
+
+        assert!(animator.crossfade(a, b, 1.0, false));
+        assert!(animator.is_crossfading());
+
+        animator.tick(0.5);
+        assert!((animator.states()[a].weight() - 0.5).abs() < 1e-5);
+        assert!((animator.states()[b].weight() - 0.5).abs() < 1e-5);
+        assert!((animator.crossfade_progress().unwrap() - 0.5).abs() < 1e-5);
+
+        animator.tick(0.5);
+        assert_eq!(animator.states()[a].weight(), 0.0);
+        assert_eq!(animator.states()[b].weight(), 1.0);
+        assert!(!animator.is_crossfading());
+        assert!(animator.crossfade_progress().is_none());
+    }
+
+    #[test]
+    fn crossfade_rejects_invalid_or_identical_states() {
+        let mut animator = animator();
+        let a = animator.add_state(0).unwrap();
+
+        assert!(!animator.crossfade(a, 99, 1.0, false));
+        assert!(!animator.crossfade(99, a, 1.0, false));
+        assert!(!animator.crossfade(a, a, 1.0, false));
+        assert!(!animator.is_crossfading());
+    }
+
+    #[test]
+    fn instant_crossfade_switches_immediately() {
+        let mut animator = animator();
+        let a = animator.add_state(0).unwrap();
+        let b = animator.add_state(1).unwrap();
+        animator.state_mut(a).unwrap().set_weight(1.0);
+        animator.state_mut(b).unwrap().set_weight(0.0);
+
+        animator.crossfade(a, b, 0.0, false);
+        animator.tick(0.1);
+
+        assert!(!animator.is_crossfading());
+        assert_eq!(animator.states()[a].weight(), 0.0);
+        assert_eq!(animator.states()[b].weight(), 1.0);
+    }
+
+    #[test]
+    fn warp_resets_target_time_and_scales_then_restores_source_speed() {
+        let mut animator = uneven_animator();
+        let a = animator.add_state(0).unwrap();
+        let b = animator.add_state(1).unwrap();
+        animator.state_mut(a).unwrap().set_weight(1.0);
+        animator.state_mut(b).unwrap().set_weight(0.0);
+
+        // 让两个状态先各走一段（避开整周期，否则循环剪辑刚好绕回 0），
+        // 确认入场的 b 时间确实被归零。
+        animator.tick(0.3);
+        assert!((animator.states()[b].time() - 0.3).abs() < 1e-6);
+
+        assert!(animator.crossfade(a, b, 1.0, true));
+
+        // warp：b 从头播，a 速度 = A 时长 / B 时长 = 2 / 1 = 2。
+        assert_eq!(animator.states()[b].time(), 0.0);
+        assert!((animator.states()[a].speed() - 2.0).abs() < 1e-6);
+
+        // 淡化结束后 a 的速度恢复原值。
+        animator.tick(1.0);
+        assert!(!animator.is_crossfading());
+        assert!((animator.states()[a].speed() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn crossfade_fades_everything_else_out() {
+        let mut animator = Animator::new(Arc::new(vec![
+            move_clip("A", Vec3::new(10.0, 0.0, 0.0)),
+            move_clip("B", Vec3::new(0.0, 20.0, 0.0)),
+            move_clip("C", Vec3::new(0.0, 0.0, 30.0)),
+        ]));
+        let a = animator.add_state(0).unwrap();
+        let b = animator.add_state(1).unwrap();
+        let c = animator.add_state(2).unwrap();
+        animator.state_mut(a).unwrap().set_weight(1.0);
+        animator.state_mut(b).unwrap().set_weight(0.0);
+        animator.state_mut(c).unwrap().set_weight(0.0);
+
+        animator.crossfade(a, c, 1.0, false);
+        animator.tick(0.5);
+
+        // 只有 a → c 参与淡化，b 保持 0。
+        assert!((animator.states()[a].weight() - 0.5).abs() < 1e-5);
+        assert!((animator.states()[c].weight() - 0.5).abs() < 1e-5);
+        assert_eq!(animator.states()[b].weight(), 0.0);
+    }
+
+    #[test]
+    fn manual_weights_cancel_crossfade() {
+        let mut animator = animator();
+        let a = animator.add_state(0).unwrap();
+        let b = animator.add_state(1).unwrap();
+        animator.state_mut(a).unwrap().set_weight(1.0);
+        animator.state_mut(b).unwrap().set_weight(0.0);
+        animator.crossfade(a, b, 1.0, false);
+        assert!(animator.is_crossfading());
+
+        animator.apply_weights(&[(0, 1.0)]);
+
+        assert!(!animator.is_crossfading());
+        assert_eq!(animator.states()[0].weight(), 1.0);
+    }
+
+    #[test]
+    fn step_advances_even_while_paused() {
+        let mut animator = animator();
+        let state = animator.play(0).unwrap();
+        animator.tick(0.25);
+        animator.set_playing(false);
+
+        animator.step(0.25);
+
+        assert!((animator.states()[state].time() - 0.5).abs() < 1e-6);
+
+        // 暂停态下普通的 tick 不再推进。
+        animator.tick(1.0);
+        assert!((animator.states()[state].time() - 0.5).abs() < 1e-6);
     }
 }
