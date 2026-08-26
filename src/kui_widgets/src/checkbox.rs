@@ -88,8 +88,23 @@ pub(crate) fn paint(
 mod tests {
     use super::*;
     use crate::WidgetUi;
-    use crate::testing::ui;
+    use crate::testing::{activate_first, ui};
     use kui::UiInput;
+
+    /// 空格勾选，和所有桌面 UI 一致。状态仍然由调用方翻转——
+    /// 键盘和鼠标在这里走的是同一条路。
+    #[test]
+    fn a_focused_checkbox_can_be_toggled_from_the_keyboard() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        let mut id = None;
+        activate_first(&mut w, &mut ui, |w| {
+            id = Some(w.checkbox("c", "音效", false));
+        });
+
+        assert!(w.response(id.unwrap()).clicked);
+    }
 
     #[test]
     fn a_checked_box_draws_more_than_an_unchecked_one() {

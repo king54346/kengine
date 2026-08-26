@@ -25,6 +25,31 @@ pub(crate) fn at(x: f32, y: f32) -> UiInput {
     }
 }
 
+/// 本帧按下了激活键（回车 / 空格），指针不在窗口里。
+pub(crate) fn activate() -> UiInput {
+    UiInput {
+        activate: true,
+        ..Default::default()
+    }
+}
+
+/// Tab 一次，把焦点落到第一个能聚焦的控件上，然后按一下激活键。
+///
+/// 焦点是**跨帧**的，而控件的矩形要等 `finish` 排完才知道，所以这必须
+/// 是两帧：第一帧走焦点，第二帧才轮得到激活。写在一处免得每个控件的
+/// 测试各踩一次。
+pub(crate) fn activate_first(w: &mut WidgetUi, ui: &mut Ui, mut declare: impl FnMut(&mut WidgetUi)) {
+    let tab = UiInput {
+        focus_step: 1,
+        ..Default::default()
+    };
+    for input in [&tab, &activate()] {
+        w.begin();
+        declare(w);
+        w.finish(ui, input);
+    }
+}
+
 /// 在某处完成一次完整的点击。
 ///
 /// 点击要**按下、松开两帧**才算数：只发松开的话，控件从没见过按下，

@@ -72,6 +72,16 @@ pub struct UiInput {
     pub focus_step: i32,
     /// 本帧的编辑动作，按发生顺序。
     pub edits: Vec<EditAction>,
+    /// 本帧按下了「激活」键（桌面上是回车或空格）。
+    ///
+    /// 和 [`EditAction`] 一样只记**动作不记按键**，理由也一样：
+    /// 哪个键算激活跟平台走，控件不该知道这件事。
+    ///
+    /// 这个键往往身兼数职——空格同时是一个字符，回车同时是
+    /// [`Submit`](EditAction::Submit)。**谁吃掉它由焦点在谁身上决定**：
+    /// 焦点在文本框时那是文字，在按钮上时才是激活。所以填这个字段的人
+    /// 不必先判断焦点，照实填就行。
+    pub activate: bool,
 }
 
 impl UiInput {
@@ -83,6 +93,7 @@ impl UiInput {
         self.text.clear();
         self.focus_step = 0;
         self.edits.clear();
+        self.activate = false;
     }
 
     /// 某个键本帧刚按下。
@@ -96,6 +107,41 @@ impl UiInput {
     }
 }
 
+/// 一个参与本帧交互的控件。
+///
+/// 命中和焦点是**两件事**，所以分开记：面板、标签、遮罩都要参与命中
+/// （不然点在面板上不会清掉文本框的焦点），但都不该是 Tab 的一站——
+/// 走上去按回车什么也不会发生，只是让人以为焦点丢了。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Hit {
+    /// 控件的 id。
+    pub id: Id,
+    /// 控件的矩形。
+    pub rect: Rect,
+    /// 能不能用 Tab 走到它、能不能拿键盘焦点。
+    pub focusable: bool,
+}
+
+impl Hit {
+    /// 一个可以拿焦点的控件。
+    pub fn new(id: Id, rect: Rect) -> Self {
+        Self {
+            id,
+            rect,
+            focusable: true,
+        }
+    }
+
+    /// 只参与命中、不参与焦点（面板、标签、遮罩这类）。
+    pub fn inert(id: Id, rect: Rect) -> Self {
+        Self {
+            id,
+            rect,
+            focusable: false,
+        }
+    }
+}
+
 /// 一个控件本帧的交互结果。
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Response {
@@ -105,7 +151,12 @@ pub struct Response {
     pub hovered: bool,
     /// 正被按住（在它身上按下且还没松手）。
     pub held: bool,
-    /// 本帧完成了一次点击：按下和松开都在它身上。
+    /// 本帧被**激活**了：要么按下和松开都落在它身上（点击），要么它
+    /// 有焦点且本帧按了激活键（见 [`Interaction::activate`]）。
+    ///
+    /// 两者合并成一个字段而不是各占一个，是为了让所有已经写着
+    /// `if response.clicked` 的地方**自动**支持键盘——分成两个字段的话，
+    /// 每一处调用都得记得改，漏掉的那些就只有鼠标能用。
     pub clicked: bool,
     /// 它有键盘焦点。
     pub focused: bool,
@@ -171,14 +222,31 @@ impl Interaction {
         self.focused.is_some()
     }
 
+    /// 键盘激活：把某个控件本帧标记成「被点了」。
+    ///
+    /// 必须在 [`update`](Self::update) **之后**调用——`update` 会清空并重建
+    /// 本帧的结果表，先调的话会被冲掉。
+    ///
+    /// 为什么不由 `update` 自己做：哪些控件认键盘激活是**控件层**才知道的
+    /// 事。按钮认，文本框不认——不然在文本框里敲一个空格，会既打出空格
+    /// 又触发一次「点击」。这一层不认识「按钮」是什么，所以只提供动作。
+    ///
+    /// 控件没参与本帧布局时什么也不做。
+    pub fn activate(&mut self, id: Id) {
+        if let Some(response) = self.responses.get_mut(&id) {
+            response.clicked = true;
+        }
+    }
+
     /// 按本帧的布局与输入更新一遍状态。
     ///
-    /// `hit_order` 是可交互控件按**前序**排列的 (id, 矩形)；
+    /// `hit_order` 是参与交互的控件按**前序**排列；
     /// 命中判定从后往前（后画的在上面）。
-    pub fn update(&mut self, hit_order: &[(Id, Rect)], input: &UiInput) {
+    pub fn update(&mut self, hit_order: &[Hit], input: &UiInput) {
         self.responses.clear();
         self.focusable.clear();
-        self.focusable.extend(hit_order.iter().map(|(id, _)| *id));
+        self.focusable
+            .extend(hit_order.iter().filter(|h| h.focusable).map(|h| h.id));
 
         // 命中：从后往前找第一个包含指针的。
         // 从前往后的话，点在按钮上会命中它底下的面板。
@@ -186,8 +254,8 @@ impl Interaction {
             hit_order
                 .iter()
                 .rev()
-                .find(|(_, rect)| rect.contains(p))
-                .map(|(id, _)| *id)
+                .find(|h| h.rect.contains(p))
+                .map(|h| h.id)
         });
 
         // 按下：记住是在谁身上按的。
@@ -220,19 +288,19 @@ impl Interaction {
             _ => Vec2::ZERO,
         };
 
-        for (id, rect) in hit_order {
-            let hovered = self.hovered == Some(*id);
-            let held = self.active.map(|(a, _)| a) == Some(*id);
+        for hit in hit_order {
+            let hovered = self.hovered == Some(hit.id);
+            let held = self.active.map(|(a, _)| a) == Some(hit.id);
             self.responses.insert(
-                *id,
+                hit.id,
                 Response {
-                    rect: *rect,
+                    rect: hit.rect,
                     hovered,
                     held,
                     // 点击要求按下和松开在**同一个**控件上。不配对的话，
                     // 在别处按下、拖到按钮上松手也会触发。
                     clicked: held && released && hovered,
-                    focused: self.focused == Some(*id),
+                    focused: self.focused == Some(hit.id),
                     drag: if held { drag } else { Vec2::ZERO },
                 },
             );
@@ -254,11 +322,13 @@ mod tests {
     }
 
     /// 两个不重叠的按钮，外加一个盖住它们的面板（排在最前 = 最底下）。
-    fn layout() -> Vec<(Id, Rect)> {
+    ///
+    /// 面板只参与命中不参与焦点——它是背景，不是一站。
+    fn layout() -> Vec<Hit> {
         vec![
-            (id("panel"), Rect::new(0.0, 0.0, 200.0, 100.0)),
-            (id("a"), Rect::new(10.0, 10.0, 80.0, 30.0)),
-            (id("b"), Rect::new(10.0, 50.0, 80.0, 30.0)),
+            Hit::inert(id("panel"), Rect::new(0.0, 0.0, 200.0, 100.0)),
+            Hit::new(id("a"), Rect::new(10.0, 10.0, 80.0, 30.0)),
+            Hit::new(id("b"), Rect::new(10.0, 50.0, 80.0, 30.0)),
         ]
     }
 
@@ -407,13 +477,88 @@ mod tests {
         };
 
         ui.update(&layout(), &tab);
-        assert_eq!(ui.focused(), Some(id("panel")));
-        ui.update(&layout(), &tab);
         assert_eq!(ui.focused(), Some(id("a")));
         ui.update(&layout(), &tab);
         assert_eq!(ui.focused(), Some(id("b")));
         ui.update(&layout(), &tab);
-        assert_eq!(ui.focused(), Some(id("panel")), "该绕回开头");
+        assert_eq!(ui.focused(), Some(id("a")), "该绕回开头");
+    }
+
+    /// Tab 不该停在面板、标签这类东西上：停在那儿既没有焦点框可看，
+    /// 按回车也什么都不会发生，用起来像是焦点丢了。
+    #[test]
+    fn tab_skips_things_that_cannot_be_focused() {
+        let mut ui = Interaction::new();
+        let tab = UiInput {
+            focus_step: 1,
+            ..Default::default()
+        };
+
+        for _ in 0..6 {
+            ui.update(&layout(), &tab);
+            assert_ne!(ui.focused(), Some(id("panel")));
+        }
+    }
+
+    /// 一层全是面板时 Tab 无处可去，也不该 panic。
+    #[test]
+    fn tab_with_nothing_focusable_does_nothing() {
+        let mut ui = Interaction::new();
+        let only_panels = [Hit::inert(id("panel"), Rect::new(0.0, 0.0, 200.0, 100.0))];
+        ui.update(
+            &only_panels,
+            &UiInput {
+                focus_step: 1,
+                ..Default::default()
+            },
+        );
+        assert_eq!(ui.focused(), None);
+    }
+
+    /// 点在面板上要清掉焦点——它参与命中，但拿不到焦点。
+    #[test]
+    fn clicking_an_inert_widget_clears_focus() {
+        let mut ui = Interaction::new();
+        let mut input = at(20.0, 20.0);
+        input.pressed.push(PointerButton::Primary);
+        ui.update(&layout(), &input);
+        assert_eq!(ui.focused(), Some(id("a")));
+
+        let mut input = at(150.0, 90.0); // 面板空白处
+        input.pressed.push(PointerButton::Primary);
+        ui.update(&layout(), &input);
+        assert_eq!(ui.focused(), None);
+    }
+
+    #[test]
+    fn activating_counts_as_a_click() {
+        let mut ui = Interaction::new();
+        ui.update(&layout(), &UiInput::default());
+        assert!(!ui.response(id("a")).clicked);
+
+        ui.activate(id("a"));
+        assert!(ui.response(id("a")).clicked);
+        assert!(!ui.response(id("b")).clicked, "不该溅到别人身上");
+    }
+
+    /// 激活是一帧的事。下一帧 `update` 会把结果表重建，不清的话
+    /// 按一次回车会被当成一直按着。
+    #[test]
+    fn activation_does_not_survive_the_next_frame() {
+        let mut ui = Interaction::new();
+        ui.update(&layout(), &UiInput::default());
+        ui.activate(id("a"));
+
+        ui.update(&layout(), &UiInput::default());
+        assert!(!ui.response(id("a")).clicked);
+    }
+
+    #[test]
+    fn activating_something_that_is_not_laid_out_is_ignored() {
+        let mut ui = Interaction::new();
+        ui.update(&layout(), &UiInput::default());
+        ui.activate(id("从未存在"));
+        assert!(!ui.response(id("从未存在")).clicked);
     }
 
     #[test]
@@ -460,6 +605,7 @@ mod tests {
         input.edits.push(EditAction::Backspace);
         input.scroll = Vec2::new(0.0, 3.0);
         input.focus_step = 1;
+        input.activate = true;
 
         input.end_frame();
 
@@ -468,6 +614,7 @@ mod tests {
         assert!(input.edits.is_empty());
         assert_eq!(input.scroll, Vec2::ZERO);
         assert_eq!(input.focus_step, 0);
+        assert!(!input.activate);
         assert_eq!(
             input.pointer,
             Some(Vec2::new(10.0, 10.0)),

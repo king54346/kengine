@@ -174,6 +174,14 @@ fn translate_ui_input(input: &Input, scale: f32, out: &mut UiInput) {
         // Shift+Tab 往回走，和所有桌面 UI 一致。
         out.focus_step = if shift { -1 } else { 1 };
     }
+
+    // 回车 / 空格激活有焦点的控件。
+    //
+    // 这两个键同时还有别的身份——回车上面刚被翻成了 `Submit`，空格会作为
+    // 一个字符走 `out.text`。**照实填两边就行**：控件层按焦点在谁身上决定
+    // 谁吃掉它（文本框吃字符，按钮吃激活），这里不必先判断焦点。
+    out.activate =
+        input.key_just_pressed(KeyCode::Enter) || input.key_just_pressed(KeyCode::Space);
 }
 
 /// 应用。装载插件、注册系统，然后接管主循环。

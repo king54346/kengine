@@ -146,8 +146,24 @@ pub(crate) fn paint(
 mod tests {
     use super::*;
     use crate::WidgetUi;
-    use crate::testing::ui;
-    
+    use crate::testing::{activate_first, ui};
+
+    /// 键盘能展开 / 收起分组。
+    ///
+    /// 折叠的翻转排在 `finish` 里读 `clicked` 的那一步，所以这条同时也
+    /// 钉住了「键盘激活要发生在读 `clicked` 之前」——顺序反了这里就不过。
+    #[test]
+    fn a_focused_folder_toggles_from_the_keyboard() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        activate_first(&mut w, &mut ui, |w| {
+            w.folder("f", "Section");
+            w.end_folder();
+        });
+
+        assert!(!w.folder_open(Id::new("f")), "回车该把展开着的分组收起来");
+    }
 
     #[test]
     fn a_folder_starts_open() {

@@ -48,8 +48,79 @@ pub(crate) fn paint(ui: &mut Ui, theme: &Theme, rect: Rect, response: &Response,
 mod tests {
     
     use crate::WidgetUi;
-    use crate::testing::{at, ui};
+    use crate::testing::{activate, activate_first, at, ui};
     use kui::{PointerButton, UiInput};
+
+    /// 键盘也能按按钮：Tab 走到它，回车 / 空格就是一下点击。
+    ///
+    /// 走 `clicked` 而不是新开一个字段，是为了让所有已经写着
+    /// `if response.clicked` 的地方自动支持键盘。
+    #[test]
+    fn a_focused_button_can_be_activated_from_the_keyboard() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        let mut id = None;
+        activate_first(&mut w, &mut ui, |w| {
+            id = Some(w.button("a", "点我"));
+        });
+        let id = id.unwrap();
+
+        assert!(w.response(id).focused);
+        assert!(w.response(id).clicked, "有焦点的按钮该被回车激活");
+    }
+
+    /// 激活只算一帧。不清的话按一次回车会被当成一直按着，
+    /// 「开始游戏」会连着触发到天荒地老。
+    #[test]
+    fn keyboard_activation_lasts_a_single_frame() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        let mut id = None;
+        activate_first(&mut w, &mut ui, |w| {
+            id = Some(w.button("a", "点我"));
+        });
+        let id = id.unwrap();
+        assert!(w.response(id).clicked);
+
+        w.begin();
+        w.button("a", "点我");
+        w.finish(&mut ui, &UiInput::default());
+        assert!(!w.response(id).clicked, "松开之后不该还算按着");
+    }
+
+    /// 没焦点的按钮不该被别人的回车带着一起触发。
+    #[test]
+    fn an_unfocused_button_ignores_the_activate_key() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        let mut ids = None;
+        activate_first(&mut w, &mut ui, |w| {
+            ids = Some((w.button("a", "甲"), w.button("b", "乙")));
+        });
+        let (a, b) = ids.unwrap();
+
+        assert!(w.response(a).clicked);
+        assert!(!w.response(b).clicked, "焦点不在乙身上");
+    }
+
+    /// 谁都没有焦点时按回车，一个按钮也不该响应。
+    #[test]
+    fn the_activate_key_does_nothing_without_focus() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        w.begin();
+        let id = w.button("a", "点我");
+        w.finish(&mut ui, &UiInput::default());
+
+        w.begin();
+        w.button("a", "点我");
+        w.finish(&mut ui, &activate());
+        assert!(!w.response(id).clicked);
+    }
 
     #[test]
     fn a_button_reports_hover_and_click() {

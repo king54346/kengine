@@ -98,8 +98,25 @@ pub(crate) fn paint(
 mod tests {
     
     use crate::WidgetUi;
-    use crate::testing::{at, ui};
+    use crate::testing::{activate_first, at, ui};
     use kui::{PointerButton, UiInput};
+
+    /// 有焦点的单选按钮认回车 / 空格。
+    ///
+    /// 注意这**不是**「一组里用方向键换选」——那要先有「组」这个概念，
+    /// 现在还没有。这里只是让 Tab 走到的那一个能用键盘选中。
+    #[test]
+    fn a_focused_radio_can_be_selected_from_the_keyboard() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        let mut id = None;
+        activate_first(&mut w, &mut ui, |w| {
+            id = Some(w.radio("r", "简单", false));
+        });
+
+        assert!(w.response(id.unwrap()).clicked);
+    }
 
     /// 选中的单选按钮要比没选中的多画一个圆点，否则一组按钮
     /// 看上去全都一样，用户不知道自己选了哪个。

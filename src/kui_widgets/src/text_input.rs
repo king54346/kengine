@@ -170,6 +170,60 @@ mod tests {
         w.finish(ui, &tab);
     }
 
+    /// 空格在文本框里就是一个空格，**不是**一次激活。
+    ///
+    /// 两边都认的话，敲一个空格会既打出空格又触发一次「点击」——
+    /// 那个 `clicked` 会一路传到调用方的「确定」按钮逻辑上去。
+    /// 所以 `kapp` 照实把空格同时填进 `text` 和 `activate`，
+    /// 由控件层按焦点在谁身上决定谁吃掉它。
+    #[test]
+    fn a_space_in_a_text_input_is_typed_not_an_activation() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let mut text = String::new();
+
+        focus_first(&mut w, &mut ui, |w| {
+            let mut scratch = String::new();
+            w.text_input("name", &mut scratch, "名字", &UiInput::default());
+        });
+
+        let input = UiInput {
+            text: " ".to_string(),
+            activate: true,
+            ..Default::default()
+        };
+        w.begin();
+        let id = w.text_input("name", &mut text, "名字", &input);
+        w.finish(&mut ui, &input);
+
+        assert_eq!(text, " ", "空格该被打进文本框");
+        assert!(!w.response(id).clicked, "文本框不该被空格激活");
+    }
+
+    /// 回车同理：它在文本框里是提交，不该顺带算一次点击。
+    #[test]
+    fn enter_in_a_text_input_is_not_an_activation() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let mut text = String::from("ab");
+
+        focus_first(&mut w, &mut ui, |w| {
+            let mut scratch = String::from("ab");
+            w.text_input("name", &mut scratch, "名字", &UiInput::default());
+        });
+
+        let input = UiInput {
+            edits: vec![kui::EditAction::Submit],
+            activate: true,
+            ..Default::default()
+        };
+        w.begin();
+        let id = w.text_input("name", &mut text, "名字", &input);
+        w.finish(&mut ui, &input);
+
+        assert!(!w.response(id).clicked);
+    }
+
     #[test]
     fn typing_into_a_focused_text_input_changes_the_text() {
         let mut ui = ui();

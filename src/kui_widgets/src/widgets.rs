@@ -125,6 +125,53 @@ pub(crate) enum Widget {
     },
 }
 
+impl Widget {
+    /// 能不能拿键盘焦点、能不能被 Tab 走到。
+    ///
+    /// 面板、标签、遮罩只是背景，走上去按回车什么也不会发生。
+    /// 滚动条和对话框标题栏是纯指针控件，键盘上没有对应操作。
+    ///
+    /// **滑条暂时也不在此列**：它现在既没有焦点框可看，也不认方向键，
+    /// 停在那儿只会让人以为焦点丢了。等方向键调值做进来再放回来。
+    pub(crate) fn focusable(&self) -> bool {
+        match self {
+            Widget::Button { .. }
+            | Widget::Checkbox { .. }
+            | Widget::Radio { .. }
+            | Widget::ListItem { .. }
+            | Widget::Folder { .. }
+            | Widget::TextInput { .. } => true,
+            Widget::Panel { .. }
+            | Widget::Label { .. }
+            | Widget::Slider { .. }
+            | Widget::Modal { .. }
+            | Widget::DialogTitle { .. }
+            | Widget::Scrollbar { .. } => false,
+        }
+    }
+
+    /// 有焦点时，回车 / 空格算不算「点了一下」。
+    ///
+    /// 文本框故意不算：那里的空格是要打出一个空格的，回车是提交。
+    /// 两边都认的话，在文本框里敲空格会既打出空格又触发一次点击。
+    pub(crate) fn activatable(&self) -> bool {
+        match self {
+            Widget::Button { .. }
+            | Widget::Checkbox { .. }
+            | Widget::Radio { .. }
+            | Widget::ListItem { .. }
+            | Widget::Folder { .. } => true,
+            Widget::TextInput { .. }
+            | Widget::Panel { .. }
+            | Widget::Label { .. }
+            | Widget::Slider { .. }
+            | Widget::Modal { .. }
+            | Widget::DialogTitle { .. }
+            | Widget::Scrollbar { .. } => false,
+        }
+    }
+}
+
 /// 一个已经声明、等待求解的控件。
 #[derive(Debug, Clone)]
 pub(crate) struct Declared {
@@ -368,13 +415,31 @@ impl WidgetUi {
         //
         // 用**滚动之后**的矩形：不然滚下去之后，点击命中的还是原位置，
         // 表现为「点这一行，亮的是另一行」。
-        let hits: Vec<(Id, Rect)> = self
+        let hits: Vec<kui::Hit> = self
             .declared
             .iter()
             .zip(&self.rects)
-            .map(|(d, rect)| (d.id, *rect))
+            .map(|(d, rect)| kui::Hit {
+                id: d.id,
+                rect: *rect,
+                focusable: d.widget.focusable(),
+            })
             .collect();
         self.interaction.update(&hits, input);
+
+        // 键盘激活：焦点落在按钮这类东西上时，回车 / 空格等同于点一下。
+        //
+        // 必须排在 `update` 之后（那里会重建结果表）、排在下面读 `clicked`
+        // 的地方之前——否则用键盘展开折叠分组就不管用了。
+        if input.activate
+            && let Some(focused) = self.interaction.focused()
+            && self
+                .declared
+                .iter()
+                .any(|d| d.id == focused && d.widget.activatable())
+        {
+            self.interaction.activate(focused);
+        }
 
         // 折叠开关在这里翻转，不在 `folder()` 里——`folder()` 跑在声明期，
         // 那时本帧的点击还没判出来。在这里翻的话下一帧就是新状态，
@@ -783,6 +848,73 @@ mod tests {
         w.finish(&mut ui, &tab);
         assert!(w.response(b).focused);
         assert!(w.wants_keyboard());
+    }
+
+    /// Tab 只停在能操作的东西上。标签和面板要跳过去——一个 lil-gui 式的
+    /// 面板里标签比控件还多，停在标签上会让人以为焦点丢了。
+    #[test]
+    fn tab_skips_labels_and_panels() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let tab = UiInput {
+            focus_step: 1,
+            ..Default::default()
+        };
+
+        let declare = |w: &mut WidgetUi| {
+            w.panel("bg");
+            w.label("l1", "音量");
+            w.button("a", "甲");
+            w.label("l2", "画质");
+            w.button("b", "乙");
+        };
+
+        // 五个控件，只有两个按钮该被走到，所以三下 Tab 就该绕回甲。
+        let expected = ["a", "b", "a"];
+        for name in expected {
+            w.begin();
+            declare(&mut w);
+            w.finish(&mut ui, &tab);
+            assert_eq!(
+                w.response(Id::new(name)).focused,
+                true,
+                "Tab 该停在 {name} 上"
+            );
+        }
+    }
+
+    /// 点在标签上要把焦点清掉。
+    ///
+    /// 标签参与命中（不然点它会穿过去打到底下的东西），但拿不到焦点——
+    /// 两件事分开记的意义就在这儿。
+    #[test]
+    fn clicking_a_label_clears_focus() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let tab = UiInput {
+            focus_step: 1,
+            ..Default::default()
+        };
+
+        let declare = |w: &mut WidgetUi| {
+            w.button("a", "甲");
+            w.label("l", "音量");
+        };
+
+        w.begin();
+        declare(&mut w);
+        w.finish(&mut ui, &tab);
+        assert!(w.response(Id::new("a")).focused);
+
+        let point = w.response(Id::new("l")).rect.center();
+        let mut input = at(point.x, point.y);
+        input.pressed.push(kui::PointerButton::Primary);
+        w.begin();
+        declare(&mut w);
+        w.finish(&mut ui, &input);
+
+        assert_eq!(w.interaction.hovered(), Some(Id::new("l")), "标签该参与命中");
+        assert!(!w.wants_keyboard(), "但不该把焦点接过去");
     }
 
     #[test]

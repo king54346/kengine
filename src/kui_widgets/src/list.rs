@@ -62,8 +62,25 @@ pub(crate) fn paint(
 mod tests {
     
     use crate::WidgetUi;
-    use crate::testing::ui;
+    use crate::testing::{activate_first, ui};
     use kui::UiInput;
+
+    /// 有焦点的列表行认回车 / 空格。
+    ///
+    /// 方向键在行间移动是另一件事——那要先有「列表容器」这个概念。
+    #[test]
+    fn a_focused_list_row_can_be_selected_from_the_keyboard() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        let mut id = None;
+        activate_first(&mut w, &mut ui, |w| {
+            id = Some(w.list_item("row", "第一行", false));
+            w.list_item("row2", "第二行", false);
+        });
+
+        assert!(w.response(id.unwrap()).clicked);
+    }
 
     /// 选中的列表行要画出底色。不画的话选了等于没选。
     #[test]
