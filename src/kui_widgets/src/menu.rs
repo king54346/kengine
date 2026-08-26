@@ -1,11 +1,11 @@
-//! 菜单的键盘导航。
+//! 菜单：菜单栏、下拉菜单、子菜单。
 //!
-//! 菜单里真正容易出错的不是画，是**按方向键该跳到哪一项**：中间夹着
-//! 禁用项、要不要绕回开头、菜单全禁用时怎么办。所以这里只做这件事，
-//! 做成不碰绘制的纯函数——不需要窗口、字体、GPU 就能全测一遍。
+//! # 一个模块，两半
 //!
-//! 摆在哪里由 [`popover`](crate::popover) 算，画成什么样由
-//! [`WidgetUi::list_item`](crate::WidgetUi::list_item) 出几何。
+//! 上半是[**纯逻辑**](navigate)：按方向键该跳到哪一项。这是菜单里最容易
+//! 出错的地方——中间夹着禁用项、要不要绕回开头、菜单全禁用时怎么办——
+//! 而它完全不需要窗口、字体、GPU，所以拎出来做成纯函数，每条规则都能
+//! 直接写成测试。
 //!
 //! ```
 //! use kui_widgets::menu::{navigate, Layout, MenuKey, MenuAction};
@@ -17,6 +17,26 @@
 //!     MenuAction::Highlight(2),
 //! );
 //! ```
+//!
+//! 下半是看得见的那个菜单：[`menu_button`](WidgetUi::menu_button)、
+//! [`begin_menu`](WidgetUi::begin_menu)、[`menu_item`](WidgetUi::menu_item)、
+//! [`submenu_item`](WidgetUi::submenu_item)。摆在哪里由
+//! [`popover`](crate::popover) 算。
+//!
+//! # 浮层怎么摆
+//!
+//! 菜单的位置**不能在排版时给**：它要贴着锚点，而锚点排在哪要等这一轮
+//! 求解出来才知道。所以走两步——先让它[绝对定位](kui::Style::absolute)
+//! （不占位置，但量得出尺寸），求解之后再整段平移过去。
+//!
+//! 不占位置这一点是必须的：菜单要是占了正常的布局位置，每打开一次菜单，
+//! 底下的整个界面都会往下跳一截。
+//!
+//! # 菜单是模态的
+//!
+//! 只要有菜单开着（[`menus_open`](WidgetUi::menus_open)），方向键和
+//! 回车就**全归菜单**，滑条和单选组要让路。不让的话按一下方向键会既在
+//! 菜单里移动高亮，又把底下那条滑条的值改了。
 
 /// 菜单的排布方向。
 ///
@@ -191,6 +211,521 @@ fn first_enabled(enabled: &[bool], step: Step) -> MenuAction {
     match found {
         Some(index) => MenuAction::Highlight(index),
         None => MenuAction::Ignored,
+    }
+}
+
+// ───────────────────────── 控件 ─────────────────────────
+//
+// 上面是纯逻辑，下面才是看得见的那个菜单。分开是因为上面那部分
+// 不需要窗口、字体、GPU 就能全测一遍，而它正是最容易出错的地方。
+
+use kfont::TextStyle;
+use kmath::{Vec2, Vec4};
+use kui::{Id, NavKey, Rect, Response, Style, Ui, UiInput};
+
+use crate::popover::{self, Align, Placement, Side};
+use crate::widgets::{MenuFrame, Theme, Widget, WidgetUi, text_style};
+
+/// 菜单和屏幕边缘之间至少留这么多。
+const SCREEN_MARGIN: f32 = 4.0;
+
+/// 子菜单箭头占的宽度。
+const ARROW_WIDTH: f32 = 16.0;
+
+impl WidgetUi {
+    /// 一个会弹出菜单的按钮。点它开合自己的菜单。
+    ///
+    /// 菜单的内容用 [`begin_menu`](Self::begin_menu) 声明，锚点就是这里
+    /// 返回的 id：
+    ///
+    /// ```no_run
+    /// # use kui_widgets::WidgetUi;
+    /// # let mut w = WidgetUi::default();
+    /// let file = w.menu_button("file", "文件");
+    /// if w.begin_menu(file) {
+    ///     let open = w.menu_item("open", "打开");
+    ///     let quit = w.menu_item("quit", "退出");
+    ///     w.end_menu();
+    ///
+    ///     if w.response(quit).clicked {
+    ///         // 退出
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// **菜单要在这一帧的最后声明**，和模态遮罩同理：命中从后往前找，
+    /// 声明得早的话菜单会被它盖住的那些控件抢走点击。
+    pub fn menu_button(&mut self, id: &str, text: impl Into<String>) -> Id {
+        let key = Id::new(id);
+        let open = self.menu_chain.first() == Some(&key);
+        self.push(
+            id,
+            Widget::MenuButton {
+                text: text.into(),
+                open,
+            },
+        )
+    }
+
+    /// 开 `anchor` 这个锚点的菜单。返回它**是不是开着**。
+    ///
+    /// 返回 `false` 时里面的项一个都不要声明——声明了再藏的话它们仍然
+    /// 参与命中，鼠标扫过关着的菜单所在的那片区域会莫名点不到底下的东西。
+    ///
+    /// 锚点可以是 [`menu_button`](Self::menu_button)，也可以是
+    /// [`submenu_item`](Self::submenu_item)——子菜单和顶层菜单在这里
+    /// 是同一件事，都是「某个东西旁边的那层浮层」。
+    pub fn begin_menu(&mut self, anchor: Id) -> bool {
+        let Some(depth) = self.menu_chain.iter().position(|open| *open == anchor) else {
+            return false;
+        };
+        if self.collapsed {
+            return false;
+        }
+        self.end_menu_frame();
+        self.open_menu_frame = Some(self.menu_frames.len());
+        self.menu_frames.push(MenuFrame {
+            anchor,
+            depth,
+            first: self.declared.len(),
+            last: usize::MAX,
+        });
+        true
+    }
+
+    /// 收一层菜单。
+    pub fn end_menu(&mut self) {
+        self.end_menu_frame();
+    }
+
+    fn end_menu_frame(&mut self) {
+        if let Some(index) = self.open_menu_frame.take() {
+            self.menu_frames[index].last = self.declared.len();
+        }
+    }
+
+    /// 菜单里的一项。
+    pub fn menu_item(&mut self, id: &str, text: impl Into<String>) -> Id {
+        self.menu_item_with(id, text, true)
+    }
+
+    /// 菜单里的一项，可以是禁用的。
+    ///
+    /// 禁用项**能被跳过但不能被停留**——高亮停在一个点不动的项上，
+    /// 用户会以为菜单卡住了。
+    pub fn menu_item_with(&mut self, id: &str, text: impl Into<String>, enabled: bool) -> Id {
+        self.push_menu_item(id, text.into(), enabled, false)
+    }
+
+    /// 菜单里一个会展开子菜单的项。
+    ///
+    /// 返回的 id 就是那层子菜单的锚点，接着用
+    /// [`begin_menu`](Self::begin_menu) 声明它的内容。
+    pub fn submenu_item(&mut self, id: &str, text: impl Into<String>) -> Id {
+        self.push_menu_item(id, text.into(), true, true)
+    }
+
+    fn push_menu_item(&mut self, id: &str, text: String, enabled: bool, submenu: bool) -> Id {
+        let key = Id::new(id);
+        // 高亮按这一层菜单记，所以要知道自己是这层的第几项。
+        //
+        // 数的是**菜单项**的个数，不是声明的个数：菜单里夹一个标题或
+        // 分隔用的标签是很自然的写法，而方向键那边数的也是菜单项——
+        // 两边的下标口径必须一致，否则夹一个标签就会高亮错行。
+        let highlighted = self
+            .open_menu_frame
+            .and_then(|index| self.menu_frames.get(index))
+            .and_then(|frame| {
+                let position = self.declared[frame.first..]
+                    .iter()
+                    .filter(|declared| matches!(declared.widget, Widget::MenuItem { .. }))
+                    .count();
+                self.menu_highlight
+                    .get(&frame.anchor)
+                    .map(|&highlight| highlight == position)
+            })
+            .unwrap_or(false);
+
+        self.push(
+            id,
+            Widget::MenuItem {
+                text,
+                enabled,
+                highlighted,
+                submenu,
+            },
+        );
+        key
+    }
+
+    /// 有菜单开着吗。
+    ///
+    /// 为真时方向键归菜单——滑条和单选组要让路，否则按一下方向键会
+    /// 既在菜单里移动高亮，又把底下那条滑条的值改了。
+    pub fn menus_open(&self) -> bool {
+        !self.menu_chain.is_empty()
+    }
+
+    /// 关掉所有菜单。
+    pub fn close_menus(&mut self) {
+        self.menu_chain.clear();
+    }
+
+    /// 菜单的开合、高亮、子菜单展开。
+    ///
+    /// 排在 `finish` 的交互判定之后：这里读的 `clicked` / `hovered`
+    /// 都是本帧刚算出来的。
+    pub(crate) fn update_menus(&mut self, input: &UiInput) {
+        self.toggle_menu_buttons();
+        if self.menu_chain.is_empty() {
+            // 关着的时候只剩一件事要做：别让上一次的高亮留到下次打开。
+            self.menu_highlight.clear();
+            return;
+        }
+        self.follow_hover();
+        self.handle_menu_keys(input);
+        self.close_on_outside_click(input);
+        self.close_on_item_click();
+    }
+
+    /// 点菜单按钮 = 开合它的菜单。
+    fn toggle_menu_buttons(&mut self) {
+        let clicked: Vec<Id> = self
+            .declared
+            .iter()
+            .filter(|d| matches!(d.widget, Widget::MenuButton { .. }))
+            .filter(|d| self.interaction.response(d.id).clicked)
+            .map(|d| d.id)
+            .collect();
+
+        for id in clicked {
+            // 点已经开着的那个 = 关掉。换一个按钮 = 整条链换过去，
+            // 不是叠一层——菜单栏里同时开两条菜单是没有意义的。
+            if self.menu_chain.first() == Some(&id) {
+                self.menu_chain.clear();
+            } else {
+                self.menu_chain.clear();
+                self.menu_chain.push(id);
+            }
+            self.menu_highlight.clear();
+        }
+    }
+
+    /// 鼠标扫到哪一项，高亮就跟到哪一项；扫到子菜单项就展开它。
+    fn follow_hover(&mut self) {
+        let Some(hovered) = self.interaction.hovered() else {
+            return;
+        };
+
+        for frame in self.menu_frames.clone() {
+            let items = self.menu_items(&frame);
+            let Some(index) = items.iter().position(|item| item.id == hovered) else {
+                continue;
+            };
+            let item = items[index];
+            if !item.enabled {
+                continue;
+            }
+
+            self.menu_highlight.insert(frame.anchor, index);
+            // 扫到别的项上，先把这一层底下已经展开的子菜单收掉——
+            // 不收的话鼠标从「打开▸」滑到「退出」，那层子菜单还挂在
+            // 屏幕上，挡着底下的东西。
+            self.menu_chain.truncate(frame.depth + 1);
+            if item.submenu {
+                self.menu_chain.push(item.id);
+            }
+            return;
+        }
+    }
+
+    /// 方向键、回车、Esc。只喂给**最深**的那一层。
+    fn handle_menu_keys(&mut self, input: &UiInput) {
+        let keys = menu_keys(input);
+        if keys.is_empty() {
+            return;
+        }
+
+        for key in keys {
+            let Some(&anchor) = self.menu_chain.last() else {
+                return;
+            };
+            let Some(frame) = self.menu_frames.iter().find(|f| f.anchor == anchor).copied() else {
+                return;
+            };
+            let items = self.menu_items(&frame);
+            let enabled: Vec<bool> = items.iter().map(|item| item.enabled).collect();
+            let current = self.menu_highlight.get(&anchor).copied();
+
+            match navigate(key, Layout::Column, &enabled, current) {
+                MenuAction::Highlight(index) => {
+                    self.menu_highlight.insert(anchor, index);
+                }
+                MenuAction::Activate(index) => {
+                    // 报告成「被点了一下」，这样调用方不必为键盘写
+                    // 第二条分支——和按钮的键盘激活是同一个道理。
+                    self.interaction.activate(items[index].id);
+                    self.menu_chain.clear();
+                    self.menu_highlight.clear();
+                    return;
+                }
+                MenuAction::Close => {
+                    self.menu_chain.clear();
+                    self.menu_highlight.clear();
+                    return;
+                }
+                MenuAction::OpenSubmenu(index) => {
+                    let item = items[index];
+                    if item.submenu {
+                        self.menu_chain.push(item.id);
+                    }
+                }
+                MenuAction::CloseSubmenu => {
+                    // 顶层收到左键时不该把整条链关掉——那是「退回上一级」，
+                    // 而顶层没有上一级。留着菜单开着，用户再按一下 Esc
+                    // 才是关。
+                    if self.menu_chain.len() > 1 {
+                        if let Some(closed) = self.menu_chain.pop() {
+                            self.menu_highlight.remove(&closed);
+                        }
+                    }
+                }
+                MenuAction::Ignored => {}
+            }
+        }
+    }
+
+    /// 点在所有菜单和菜单按钮之外 = 关掉。
+    fn close_on_outside_click(&mut self, input: &UiInput) {
+        if input.pressed.is_empty() {
+            return;
+        }
+        let Some(pointer) = input.pointer else {
+            return;
+        };
+
+        let in_panel = self.menu_rects.iter().any(|rect| rect.contains(pointer));
+        let on_button = self
+            .declared
+            .iter()
+            .zip(&self.rects)
+            .any(|(d, rect)| {
+                matches!(d.widget, Widget::MenuButton { .. }) && rect.contains(pointer)
+            });
+
+        if !in_panel && !on_button {
+            self.menu_chain.clear();
+            self.menu_highlight.clear();
+        }
+    }
+
+    /// 点中一个普通菜单项 = 执行它，然后关掉整条链。
+    ///
+    /// 子菜单项不算：点它是展开，不是执行。
+    fn close_on_item_click(&mut self) {
+        let hit = self.declared.iter().any(|d| {
+            matches!(
+                d.widget,
+                Widget::MenuItem {
+                    submenu: false,
+                    enabled: true,
+                    ..
+                }
+            ) && self.interaction.response(d.id).clicked
+        });
+        if hit {
+            self.menu_chain.clear();
+            self.menu_highlight.clear();
+        }
+    }
+
+    /// 一层菜单里的那些项。
+    fn menu_items(&self, frame: &MenuFrame) -> Vec<Item> {
+        let last = frame.last.min(self.declared.len());
+        if frame.first >= last {
+            return Vec::new();
+        }
+        self.declared[frame.first..last]
+            .iter()
+            .filter_map(|declared| match declared.widget {
+                Widget::MenuItem {
+                    enabled, submenu, ..
+                } => Some(Item {
+                    id: declared.id,
+                    enabled,
+                    submenu,
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// 一层菜单里的一项，摘出状态机要用的那几样。
+#[derive(Debug, Clone, Copy)]
+struct Item {
+    id: Id,
+    enabled: bool,
+    submenu: bool,
+}
+
+/// 把这一帧的输入翻译成菜单认识的键。
+///
+/// 回车和空格都归 [`MenuKey::Activate`]，理由见那里。
+fn menu_keys(input: &UiInput) -> Vec<MenuKey> {
+    let mut keys: Vec<MenuKey> = input
+        .nav
+        .iter()
+        .map(|key| match key {
+            NavKey::Up => MenuKey::Up,
+            NavKey::Down => MenuKey::Down,
+            NavKey::Left => MenuKey::Left,
+            NavKey::Right => MenuKey::Right,
+            NavKey::Home => MenuKey::Home,
+            NavKey::End => MenuKey::End,
+            NavKey::Escape => MenuKey::Escape,
+        })
+        .collect();
+    if input.activate {
+        keys.push(MenuKey::Activate);
+    }
+    keys
+}
+
+/// 装一层菜单的容器样式。
+///
+/// 绝对定位：菜单弹出来时不该把它下面的控件往下顶。位置留到求解之后
+/// 再平移——那时才知道锚点排在了哪里。
+pub(crate) fn container_style(theme: &Theme) -> Style {
+    Style {
+        direction: kui::Direction::Column,
+        align: kui::AlignCross::Stretch,
+        // 内边距跟着圆角走：圆角越大，四个角上空出来的地方越多，
+        // 内容贴太近会被切掉一块。
+        padding: kui::Edges::all(theme.radius * 0.5),
+        // 项与项之间不留缝，高亮条才连得成一片——各家菜单都是这样。
+        gap: 0.0,
+        absolute: true,
+        ..Default::default()
+    }
+}
+
+/// 一层菜单该摆在哪。
+///
+/// 顶层从锚点**下方**长出来（菜单按钮在上面），子菜单从**右侧**长出来。
+/// 放不下时先试相反的一侧——上下翻转比左右乱跳自然得多。
+pub(crate) fn place(anchor: Rect, size: Vec2, depth: usize, screen: Vec2) -> Rect {
+    let side = if depth == 0 { Side::Bottom } else { Side::Right };
+    let candidates = [
+        Placement::new(side, Align::Start),
+        Placement::new(side.mirror(), Align::Start),
+        Placement::new(side, Align::End),
+    ];
+    popover::place(anchor, size, &candidates, screen, SCREEN_MARGIN)
+}
+
+/// 量一个菜单按钮的内容。
+pub(crate) fn button_size(ui: &Ui, theme: &Theme, text: &str) -> Vec2 {
+    ui.measure(text, &text_style(theme.font_size), None).size
+}
+
+/// 量一个菜单项的内容。
+pub(crate) fn item_size(ui: &Ui, theme: &Theme, text: &str, submenu: bool) -> Vec2 {
+    let size = ui.measure(text, &text_style(theme.font_size), None).size;
+    // 有子菜单的项要给右边的箭头留位置，不然箭头会压在文字上。
+    Vec2::new(size.x + if submenu { ARROW_WIDTH } else { 0.0 }, size.y)
+}
+
+/// 菜单的底板。
+pub(crate) fn paint_backdrop(ui: &mut Ui, theme: &Theme, rect: Rect) {
+    ui.rounded_rect(rect, theme.radius, theme.panel);
+    ui.border(rect, theme.radius, 1.0, theme.outline);
+}
+
+/// 出几何：菜单按钮。
+pub(crate) fn paint_button(
+    ui: &mut Ui,
+    theme: &Theme,
+    rect: Rect,
+    response: &Response,
+    text: &str,
+    open: bool,
+) {
+    // 开着的时候一直是按下的样子，好让用户看出这条菜单是从哪儿来的。
+    let fill = if open || response.held {
+        theme.active
+    } else if response.hovered {
+        theme.hovered
+    } else {
+        theme.surface
+    };
+    ui.rounded_rect(rect, theme.radius, fill);
+    if response.focused {
+        ui.border(rect.shrink(-2.0), theme.radius + 2.0, 2.0, theme.focus);
+    }
+    ui.text_centered(
+        rect,
+        text,
+        &TextStyle {
+            size: theme.font_size,
+            ..Default::default()
+        },
+        theme.text,
+    );
+}
+
+/// 出几何：菜单项。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_item(
+    ui: &mut Ui,
+    theme: &Theme,
+    rect: Rect,
+    response: &Response,
+    text: &str,
+    enabled: bool,
+    highlighted: bool,
+    submenu: bool,
+) {
+    // 高亮是**键盘**走出来的，悬停是鼠标扫出来的，两者画成一样——
+    // 用户不该看得出自己刚才用的是键盘还是鼠标。
+    if enabled && (highlighted || response.hovered) {
+        ui.rounded_rect(rect, theme.radius * 0.5, theme.accent);
+    }
+
+    let color = if enabled { theme.text } else { theme.dim };
+    ui.text(
+        Vec2::new(rect.min.x, rect.center().y - theme.font_size * 0.6),
+        text,
+        &TextStyle {
+            size: theme.font_size,
+            ..Default::default()
+        },
+        color,
+        Some(rect.size().x),
+    );
+
+    if submenu {
+        paint_arrow(ui, rect, color);
+    }
+}
+
+/// 子菜单项右边那个小三角。
+fn paint_arrow(ui: &mut Ui, rect: Rect, color: Vec4) {
+    let size = 4.0;
+    let center = Vec2::new(rect.max.x - ARROW_WIDTH * 0.5, rect.center().y);
+    // 用几条横线堆出一个三角：这一层只有矩形和线段两种图元，
+    // 为一个 8 像素的箭头引进多边形填充不划算。
+    let steps = 4;
+    for step in 0..steps {
+        let half = size * (1.0 - step as f32 / steps as f32);
+        let x = center.x - size * 0.5 + step as f32;
+        ui.rect(
+            Rect {
+                min: Vec2::new(x, center.y - half),
+                max: Vec2::new(x + 1.0, center.y + half),
+            },
+            color,
+        );
     }
 }
 
@@ -445,5 +980,513 @@ mod tests {
             navigate(MenuKey::Down, Layout::Column, &enabled, Some(9)),
             MenuAction::Highlight(0),
         );
+    }
+}
+
+/// 菜单**控件**的测试。上面那一组测的是纯逻辑，这里测的是它接上
+/// 布局、命中、浮层摆位之后还对不对。
+#[cfg(test)]
+mod widget_tests {
+    use super::*;
+    use crate::WidgetUi;
+    use crate::testing::{at, press, ui};
+    use kui::PointerButton;
+
+    /// 一个菜单栏：两个菜单按钮，第一个的菜单里有三项，
+    /// 其中「最近打开」带子菜单、「保存」是禁用的。
+    fn declare(w: &mut WidgetUi) {
+        w.begin_row();
+        let file = w.menu_button("file", "文件");
+        let edit = w.menu_button("edit", "编辑");
+        w.end_row();
+
+        if w.begin_menu(file) {
+            w.menu_item("open", "打开");
+            let recent = w.submenu_item("recent", "最近打开");
+            w.menu_item_with("save", "保存", false);
+            w.end_menu();
+
+            if w.begin_menu(recent) {
+                w.menu_item("r0", "第一个");
+                w.menu_item("r1", "第二个");
+                w.end_menu();
+            }
+        }
+
+        if w.begin_menu(edit) {
+            w.menu_item("undo", "撤销");
+            w.end_menu();
+        }
+    }
+
+    fn frame(w: &mut WidgetUi, ui: &mut kui::Ui, input: &UiInput) {
+        w.begin();
+        declare(w);
+        w.finish(ui, input);
+    }
+
+    fn nav(key: NavKey) -> UiInput {
+        UiInput {
+            nav: vec![key],
+            ..Default::default()
+        }
+    }
+
+    fn activate() -> UiInput {
+        UiInput {
+            activate: true,
+            ..Default::default()
+        }
+    }
+
+    /// 在某处完成一次点击（按下、松开两帧）。
+    fn click(w: &mut WidgetUi, ui: &mut kui::Ui, point: Vec2) {
+        frame(w, ui, &press(point.x, point.y));
+        let mut release = at(point.x, point.y);
+        release.released.push(PointerButton::Primary);
+        frame(w, ui, &release);
+    }
+
+    /// 点菜单按钮打开菜单，再点一下关掉。
+    #[test]
+    fn clicking_the_button_opens_and_closes_the_menu() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        frame(&mut w, &mut ui, &UiInput::default());
+        assert!(!w.menus_open());
+
+        let button = w.response(Id::new("file")).rect.center();
+        click(&mut w, &mut ui, button);
+        assert!(w.menus_open(), "点菜单按钮该把菜单打开");
+
+        click(&mut w, &mut ui, button);
+        assert!(!w.menus_open(), "再点一下该关掉");
+    }
+
+    /// 菜单关着的时候，里面的项一个都不该存在。
+    ///
+    /// 声明了再藏的话它们仍然参与命中，鼠标扫过菜单**本该在**的那片
+    /// 区域会莫名点不到底下的东西。
+    #[test]
+    fn a_closed_menu_declares_nothing() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        frame(&mut w, &mut ui, &UiInput::default());
+
+        assert_eq!(
+            w.response(Id::new("open")).rect.size(),
+            Vec2::ZERO,
+            "菜单关着，项不该被排进布局"
+        );
+    }
+
+    /// 菜单弹出来不该把底下的控件往下顶。
+    ///
+    /// 这条是绝对定位那一层的意义所在：菜单如果占正常的布局位置，
+    /// 每次打开菜单，整个界面都会往下跳一截。
+    #[test]
+    fn opening_a_menu_does_not_move_the_widgets_below() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        let declare_all = |w: &mut WidgetUi| {
+            declare(w);
+            w.button("below", "底下的按钮");
+        };
+
+        w.begin();
+        declare_all(&mut w);
+        w.finish(&mut ui, &UiInput::default());
+        let before = w.response(Id::new("below")).rect;
+
+        // 打开菜单。
+        let button = w.response(Id::new("file")).rect.center();
+        for input in [&press(button.x, button.y), &{
+            let mut release = at(button.x, button.y);
+            release.released.push(PointerButton::Primary);
+            release
+        }] {
+            w.begin();
+            declare_all(&mut w);
+            w.finish(&mut ui, input);
+        }
+        assert!(w.menus_open());
+
+        w.begin();
+        declare_all(&mut w);
+        w.finish(&mut ui, &UiInput::default());
+        assert_eq!(
+            w.response(Id::new("below")).rect,
+            before,
+            "菜单把底下的按钮顶开了"
+        );
+    }
+
+    /// 菜单摆在按钮下面，而且不出屏。
+    #[test]
+    fn the_menu_sits_below_its_button_and_stays_on_screen() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        frame(&mut w, &mut ui, &UiInput::default());
+        let button = w.response(Id::new("file")).rect;
+        click(&mut w, &mut ui, button.center());
+        frame(&mut w, &mut ui, &UiInput::default());
+
+        let item = w.response(Id::new("open")).rect;
+        assert!(
+            item.min.y >= button.max.y - 1.0,
+            "菜单该在按钮下面：按钮 {button:?}，项 {item:?}"
+        );
+        assert!(
+            item.min.x >= 0.0 && item.max.x <= crate::testing::SCREEN.x,
+            "菜单跑出屏幕了：{item:?}"
+        );
+    }
+
+    /// 方向键移动高亮，回车激活。
+    #[test]
+    fn arrow_keys_highlight_and_enter_activates() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        frame(&mut w, &mut ui, &UiInput::default());
+        let button = w.response(Id::new("file")).rect.center();
+        click(&mut w, &mut ui, button);
+
+        // 下键落在第一项「打开」上。
+        frame(&mut w, &mut ui, &nav(NavKey::Down));
+        frame(&mut w, &mut ui, &activate());
+        assert!(w.response(Id::new("open")).clicked, "回车该激活高亮的那项");
+        assert!(!w.menus_open(), "激活之后整条菜单链该关掉");
+    }
+
+    /// 方向键跳过禁用项。
+    ///
+    /// 高亮停在一个点不动的项上，用户会以为菜单卡住了。
+    #[test]
+    fn arrow_keys_skip_a_disabled_item() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        frame(&mut w, &mut ui, &UiInput::default());
+        let button = w.response(Id::new("file")).rect.center();
+        click(&mut w, &mut ui, button);
+
+        // 三项：打开、最近打开、保存(禁用)。往上键 = 从末尾进，
+        // 该落在「最近打开」而不是禁用的「保存」。
+        frame(&mut w, &mut ui, &nav(NavKey::Up));
+        frame(&mut w, &mut ui, &activate());
+        assert!(
+            !w.response(Id::new("save")).clicked,
+            "高亮不该停在禁用项上"
+        );
+    }
+
+    /// Esc 关掉菜单。
+    #[test]
+    fn escape_closes_the_menu() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        frame(&mut w, &mut ui, &UiInput::default());
+        let button = w.response(Id::new("file")).rect.center();
+        click(&mut w, &mut ui, button);
+        assert!(w.menus_open());
+
+        frame(&mut w, &mut ui, &nav(NavKey::Escape));
+        assert!(!w.menus_open());
+    }
+
+    /// 点在菜单外面关掉菜单。
+    #[test]
+    fn clicking_outside_closes_the_menu() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        frame(&mut w, &mut ui, &UiInput::default());
+        let button = w.response(Id::new("file")).rect.center();
+        click(&mut w, &mut ui, button);
+        assert!(w.menus_open());
+
+        // 屏幕右下角，离菜单很远。
+        frame(&mut w, &mut ui, &press(700.0, 550.0));
+        assert!(!w.menus_open());
+    }
+
+    /// 右方向键展开子菜单，左方向键退回上一级。
+    #[test]
+    fn right_opens_a_submenu_and_left_goes_back() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        frame(&mut w, &mut ui, &UiInput::default());
+        let button = w.response(Id::new("file")).rect.center();
+        click(&mut w, &mut ui, button);
+
+        // 走到「最近打开」上：下、下。
+        frame(&mut w, &mut ui, &nav(NavKey::Down));
+        frame(&mut w, &mut ui, &nav(NavKey::Down));
+        frame(&mut w, &mut ui, &nav(NavKey::Right));
+        frame(&mut w, &mut ui, &UiInput::default());
+
+        assert!(
+            w.response(Id::new("r0")).rect.size() != Vec2::ZERO,
+            "子菜单没展开"
+        );
+
+        frame(&mut w, &mut ui, &nav(NavKey::Left));
+        frame(&mut w, &mut ui, &UiInput::default());
+        assert!(
+            w.response(Id::new("r0")).rect.size() == Vec2::ZERO,
+            "左键该收起子菜单"
+        );
+        assert!(w.menus_open(), "但父菜单该还开着");
+    }
+
+    /// 子菜单摆在父菜单**右边**，不是下面。
+    #[test]
+    fn a_submenu_opens_to_the_side_of_its_parent() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        frame(&mut w, &mut ui, &UiInput::default());
+        let button = w.response(Id::new("file")).rect.center();
+        click(&mut w, &mut ui, button);
+        frame(&mut w, &mut ui, &nav(NavKey::Down));
+        frame(&mut w, &mut ui, &nav(NavKey::Down));
+        frame(&mut w, &mut ui, &nav(NavKey::Right));
+        frame(&mut w, &mut ui, &UiInput::default());
+
+        let parent = w.response(Id::new("recent")).rect;
+        let child = w.response(Id::new("r0")).rect;
+        assert!(
+            child.min.x >= parent.max.x - 1.0,
+            "子菜单该在父项右边：父 {parent:?}，子 {child:?}"
+        );
+    }
+
+    /// 鼠标扫到子菜单项上就展开，扫到别的项上就收掉。
+    ///
+    /// 不收的话，鼠标从「最近打开▸」滑到「打开」，那层子菜单还挂在
+    /// 屏幕上挡着底下的东西。
+    #[test]
+    fn hovering_opens_and_closes_submenus() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        frame(&mut w, &mut ui, &UiInput::default());
+        let button = w.response(Id::new("file")).rect.center();
+        click(&mut w, &mut ui, button);
+        frame(&mut w, &mut ui, &UiInput::default());
+
+        let recent = w.response(Id::new("recent")).rect.center();
+        frame(&mut w, &mut ui, &at(recent.x, recent.y));
+        frame(&mut w, &mut ui, &at(recent.x, recent.y));
+        assert!(
+            w.response(Id::new("r0")).rect.size() != Vec2::ZERO,
+            "悬停该展开子菜单"
+        );
+
+        let open = w.response(Id::new("open")).rect.center();
+        frame(&mut w, &mut ui, &at(open.x, open.y));
+        frame(&mut w, &mut ui, &at(open.x, open.y));
+        assert!(
+            w.response(Id::new("r0")).rect.size() == Vec2::ZERO,
+            "扫到别的项上该把子菜单收掉"
+        );
+    }
+
+    /// 点另一个菜单按钮 = 换过去，不是叠一层。
+    #[test]
+    fn clicking_another_button_switches_menus() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        frame(&mut w, &mut ui, &UiInput::default());
+        let file = w.response(Id::new("file")).rect.center();
+        click(&mut w, &mut ui, file);
+        frame(&mut w, &mut ui, &UiInput::default());
+        assert!(w.response(Id::new("open")).rect.size() != Vec2::ZERO);
+
+        let edit = w.response(Id::new("edit")).rect.center();
+        click(&mut w, &mut ui, edit);
+        frame(&mut w, &mut ui, &UiInput::default());
+
+        assert!(
+            w.response(Id::new("undo")).rect.size() != Vec2::ZERO,
+            "第二条菜单该开着"
+        );
+        assert!(
+            w.response(Id::new("open")).rect.size() == Vec2::ZERO,
+            "第一条菜单该关掉，而不是两条一起开着"
+        );
+    }
+
+    /// 点中一个普通项，菜单关掉。
+    #[test]
+    fn clicking_an_item_runs_it_and_closes_the_menu() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        frame(&mut w, &mut ui, &UiInput::default());
+        let button = w.response(Id::new("file")).rect.center();
+        click(&mut w, &mut ui, button);
+        frame(&mut w, &mut ui, &UiInput::default());
+
+        let open = w.response(Id::new("open")).rect.center();
+        click(&mut w, &mut ui, open);
+
+        assert!(w.response(Id::new("open")).clicked);
+        assert!(!w.menus_open(), "点了一项之后菜单该关掉");
+    }
+
+    /// 点子菜单项是展开，不是执行——菜单不该跟着关掉。
+    #[test]
+    fn clicking_a_submenu_item_does_not_close_the_menu() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        frame(&mut w, &mut ui, &UiInput::default());
+        let button = w.response(Id::new("file")).rect.center();
+        click(&mut w, &mut ui, button);
+        frame(&mut w, &mut ui, &UiInput::default());
+
+        let recent = w.response(Id::new("recent")).rect.center();
+        click(&mut w, &mut ui, recent);
+        assert!(w.menus_open(), "点子菜单项不该把菜单关掉");
+    }
+
+    /// 菜单开着的时候，方向键不该同时把底下的滑条也调了。
+    #[test]
+    fn an_open_menu_takes_the_arrow_keys_from_a_slider() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let mut value = 50.0;
+        let spec = crate::Slider::new(0.0..=100.0);
+
+        let declare_all = |w: &mut WidgetUi, value: &mut f32, input: &UiInput| {
+            w.slider_with("s", value, spec, input);
+            declare(w);
+        };
+
+        // Tab 走到滑条上。
+        let tab = UiInput {
+            focus_step: 1,
+            ..Default::default()
+        };
+        w.begin();
+        declare_all(&mut w, &mut value, &tab);
+        w.finish(&mut ui, &tab);
+
+        // 打开菜单。
+        let button = w.response(Id::new("file")).rect.center();
+        for input in [&press(button.x, button.y), &{
+            let mut release = at(button.x, button.y);
+            release.released.push(PointerButton::Primary);
+            release
+        }] {
+            w.begin();
+            declare_all(&mut w, &mut value, input);
+            w.finish(&mut ui, input);
+        }
+        assert!(w.menus_open());
+
+        let before = value;
+        let down = nav(NavKey::Down);
+        w.begin();
+        declare_all(&mut w, &mut value, &down);
+        w.finish(&mut ui, &down);
+
+        assert_eq!(value, before, "菜单开着时方向键不该动滑条");
+    }
+
+    /// 菜单画得出东西来：底板加上各项。
+    #[test]
+    fn an_open_menu_draws_a_backdrop_and_its_items() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        // 每次都拿一块干净的画布来数，免得把上一帧的几何也算进去。
+        let count = |w: &mut WidgetUi| {
+            let mut probe = crate::testing::ui();
+            w.begin();
+            declare(w);
+            w.finish(&mut probe, &UiInput::default());
+            probe.end_frame();
+            probe.draw_list().indices().len()
+        };
+
+        frame(&mut w, &mut ui, &UiInput::default());
+        let closed = count(&mut w);
+
+        let button = w.response(Id::new("file")).rect.center();
+        click(&mut w, &mut ui, button);
+        let open = count(&mut w);
+
+        assert!(open > closed, "菜单开着该比关着画出更多东西");
+    }
+
+    /// 菜单里夹一个标签，高亮仍然落在对的项上。
+    ///
+    /// 高亮的下标和方向键那边的下标必须是同一个口径（都数**菜单项**）。
+    /// 一边数声明、一边数菜单项的话，夹一个标题就会高亮错行——
+    /// 而「给菜单加个分组标题」是再自然不过的写法。
+    #[test]
+    fn a_label_inside_a_menu_does_not_shift_the_highlight() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        let declare_labelled = |w: &mut WidgetUi| {
+            let file = w.menu_button("file", "文件");
+            if w.begin_menu(file) {
+                w.label("group", "最近");
+                w.menu_item("open", "打开");
+                w.menu_item("quit", "退出");
+                w.end_menu();
+            }
+        };
+
+        for input in [&UiInput::default(), &UiInput::default()] {
+            w.begin();
+            declare_labelled(&mut w);
+            w.finish(&mut ui, input);
+        }
+
+        let button = w.response(Id::new("file")).rect.center();
+        for input in [&press(button.x, button.y), &{
+            let mut release = at(button.x, button.y);
+            release.released.push(PointerButton::Primary);
+            release
+        }] {
+            w.begin();
+            declare_labelled(&mut w);
+            w.finish(&mut ui, input);
+        }
+
+        // 下键落在第一个**菜单项**上，也就是「打开」——标签不算一项。
+        for input in [&nav(NavKey::Down), &activate()] {
+            w.begin();
+            declare_labelled(&mut w);
+            w.finish(&mut ui, input);
+        }
+
+        assert!(
+            w.response(Id::new("open")).clicked,
+            "标签把高亮挤偏了一格"
+        );
+    }
+
+    /// 没有菜单开着时，一切照旧。
+    #[test]
+    fn a_ui_without_menus_is_unaffected() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        w.begin();
+        let a = w.button("a", "甲");
+        w.finish(&mut ui, &UiInput::default());
+        assert!(!w.menus_open());
+        assert!(w.response(a).rect.size() != Vec2::ZERO);
     }
 }

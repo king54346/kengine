@@ -345,7 +345,9 @@ impl WidgetUi {
         input: &UiInput,
         _vertical: bool,
     ) {
-        if self.interaction.focused() != Some(id) {
+        // 菜单开着时方向键归菜单。不让路的话在菜单里按方向键，
+        // 底下那条滑条的值会跟着一起变。
+        if self.menus_open() || self.interaction.focused() != Some(id) {
             return;
         }
         for key in &input.nav {

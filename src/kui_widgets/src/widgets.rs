@@ -263,7 +263,7 @@ pub struct WidgetUi {
     /// 本帧生效的滚动区（`begin` 时从 `open_scroll` 取过来）。
     pub(crate) scroll_frame: Option<ScrollFrame>,
     /// 各控件本帧的最终矩形（已经算上滚动偏移）。
-    rects: Vec<Rect>,
+    pub(crate) rects: Vec<Rect>,
     /// 每个文本框的编辑状态（光标、选区），跨帧。
     pub(crate) edits: std::collections::HashMap<Id, crate::TextEdit>,
     /// 每个滚动区的滚动位置，跨帧。
@@ -633,7 +633,12 @@ impl WidgetUi {
         //
         // 必须排在 `update` 之后（那里会重建结果表）、排在下面读 `clicked`
         // 的地方之前——否则用键盘展开折叠分组就不管用了。
-        if input.activate
+        //
+        // **菜单开着时整段让路**：那时焦点还停在打开菜单的那个按钮上，
+        // 走这条路的话回车会被当成「又点了一次菜单按钮」，于是菜单当场
+        // 关掉，而用户本来是要激活高亮的那一项。回车这时归菜单。
+        if !self.menus_open()
+            && input.activate
             && let Some(focused) = self.interaction.focused()
             && self
                 .declared
@@ -649,6 +654,10 @@ impl WidgetUi {
         // 的那一项会被冲掉；而列表要看得见上面那一步产生的 `clicked`——
         // Ctrl+空格在列表里是「加选当前行」，那一下正是从那里来的。
         self.navigate_groups(input);
+
+        // 菜单的开合与高亮。排在组之后：菜单开着的时候方向键归它，
+        // 而上一步已经按「有没有菜单开着」让过路了。
+        self.update_menus(input);
 
         // 折叠开关在这里翻转，不在 `folder()` 里——`folder()` 跑在声明期，
         // 那时本帧的点击还没判出来。在这里翻的话下一帧就是新状态，
@@ -675,6 +684,11 @@ impl WidgetUi {
     /// 单选组和列表在这里分道扬镳：前者方向键直接改选择，后者还要
     /// 看修饰键决定是换选、加选还是选一整段。
     fn navigate_groups(&mut self, input: &kui::UiInput) {
+        // 菜单开着时方向键归菜单。不让路的话按一下方向键会既在菜单里
+        // 移动高亮，又把底下那个单选组的选择换了。
+        if self.menus_open() {
+            return;
+        }
         // `groups` 和 `declared` 马上要被借着改，先把这一帧的项摘出来。
         let groups = self.groups.clone();
         for group in groups {
@@ -865,7 +879,7 @@ impl WidgetUi {
     /// 子容器——于是 `response` / `rects` 那套按下标索引的逻辑不用改，
     /// 而排版上多了一层。
     fn build_tree(&self, ui: &Ui) -> LayoutNode {
-        let children = self.build_range(ui, 0, self.declared.len());
+        let children = self.build_range(ui, 0, self.declared.len(), None);
         LayoutNode::new(Id::new("__ui_root"), self.root_style).with_children(children)
     }
 
@@ -874,19 +888,32 @@ impl WidgetUi {
     /// 递归：碰到浮层就把它整段收成一个**绝对定位**的子容器，再对它的
     /// 内部调用自己。递归而不是拉平，是为了让子菜单也能照同一条路走——
     /// 一层浮层和三层浮层在这里没有区别。
-    fn build_range(&self, ui: &Ui, from: usize, to: usize) -> Vec<LayoutNode> {
+    ///
+    /// `inside` 是**正在构建的那层浮层**，要从匹配里排掉——不排的话，
+    /// 递归进去之后会在同一个下标上再次认出它自己，无限套下去。
+    fn build_range(
+        &self,
+        ui: &Ui,
+        from: usize,
+        to: usize,
+        inside: Option<Id>,
+    ) -> Vec<LayoutNode> {
         let mut children: Vec<LayoutNode> = Vec::new();
         let mut index = from;
 
         while index < to {
             // 浮层：整段收进一个绝对定位的容器，不占外面的位置。
-            if let Some(frame) = self.menu_frame_at(index) {
-                let inner = self.build_range(ui, frame.first, frame.last.min(to));
+            if let Some(frame) = self
+                .menu_frame_at(index)
+                .filter(|frame| Some(frame.anchor) != inside)
+            {
+                let last = frame.last.min(to);
+                let inner = self.build_range(ui, frame.first, last, Some(frame.anchor));
                 children.push(
                     LayoutNode::new(frame.container(), crate::menu::container_style(&self.theme))
                         .with_children(inner),
                 );
-                index = frame.last.min(to);
+                index = last.max(index + 1);
                 continue;
             }
 
