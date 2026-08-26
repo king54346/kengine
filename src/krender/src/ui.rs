@@ -141,7 +141,7 @@ impl UiResources {
                             shader_location: 3,
                         },
                         wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
+                            format: wgpu::VertexFormat::Float32x4,
                             offset: 48,
                             shader_location: 4,
                         },
@@ -391,11 +391,13 @@ mod tests {
     fn the_attribute_offsets_match_the_vertex_struct() {
         // 偏移写错就是满屏乱码，而且不会有任何报错。
         assert_eq!(size_of::<[f32; 2]>(), 8);
-        assert_eq!(size_of::<UiVertex>(), 56);
+        assert_eq!(size_of::<UiVertex>(), 64);
         // 位置 0、UV 8、颜色 16、矩形 32、参数 48。
         assert_eq!(8 + 8, 16);
         assert_eq!(16 + 16, 32);
         assert_eq!(32 + 16, 48);
-        assert_eq!(48 + 8, 56);
+        // 参数从 vec2 变成 vec4 是为了腾出「模式」这一格：
+        // 线段和矩形共用一条管线，靠它区分。
+        assert_eq!(48 + 16, 64);
     }
 }

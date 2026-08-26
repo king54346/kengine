@@ -104,11 +104,23 @@ pub struct UiVertex {
     pub uv: [f32; 2],
     /// 线性 RGBA，直接乘在采样结果上。
     pub color: [f32; 4],
-    /// 所属矩形：`[中心 x, 中心 y, 半宽, 半高]`。圆角 SDF 用它。
+    /// 形状参数，含义随 `params[2]` 选的模式而变：
+    ///
+    /// - [`MODE_RECT`]：`[中心 x, 中心 y, 半宽, 半高]`
+    /// - [`MODE_SEGMENT`]：`[端点 a.x, a.y, 端点 b.x, b.y]`
     pub rect: [f32; 4],
-    /// `[圆角半径, 描边宽度]`。描边宽度为 0 表示实心。
-    pub params: [f32; 2],
+    /// `[圆角半径 / 半线宽, 描边宽度, 模式, 保留]`。
+    ///
+    /// 模式取 [`MODE_RECT`] 或 [`MODE_SEGMENT`]。矩形模式下描边宽度
+    /// 为 0 表示实心。
+    pub params: [f32; 4],
 }
+
+/// 圆角矩形模式：纯色、圆角、描边、文字、贴图都走这条。
+pub const MODE_RECT: f32 = 0.0;
+
+/// 线段模式：带圆头的线段，也就是胶囊。
+pub const MODE_SEGMENT: f32 = 1.0;
 
 /// 一批可以一次画完的图元。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -231,6 +243,46 @@ impl DrawList {
         self.quad(rect, radius, thickness, color, None, uv);
     }
 
+    /// 一条带圆头的线段。
+    ///
+    /// `thickness` 是**总**宽度，不是半宽——调用方想的是「画一条 2 像素
+    /// 粗的线」。
+    ///
+    /// 两端是圆头。方头需要在 SDF 里另开一个模式；勾和叉这类笔画用圆头
+    /// 更好看，转折处也不会露出缺口。
+    pub fn segment(&mut self, a: Vec2, b: Vec2, thickness: f32, color: Vec4) {
+        if thickness <= 0.0 {
+            return;
+        }
+        let half = thickness * 0.5;
+        // 覆盖胶囊的四边形。多放一像素给抗锯齿的过渡带，
+        // 不放的话线的边缘会被这个四边形自己切掉一条。
+        let pad = half + 1.0;
+        let bounds = Rect {
+            min: Vec2::new(a.x.min(b.x) - pad, a.y.min(b.y) - pad),
+            max: Vec2::new(a.x.max(b.x) + pad, a.y.max(b.y) + pad),
+        };
+        // 线段整块用白点的 uv：形状来自 SDF，不来自图集。
+        let uv = self.white_uv;
+        self.shape(
+            bounds,
+            [a.x, a.y, b.x, b.y],
+            [half, 0.0, MODE_SEGMENT, 0.0],
+            color,
+            uv,
+        );
+    }
+
+    /// 一条折线：把相邻的点两两连起来。
+    ///
+    /// 每段都是独立的圆头线段。转折处靠圆头自然接上——用方头的话
+    /// 拐角会裂开一个楔形缺口。
+    pub fn polyline(&mut self, points: &[Vec2], thickness: f32, color: Vec4) {
+        for pair in points.windows(2) {
+            self.segment(pair[0], pair[1], thickness, color);
+        }
+    }
+
     /// 贴一张图。`uv` 是 `[[u0, v0], [u1, v1]]`。
     ///
     /// 会另起一批：换纹理必须断批。
@@ -318,7 +370,10 @@ impl DrawList {
         // 圆角半径超过半尺寸就成了胶囊，再大就该退化成圆。夹一下，
         // 不夹的话 SDF 会给出负的内圆半径，边缘出现一圈亮线。
         let radius = radius.min(half.x).min(half.y).max(0.0);
-        let shared = ([center.x, center.y, half.x, half.y], [radius, border]);
+        let shared = (
+            [center.x, center.y, half.x, half.y],
+            [radius, border, MODE_RECT, 0.0],
+        );
 
         let base = self.vertices.len() as u32;
         let color = color.to_array();
@@ -334,6 +389,39 @@ impl DrawList {
                 color,
                 rect: shared.0,
                 params: shared.1,
+            });
+        }
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    /// 铺一个四边形，形状交给片元着色器的 SDF 去切。
+    ///
+    /// 和 [`quad`](Self::quad) 的区别是 `rect` 和 `params` 由调用方直接给，
+    /// 不假设它们是「中心 + 半尺寸」。
+    fn shape(&mut self, bounds: Rect, rect: [f32; 4], params: [f32; 4], color: Vec4, uv: [f32; 2]) {
+        if bounds.is_empty() || bounds.intersect(&self.clip()).is_empty() {
+            return;
+        }
+        if self.texture.is_some() {
+            self.flush();
+            self.texture = None;
+        }
+
+        let base = self.vertices.len() as u32;
+        let color = color.to_array();
+        for corner in [
+            bounds.min,
+            Vec2::new(bounds.max.x, bounds.min.y),
+            bounds.max,
+            Vec2::new(bounds.min.x, bounds.max.y),
+        ] {
+            self.vertices.push(UiVertex {
+                position: corner.to_array(),
+                uv,
+                color,
+                rect,
+                params,
             });
         }
         self.indices
@@ -552,7 +640,7 @@ mod tests {
 
         for v in list.vertices() {
             assert_eq!(v.rect, [60.0, 40.0, 50.0, 20.0]);
-            assert_eq!(v.params, [6.0, 0.0]);
+            assert_eq!(v.params, [6.0, 0.0, MODE_RECT, 0.0]);
         }
     }
 
@@ -614,8 +702,146 @@ mod tests {
             })
             .collect();
         assert_eq!(locations, vec![0, 1, 2, 3, 4]);
-        // 2 + 2 + 4 + 4 + 2 个 f32。
-        assert_eq!(size_of::<UiVertex>(), 14 * 4);
+
+        // 顶点结构的大小从**着色器声明的类型**推出来，不写死。
+        //
+        // 写死的话，改了 wgsl 里的 vec2 → vec4 而忘了改结构体时，这里
+        // 只会因为那个魔数不对而失败，看不出到底哪个位置对不上；更糟的
+        // 是有人顺手把魔数改成新值，测试就白留了。
+        let floats: u32 = vs
+            .function
+            .arguments
+            .iter()
+            .filter(|a| matches!(a.binding, Some(naga::Binding::Location { .. })))
+            .map(|a| match module.types[a.ty].inner {
+                naga::TypeInner::Scalar(naga::Scalar { width: 4, .. }) => 1,
+                naga::TypeInner::Vector {
+                    size,
+                    scalar: naga::Scalar { width: 4, .. },
+                } => size as u32,
+                ref other => panic!("顶点属性用了意料之外的类型：{other:?}"),
+            })
+            .sum();
+        assert_eq!(size_of::<UiVertex>(), floats as usize * 4);
+    }
+
+    /// 着色器要能通过完整校验，不只是能解析。
+    ///
+    /// 只解析的话，类型错误（比如把 vec4 当 vec2 用）照样过，
+    /// 一直到真机上建管线才炸——而那是这里测不到的地方。
+    #[test]
+    fn the_shader_validates() {
+        let module = naga::front::wgsl::parse_str(crate::UI_WGSL).expect("着色器应当能解析");
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        );
+        if let Err(error) = validator.validate(&module) {
+            panic!("着色器没通过校验：{error:?}");
+        }
+    }
+
+    /// 线段铺的四边形要把整条胶囊盖住，还要多留出抗锯齿的过渡带。
+    /// 盖不住的话线的边缘会被这个四边形自己切掉一条。
+    #[test]
+    fn a_segment_quad_covers_the_whole_capsule() {
+        let mut list = DrawList::default();
+        list.begin(Vec2::new(100.0, 100.0), [0.0, 0.0]);
+        let (a, b, thickness) = (Vec2::new(20.0, 30.0), Vec2::new(60.0, 70.0), 8.0);
+        list.segment(a, b, thickness, Vec4::ONE);
+        list.end();
+
+        let xs: Vec<f32> = list.vertices().iter().map(|v| v.position[0]).collect();
+        let ys: Vec<f32> = list.vertices().iter().map(|v| v.position[1]).collect();
+        let half = thickness * 0.5;
+        assert!(xs.iter().cloned().fold(f32::MAX, f32::min) <= a.x - half);
+        assert!(ys.iter().cloned().fold(f32::MAX, f32::min) <= a.y - half);
+        assert!(xs.iter().cloned().fold(f32::MIN, f32::max) >= b.x + half);
+        assert!(ys.iter().cloned().fold(f32::MIN, f32::max) >= b.y + half);
+    }
+
+    /// 线段把端点原样交给着色器，不换算成中心和半尺寸——
+    /// 换算了的话 SDF 就不知道线往哪个方向走了。
+    #[test]
+    fn a_segment_passes_its_endpoints_through() {
+        let mut list = DrawList::default();
+        list.begin(Vec2::new(100.0, 100.0), [0.0, 0.0]);
+        list.segment(Vec2::new(10.0, 20.0), Vec2::new(30.0, 40.0), 4.0, Vec4::ONE);
+        list.end();
+
+        for v in list.vertices() {
+            assert_eq!(v.rect, [10.0, 20.0, 30.0, 40.0]);
+            // 半线宽，不是总宽。
+            assert_eq!(v.params, [2.0, 0.0, MODE_SEGMENT, 0.0]);
+        }
+    }
+
+    /// 折线画出 n-1 段。少一段的话勾就缺一笔。
+    #[test]
+    fn a_polyline_draws_one_segment_between_each_pair() {
+        let mut list = DrawList::default();
+        list.begin(Vec2::new(100.0, 100.0), [0.0, 0.0]);
+        list.polyline(
+            &[
+                Vec2::new(10.0, 10.0),
+                Vec2::new(20.0, 20.0),
+                Vec2::new(30.0, 10.0),
+            ],
+            2.0,
+            Vec4::ONE,
+        );
+        list.end();
+        // 每段一个四边形 = 4 个顶点。
+        assert_eq!(list.vertices().len(), 2 * 4);
+    }
+
+    /// 少于两个点的折线什么都不画，且不该 panic——
+    /// `windows(2)` 在长度不足时给出空迭代器。
+    #[test]
+    fn a_degenerate_polyline_draws_nothing() {
+        let mut list = DrawList::default();
+        list.begin(Vec2::new(100.0, 100.0), [0.0, 0.0]);
+        list.polyline(&[], 2.0, Vec4::ONE);
+        list.polyline(&[Vec2::ZERO], 2.0, Vec4::ONE);
+        list.end();
+        assert!(list.is_empty());
+    }
+
+    /// 线宽为零或负的线段不画。负数会让 SDF 得到负的半径，
+    /// 整个四边形会被填满。
+    #[test]
+    fn a_zero_width_segment_draws_nothing() {
+        let mut list = DrawList::default();
+        list.begin(Vec2::new(100.0, 100.0), [0.0, 0.0]);
+        list.segment(Vec2::ZERO, Vec2::new(10.0, 10.0), 0.0, Vec4::ONE);
+        list.segment(Vec2::ZERO, Vec2::new(10.0, 10.0), -3.0, Vec4::ONE);
+        list.end();
+        assert!(list.is_empty());
+    }
+
+    /// 完全在裁剪框外的线段连顶点都不生成。
+    #[test]
+    fn a_clipped_out_segment_generates_no_vertices() {
+        let mut list = DrawList::default();
+        list.begin(Vec2::new(100.0, 100.0), [0.0, 0.0]);
+        list.push_clip(Rect::new(0.0, 0.0, 10.0, 10.0));
+        list.segment(Vec2::new(50.0, 50.0), Vec2::new(90.0, 90.0), 2.0, Vec4::ONE);
+        list.pop_clip();
+        list.end();
+        assert!(list.is_empty());
+    }
+
+    /// 线段和矩形共用一批：都用白点的 uv，不换纹理。
+    /// 换了的话每画一条线就断一次批。
+    #[test]
+    fn segments_and_rects_share_one_batch() {
+        let mut list = DrawList::default();
+        list.begin(Vec2::new(100.0, 100.0), [0.0, 0.0]);
+        list.rounded_rect(Rect::new(0.0, 0.0, 50.0, 50.0), 4.0, Vec4::ONE);
+        list.segment(Vec2::new(5.0, 5.0), Vec2::new(45.0, 45.0), 3.0, Vec4::ONE);
+        list.rect(Rect::new(0.0, 0.0, 10.0, 10.0), Vec4::ONE);
+        list.end();
+        assert_eq!(list.batches().len(), 1);
     }
 
     #[test]

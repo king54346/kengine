@@ -116,6 +116,16 @@ impl Ui {
         self.list.border(rect, radius, thickness, color);
     }
 
+    /// 带圆头的线段。`thickness` 是总宽度。
+    pub fn segment(&mut self, a: Vec2, b: Vec2, thickness: f32, color: Vec4) {
+        self.list.segment(a, b, thickness, color);
+    }
+
+    /// 折线：相邻的点两两连起来。勾、叉这类笔画走这条。
+    pub fn polyline(&mut self, points: &[Vec2], thickness: f32, color: Vec4) {
+        self.list.polyline(points, thickness, color);
+    }
+
     /// 压一层裁剪。
     pub fn push_clip(&mut self, rect: Rect) {
         self.list.push_clip(rect);

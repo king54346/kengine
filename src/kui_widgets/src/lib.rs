@@ -1,5 +1,19 @@
-//! kui_widgets —— 现成的界面控件：按钮、复选框、滑条、文本框、
-//! 滚动区、可折叠分组。
+//! kui_widgets —— 现成的界面控件：按钮、复选框、单选按钮、滑条、
+//! 文本框、列表、滚动区/滚动条、可折叠分组、遮罩、对话框、菜单。
+//!
+//! # 画的和算的分开
+//!
+//! 控件分两类。一类**出几何**，走 [`WidgetUi`]：按钮、滑条、列表行
+//! 这些看得见的东西。另一类只**算位置和状态**，是独立的纯函数模块：
+//!
+//! | 模块 | 算什么 | 为什么单拎出来 |
+//! |---|---|---|
+//! | [`popover`] | 浮层摆在哪 | 屏幕边上要翻到另一侧，纯几何 |
+//! | [`menu`] | 方向键跳到哪一项 | 禁用项、绕回，纯逻辑 |
+//! | [`dialog`] | 拖动后夹到哪 | 拖出屏幕要留一截抓得住 |
+//!
+//! 这么分是因为后一类最容易出错，而它们又完全不需要窗口、字体、GPU——
+//! 拎出来之后每条规则都能直接写成测试。
 //!
 //! # 为什么和 `kui` 分开
 //!
@@ -38,20 +52,33 @@
 
 #![warn(missing_docs)]
 
-/// 对话框的位置：拖动、夹进屏幕、居中。
+pub mod button;
+pub mod checkbox;
 pub mod dialog;
-/// 菜单的键盘导航：方向键跳到哪一项。
+pub mod folder;
+pub mod label;
+pub mod list;
 pub mod menu;
-/// 浮层定位：下拉框、菜单、提示气泡的摆放。
+pub mod modal;
+pub mod panel;
 pub mod popover;
+pub mod radio;
+pub mod scrollarea;
+pub mod scrollbar;
+pub mod slider;
 pub mod text_edit;
+pub mod text_input;
 pub mod widgets;
 
+pub use menu::{Layout as MenuLayout, MenuAction, MenuKey};
+pub use popover::{Align, Placement, Side};
 pub use text_edit::TextEdit;
 pub use widgets::{Theme, WidgetUi};
 
 /// 常用类型的集中导出。
 pub mod prelude {
-    pub use crate::{TextEdit, Theme, WidgetUi};
+    pub use crate::{
+        Align, MenuAction, MenuKey, MenuLayout, Placement, Side, TextEdit, Theme, WidgetUi,
+    };
     pub use kui::{AlignCross, Direction, Edges, Id, Justify, Length, Response, Style, UiInput};
 }

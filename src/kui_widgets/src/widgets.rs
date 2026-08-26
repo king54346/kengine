@@ -24,11 +24,14 @@ use kmath::{Vec2, Vec4};
 use kui::{AlignCross, Direction, Edges, Id, Justify, LayoutNode, Length, Style};
 use kui::{Rect, Response, Ui};
 
-/// 滚动条的厚度。
-const SCROLLBAR_THICKNESS: f32 = 10.0;
+/// 文字样式。各控件量尺寸、出几何都用它，省得每处重写一遍。
+pub(crate) fn text_style(size: f32) -> TextStyle {
+    TextStyle {
+        size,
+        ..Default::default()
+    }
+}
 
-/// 滑块的最短长度。内容极长时滑块会算得很短，短到抓不住。
-const SCROLLBAR_MIN_THUMB: f32 = 24.0;
 
 /// 控件的配色与尺寸。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -87,7 +90,7 @@ impl Default for Theme {
 
 /// 一个控件：声明期贡献布局节点，绘制期出几何。
 #[derive(Debug, Clone)]
-enum Widget {
+pub(crate) enum Widget {
     /// 纯容器，只画底色。
     Panel { color: Vec4, radius: f32 },
     /// 一段文字。
@@ -125,20 +128,20 @@ enum Widget {
 
 /// 一个已经声明、等待求解的控件。
 #[derive(Debug, Clone)]
-struct Declared {
-    id: Id,
-    widget: Widget,
+pub(crate) struct Declared {
+    pub(crate) id: Id,
+    pub(crate) widget: Widget,
     /// 这个控件属于哪一行。[`None`] 表示直接挂在根上。
     ///
     /// 行是**扁平表示**的：声明列表仍然是一条线，行号只是个分组标记，
     /// 建树时把连号的合成一个子容器。这样 `response` / `rects` 那套
     /// 按下标索引的逻辑一个字都不用改。
-    row: Option<usize>,
+    pub(crate) row: Option<usize>,
     /// 在行内是否占据剩余空间。
     ///
     /// lil-gui 那种「标签在左、控件在右」的行，靠的就是让标签把剩下的
     /// 空间全占了，把控件挤到右边。
-    grow: bool,
+    pub(crate) grow: bool,
 }
 
 /// 在 [`Ui`] 之上叠一层控件能力。
@@ -165,40 +168,40 @@ pub struct WidgetUi {
     /// 配色。
     pub theme: Theme,
     /// 本帧声明的控件，按声明顺序。
-    declared: Vec<Declared>,
+    pub(crate) declared: Vec<Declared>,
     /// 根容器的样式。**跨帧保留**，`begin` 不会清它。
     root_style: Style,
     /// 交互状态，跨帧。
-    interaction: kui::Interaction,
+    pub(crate) interaction: kui::Interaction,
     /// 上一次求解的结果。
     solved: kui::Solved,
     /// 当前打开的行号；[`None`] 表示不在行里。
-    open_row: Option<usize>,
+    pub(crate) open_row: Option<usize>,
     /// 本帧已经开过几行，用来发行号。
     rows: usize,
     /// 当前行还没有控件——下一个进来的要占满剩余宽度。
-    row_first: bool,
+    pub(crate) row_first: bool,
     /// 本帧生效的滚动区（`begin` 时从 `open_scroll` 取过来）。
-    scroll_frame: Option<ScrollFrame>,
+    pub(crate) scroll_frame: Option<ScrollFrame>,
     /// 各控件本帧的最终矩形（已经算上滚动偏移）。
     rects: Vec<Rect>,
     /// 每个文本框的编辑状态（光标、选区），跨帧。
-    edits: std::collections::HashMap<Id, crate::TextEdit>,
+    pub(crate) edits: std::collections::HashMap<Id, crate::TextEdit>,
     /// 每个滚动区的滚动位置，跨帧。
-    scroll: std::collections::HashMap<Id, f32>,
+    pub(crate) scroll: std::collections::HashMap<Id, f32>,
     /// 每个折叠分组开着还是收着，跨帧。
     ///
     /// 状态放在这里而不是让调用方保管：折叠纯粹是**外观**，和游戏逻辑
     /// 无关。让调用方为每个分组存一个 bool，只会让每个面板都多出一堆
     /// 和业务无关的字段。
-    folders: std::collections::HashMap<Id, bool>,
+    pub(crate) folders: std::collections::HashMap<Id, bool>,
     /// 上一次 `finish` 时的窗口尺寸。滚动区靠它夹住自己，不越界。
     screen: Vec2,
     /// 当前折叠分组收着——接下来声明的控件直接丢弃。
     ///
     /// 丢弃而不是「声明了但不画」：不画的话它们仍然占布局空间，
     /// 收起来的分组会留下一大片空白。
-    collapsed: bool,
+    pub(crate) collapsed: bool,
 }
 
 /// 本帧的滚动区。
@@ -206,14 +209,14 @@ pub struct WidgetUi {
 /// 只支持一个：嵌套滚动区的手感本来就很差（滚轮该滚哪个？），
 /// 实现还要一整套事件冒泡。不做，也不假装做了。
 #[derive(Debug, Clone, Copy)]
-struct ScrollFrame {
-    id: Id,
+pub(crate) struct ScrollFrame {
+    pub(crate) id: Id,
     /// 视口高度。
-    height: f32,
+    pub(crate) height: f32,
     /// 这个滚动区是从第几个声明开始的。
-    first: usize,
+    pub(crate) first: usize,
     /// 到第几个为止（不含）。`end_scroll` 之前是 `usize::MAX`。
-    last: usize,
+    pub(crate) last: usize,
 }
 
 impl Default for WidgetUi {
@@ -290,243 +293,9 @@ impl WidgetUi {
 
     // ───────────────────────── 声明 ─────────────────────────
 
-    /// 一段文字。
-    pub fn label(&mut self, id: &str, text: impl Into<String>) -> Id {
-        let color = self.theme.text;
-        let size = self.theme.font_size;
-        self.push(
-            id,
-            Widget::Label {
-                text: text.into(),
-                color,
-                size,
-            },
-        )
-    }
-
-    /// 一段次要文字。
-    pub fn dim_label(&mut self, id: &str, text: impl Into<String>) -> Id {
-        let color = self.theme.dim;
-        let size = self.theme.font_size;
-        self.push(
-            id,
-            Widget::Label {
-                text: text.into(),
-                color,
-                size,
-            },
-        )
-    }
-
-    /// 一个按钮。返回它的 id，用 [`response`](Self::response) 查是否被点。
-    pub fn button(&mut self, id: &str, text: impl Into<String>) -> Id {
-        self.push(id, Widget::Button { text: text.into() })
-    }
-
-    /// 一个复选框。`checked` 是当前状态，由调用方保存。
-    ///
-    /// 不在控件里存状态：状态存在这里的话，同一个 id 在两个地方用就会
-    /// 互相覆盖，而且调用方没法直接读写它。
-    pub fn checkbox(&mut self, id: &str, text: impl Into<String>, checked: bool) -> Id {
-        self.push(
-            id,
-            Widget::Checkbox {
-                text: text.into(),
-                checked,
-            },
-        )
-    }
-
-    /// 一个单选按钮。
-    ///
-    /// 和 [`checkbox`](Self::checkbox) 一样，选中状态由调用方保管——
-    /// 一组单选按钮的「选中项」天然是**一个**值，存在每个按钮里反而
-    /// 要维护「只有一个为真」这条不变量。
-    ///
-    /// ```ignore
-    /// for (index, name) in ["低", "中", "高"].iter().enumerate() {
-    ///     let r = w.radio(&format!("q{index}"), *name, self.quality == index);
-    ///     if w.response(r).clicked {
-    ///         self.quality = index;
-    ///     }
-    /// }
-    /// ```
-    ///
-    /// 注意**没有**「取消选中」——点已经选中的那个不会把它取消。
-    /// 这是单选组和复选框的根本区别：一组里必须有一个是选中的。
-    pub fn radio(&mut self, id: &str, text: impl Into<String>, selected: bool) -> Id {
-        self.push(
-            id,
-            Widget::Radio {
-                text: text.into(),
-                selected,
-            },
-        )
-    }
-
-    /// 列表里的一行。
-    ///
-    /// 选中项同样由调用方保管。多选时就存一个集合——控件这一层
-    /// 不需要知道是单选还是多选。
-    pub fn list_item(&mut self, id: &str, text: impl Into<String>, selected: bool) -> Id {
-        self.push(
-            id,
-            Widget::ListItem {
-                text: text.into(),
-                selected,
-            },
-        )
-    }
-
-    /// 一层模态遮罩：铺满整屏、压暗背景、吃掉所有点击。
-    ///
-    /// **必须最先声明**——它靠「后声明的画在上面」来盖住背景，而命中
-    /// 测试是从后往前找的，所以它自然会把点击让给之后声明的对话框。
-    ///
-    /// 返回的 id 上 `clicked` 为真表示点在了遮罩上（也就是对话框外面），
-    /// 通常用来关闭对话框。
-    pub fn modal(&mut self, id: &str) -> Id {
-        let color = self.theme.modal;
-        self.push(id, Widget::Modal { color })
-    }
-
-    /// 对话框的标题栏：一条可拖动的横条。
-    ///
-    /// 位置由调用方保管：
-    ///
-    /// ```ignore
-    /// let title = w.dialog_title("t", "设置");
-    /// self.dialog_position += w.response(title).drag;
-    /// ```
-    ///
-    /// 拖动增量而不是绝对位置——绝对位置要求控件知道自己「本该」在哪，
-    /// 而那正是调用方在管的事。
-    pub fn dialog_title(&mut self, id: &str, text: impl Into<String>) -> Id {
-        self.push(id, Widget::DialogTitle { text: text.into() })
-    }
-
-    /// 一根滚动条。
-    ///
-    /// `fraction` 是可见部分占全部内容的比例（滑块多长），
-    /// `offset` 是已经滚过的比例（滑块在哪）。两者都是 0..=1。
-    ///
-    /// 滚轮由 [`begin_scroll`](Self::begin_scroll) 处理；这根条是给
-    /// **鼠标拖动**用的，也让「内容还有多少没看到」变得可见。
-    pub fn scrollbar(&mut self, id: &str, fraction: f32, offset: f32) -> Id {
-        self.push(
-            id,
-            Widget::Scrollbar {
-                fraction: fraction.clamp(0.0, 1.0),
-                offset: offset.clamp(0.0, 1.0),
-            },
-        )
-    }
-
-    /// 一个滑条。`value` 是 0..=1。
-    ///
-    /// 拖动的结果要调用方自己算：
-    /// `new = old + response(id).drag.x / response(id).rect.size().x`。
-    /// 这么设计是因为控件不存状态（见 [`checkbox`](Self::checkbox)）。
-    pub fn slider(&mut self, id: &str, value: f32) -> Id {
-        self.push(
-            id,
-            Widget::Slider {
-                value: value.clamp(0.0, 1.0),
-            },
-        )
-    }
-
-    /// 一个文本框。
-    ///
-    /// **直接改传进来的 `text`**：编辑动作在声明期就应用了，不像别的控件
-    /// 那样滞后一帧——打字滞后一帧会让人以为按键丢了。
-    ///
-    /// 只在这个文本框**有焦点**时才处理输入。
-    pub fn text_input(
-        &mut self,
-        id: &str,
-        text: &mut String,
-        placeholder: impl Into<String>,
-        input: &kui::UiInput,
-    ) -> Id {
-        let id = Id::new(id);
-        let focused = self.interaction.focused() == Some(id);
-
-        let edit = self.edits.entry(id).or_default();
-        // 文本可能被外部改过（读档、重置）。不夹的话光标停在旧位置，
-        // 下一次切片直接 panic。
-        edit.clamp(text);
-
-        if focused {
-            for action in &input.edits {
-                apply_edit(edit, text, *action);
-            }
-            if !input.text.is_empty() {
-                edit.insert(text, &input.text);
-            }
-        }
-
-        let snapshot = text.clone();
-        let row = self.open_row;
-        let grow = row.is_some() && self.row_first;
-        if row.is_some() {
-            self.row_first = false;
-        }
-        self.declared.push(Declared {
-            id,
-            widget: Widget::TextInput {
-                text: snapshot,
-                placeholder: placeholder.into(),
-            },
-            row,
-            grow,
-        });
-        id
-    }
-
-    /// 一个文本框的光标与选区。
-    pub fn text_state(&self, id: Id) -> crate::TextEdit {
-        self.edits.get(&id).copied().unwrap_or_default()
-    }
-
     // ───────────────────────── 滚动区 ─────────────────────────
 
-    /// 开一个滚动区。之后声明的控件都进这个区，直到 [`end_scroll`](Self::end_scroll)。
-    ///
-    /// `height` 是视口高度；内容比它高时可以滚。
-    pub fn begin_scroll(&mut self, id: &str, height: f32) -> Id {
-        let id = Id::new(id);
-        self.scroll_frame = Some(ScrollFrame {
-            id,
-            height,
-            first: self.declared.len(),
-            last: usize::MAX,
-        });
-        id
-    }
-
-    /// 收一个滚动区。
-    ///
-    /// 滚轮由 [`finish`](Self::finish) 统一处理——那时才知道内容有多高。
-    pub fn end_scroll(&mut self) {
-        if let Some(frame) = self.scroll_frame.as_mut() {
-            frame.last = self.declared.len();
-        }
-    }
-
-    /// 一个滚动区当前滚到哪了（像素，向下为正）。
-    pub fn scroll_offset(&self, id: Id) -> f32 {
-        self.scroll.get(&id).copied().unwrap_or(0.0)
-    }
-
-    /// 一块面板底色。通常作为根容器的背景。
-    pub fn panel(&mut self, id: &str) -> Id {
-        let color = self.theme.panel;
-        let radius = self.theme.radius + 4.0;
-        self.push(id, Widget::Panel { color, radius })
-    }
-
-    fn push(&mut self, id: &str, widget: Widget) -> Id {
+    pub(crate) fn push(&mut self, id: &str, widget: Widget) -> Id {
         let id = Id::new(id);
         // 收起来的分组里的控件直接不声明。声明了再藏的话它们仍然占
         // 布局空间，收起来的分组会留下一大片空白。
@@ -546,63 +315,6 @@ impl WidgetUi {
             grow,
         });
         id
-    }
-
-    /// 开一个可折叠分组，返回标题条的 id。
-    ///
-    /// 点标题条切换展开 / 收起。收起时**里面的控件根本不会被声明**——
-    /// 不占布局、不参与交互、不出几何。
-    ///
-    /// ```no_run
-    /// # let mut w = kui_widgets::WidgetUi::default();
-    /// w.begin();
-    /// if w.folder("visibility", "Visibility") {
-    ///     w.checkbox("a", "show model", true);
-    /// }
-    /// w.end_folder();
-    /// ```
-    ///
-    /// 返回值是「现在开着吗」，方便用 `if` 把内容包起来——虽然收起时
-    /// 声明了也会被丢弃，但用 `if` 能顺带省掉构造那些字符串的开销。
-    ///
-    /// 不支持嵌套：嵌套折叠的缩进规则和点击热区很快就说不清了，
-    /// 而 HUD 与调试面板用不到。
-    pub fn folder(&mut self, id: &str, text: impl Into<String>) -> bool {
-        let key = Id::new(id);
-        // 默认展开：一个所有分组都收着的面板，第一眼看不出能点开。
-        let open = *self.folders.entry(key).or_insert(true);
-
-        // 标题条本身不受折叠影响——它是那个开关。
-        let was_collapsed = self.collapsed;
-        self.collapsed = false;
-        let text = text.into();
-        self.declared.push(Declared {
-            id: key,
-            widget: Widget::Folder { text, open },
-            row: None,
-            grow: false,
-        });
-        self.collapsed = was_collapsed;
-
-        // 上一层已经收起来时，里面的分组一律当收起处理。
-        let effective = open && !was_collapsed;
-        self.collapsed = !effective;
-        effective
-    }
-
-    /// 收一个折叠分组。
-    pub fn end_folder(&mut self) {
-        self.collapsed = false;
-    }
-
-    /// 一个折叠分组现在开着吗。
-    pub fn folder_open(&self, id: Id) -> bool {
-        self.folders.get(&id).copied().unwrap_or(true)
-    }
-
-    /// 直接设置某个折叠分组的开合。
-    pub fn set_folder_open(&mut self, id: Id, open: bool) {
-        self.folders.insert(id, open);
     }
 
     /// 开一行：接下来声明的控件横着排，第一个占满剩余宽度。
@@ -842,53 +554,27 @@ impl WidgetUi {
 
     /// 一个控件的内容有多大。
     fn content_size(&self, ui: &Ui, widget: &Widget) -> Vec2 {
-        let theme = self.theme;
-        let style = |size: f32| TextStyle {
-            size,
-            ..Default::default()
-        };
+        let theme = &self.theme;
         match widget {
-            Widget::Panel { .. } => Vec2::ZERO,
-            Widget::Label { text, size, .. } => ui.measure(text, &style(*size), None).size,
-            Widget::Button { text } => ui.measure(text, &style(theme.font_size), None).size,
-            Widget::Checkbox { text, .. } => {
-                let text_size = ui.measure(text, &style(theme.font_size), None).size;
-                // 勾选框本体加一点间隔。
-                Vec2::new(text_size.x + theme.row_height, text_size.y)
-            }
-            Widget::Slider { .. } => Vec2::new(120.0, theme.font_size),
-            Widget::Folder { text, .. } => {
-                let size = ui.measure(text, &style(theme.font_size), None).size;
-                // 左边给三角形留位置。
-                Vec2::new(size.x + theme.row_height, size.y)
-            }
-            Widget::Radio { text, .. } => {
-                let text_size = ui.measure(text, &style(theme.font_size), None).size;
-                Vec2::new(text_size.x + theme.row_height, text_size.y)
-            }
-            Widget::ListItem { text, .. } => ui.measure(text, &style(theme.font_size), None).size,
-            // 遮罩由布局撑满，自身不要求任何尺寸。
-            Widget::Modal { .. } => Vec2::ZERO,
-            Widget::DialogTitle { text } => {
-                let text_size = ui.measure(text, &style(theme.font_size), None).size;
-                // 右端给关闭按钮留位置。
-                Vec2::new(text_size.x + theme.row_height, text_size.y)
-            }
-            // 滚动条只要够厚能点中；长度由布局给。
-            Widget::Scrollbar { .. } => Vec2::new(0.0, SCROLLBAR_THICKNESS),
-            Widget::TextInput { text, placeholder } => {
-                // 按内容和提示里较宽的那个量，但至少留出一段可打字的宽度——
-                // 空文本框宽度为零的话根本点不进去。
-                let shown = if text.is_empty() { placeholder } else { text };
-                let size = ui.measure(shown, &style(theme.font_size), None).size;
-                Vec2::new(size.x.max(160.0), theme.font_size)
-            }
+            Widget::Panel { .. } => crate::panel::size(ui, theme),
+            Widget::Label { text, size, .. } => crate::label::size(ui, theme, text, *size),
+            Widget::Button { text, .. } => crate::button::size(ui, theme, text),
+            Widget::Checkbox { text, .. } => crate::checkbox::size(ui, theme, text),
+            Widget::Slider { .. } => crate::slider::size(ui, theme),
+            Widget::Folder { text, .. } => crate::folder::size(ui, theme, text),
+            Widget::Radio { text, .. } => crate::radio::size(ui, theme, text),
+            Widget::ListItem { text, .. } => crate::list::size(ui, theme, text),
+            Widget::Modal { .. } => crate::modal::size(ui, theme),
+            Widget::DialogTitle { text, .. } => crate::dialog::size(ui, theme, text),
+            Widget::Scrollbar { .. } => crate::scrollbar::size(ui, theme),
+            Widget::TextInput { text, placeholder, .. } => crate::text_input::size(ui, theme, text, placeholder),
         }
+
     }
 
     /// 走一遍求解结果，出几何。
     fn paint(&self, ui: &mut Ui) {
-        let theme = self.theme;
+        let theme = &self.theme;
         let viewport = self.scroll_viewport();
         let mut clipped = false;
 
@@ -920,403 +606,18 @@ impl WidgetUi {
             let response = self.interaction.response(declared.id);
 
             match &declared.widget {
-                Widget::Panel { color, radius } => {
-                    ui.rounded_rect(rect, *radius, *color);
-                    ui.border(rect, *radius, 1.0, theme.outline);
-                }
-
-                Widget::Label { text, color, size } => {
-                    ui.text(
-                        rect.min,
-                        text,
-                        &TextStyle {
-                            size: *size,
-                            ..Default::default()
-                        },
-                        *color,
-                        Some(rect.size().x),
-                    );
-                }
-
-                Widget::Folder { text, open } => {
-                    // 标题条：一条比面板稍亮的横杠，左端一个三角形。
-                    let fill = if response.hovered {
-                        theme.hovered
-                    } else {
-                        theme.surface
-                    };
-                    ui.rect(rect, fill);
-
-                    // 三角形用两条不同长度的短横线拼——引擎的 UI 图元只有
-                    // 矩形和圆角矩形，画不出真三角形。收起时是 `>`（两段
-                    // 竖向错开），展开时是 `v`（两段横向错开）。
-                    let mark = theme.row_height * 0.28;
-                    let center = Vec2::new(rect.min.x + theme.row_height * 0.5, rect.center().y);
-                    let arm = mark * 0.5;
-                    if *open {
-                        // ▼：上面一横宽、下面一横窄。
-                        ui.rect(
-                            Rect {
-                                min: Vec2::new(center.x - mark, center.y - arm * 0.5),
-                                max: Vec2::new(center.x + mark, center.y + arm * 0.5),
-                            },
-                            theme.dim,
-                        );
-                        ui.rect(
-                            Rect {
-                                min: Vec2::new(center.x - arm, center.y + arm * 0.5),
-                                max: Vec2::new(center.x + arm, center.y + arm * 1.5),
-                            },
-                            theme.dim,
-                        );
-                    } else {
-                        // ▶：左边一竖长、右边一竖短。
-                        ui.rect(
-                            Rect {
-                                min: Vec2::new(center.x - arm * 0.5, center.y - mark),
-                                max: Vec2::new(center.x + arm * 0.5, center.y + mark),
-                            },
-                            theme.dim,
-                        );
-                        ui.rect(
-                            Rect {
-                                min: Vec2::new(center.x + arm * 0.5, center.y - arm),
-                                max: Vec2::new(center.x + arm * 1.5, center.y + arm),
-                            },
-                            theme.dim,
-                        );
-                    }
-
-                    ui.text(
-                        Vec2::new(rect.min.x + theme.row_height, rect.min.y),
-                        text,
-                        &TextStyle {
-                            size: theme.font_size,
-                            ..Default::default()
-                        },
-                        theme.text,
-                        Some(rect.size().x - theme.row_height),
-                    );
-                }
-
-                Widget::Button { text } => {
-                    let fill = if response.held {
-                        theme.active
-                    } else if response.hovered {
-                        theme.hovered
-                    } else {
-                        theme.surface
-                    };
-                    ui.rounded_rect(rect, theme.radius, fill);
-                    ui.border(rect, theme.radius, 1.0, theme.outline);
-                    if response.focused {
-                        // 焦点框画在外面一圈，免得和边框糊在一起。
-                        ui.border(rect.shrink(-2.0), theme.radius + 2.0, 2.0, theme.focus);
-                    }
-                    ui.text_centered(
-                        rect,
-                        text,
-                        &TextStyle {
-                            size: theme.font_size,
-                            ..Default::default()
-                        },
-                        theme.text,
-                    );
-                }
-
-                Widget::Checkbox { text, checked } => {
-                    let box_size = theme.row_height * 0.6;
-                    let box_rect = Rect {
-                        min: Vec2::new(rect.min.x, rect.center().y - box_size * 0.5),
-                        max: Vec2::new(rect.min.x + box_size, rect.center().y + box_size * 0.5),
-                    };
-                    let fill = if *checked {
-                        theme.accent
-                    } else if response.hovered {
-                        theme.hovered
-                    } else {
-                        theme.surface
-                    };
-                    ui.rounded_rect(box_rect, 3.0, fill);
-                    ui.border(box_rect, 3.0, 1.0, theme.outline);
-                    if *checked {
-                        // 勾用一个内缩的实心方块表示。真的勾要画折线，
-                        // 那需要非矩形图元——留给以后。
-                        ui.rounded_rect(box_rect.shrink(box_size * 0.28), 1.5, Vec4::ONE);
-                    }
-                    if response.focused {
-                        ui.border(box_rect.shrink(-2.0), 5.0, 2.0, theme.focus);
-                    }
-
-                    ui.text(
-                        Vec2::new(
-                            box_rect.max.x + 8.0,
-                            rect.center().y - theme.font_size * 0.6,
-                        ),
-                        text,
-                        &TextStyle {
-                            size: theme.font_size,
-                            ..Default::default()
-                        },
-                        theme.text,
-                        None,
-                    );
-                }
-
-                Widget::Slider { value } => {
-                    let track_height = 6.0;
-                    let track = Rect {
-                        min: Vec2::new(rect.min.x, rect.center().y - track_height * 0.5),
-                        max: Vec2::new(rect.max.x, rect.center().y + track_height * 0.5),
-                    };
-                    ui.rounded_rect(track, track_height * 0.5, theme.surface);
-
-                    let filled = Rect {
-                        min: track.min,
-                        max: Vec2::new(track.min.x + track.size().x * value, track.max.y),
-                    };
-                    ui.rounded_rect(filled, track_height * 0.5, theme.accent);
-
-                    // 滑块。夹在轨道内，否则拖到两端时会掉出去一半。
-                    let knob_radius = theme.row_height * 0.32;
-                    let knob_x = (track.min.x + track.size().x * value)
-                        .clamp(track.min.x + knob_radius, track.max.x - knob_radius);
-                    let knob = Rect {
-                        min: Vec2::new(knob_x - knob_radius, rect.center().y - knob_radius),
-                        max: Vec2::new(knob_x + knob_radius, rect.center().y + knob_radius),
-                    };
-                    let fill = if response.held || response.hovered {
-                        Vec4::ONE
-                    } else {
-                        theme.text
-                    };
-                    ui.rounded_rect(knob, knob_radius, fill);
-                }
-
-                Widget::Radio { text, selected } => {
-                    // 和复选框同样大小，但画成圆的。形状是单选和多选
-                    // 唯一的视觉区别，两者混在一起时全靠它区分。
-                    let size = theme.row_height * 0.6;
-                    let radius = size * 0.5;
-                    let center = Vec2::new(rect.min.x + radius, rect.center().y);
-                    let outer = Rect {
-                        min: center - Vec2::splat(radius),
-                        max: center + Vec2::splat(radius),
-                    };
-                    let fill = if response.hovered {
-                        theme.hovered
-                    } else {
-                        theme.surface
-                    };
-                    ui.rounded_rect(outer, radius, fill);
-                    ui.border(outer, radius, 1.0, theme.outline);
-                    if *selected {
-                        // 圆心一个实心点。用主色而不是白色，好让它和
-                        // 复选框的白勾在同一个面板里也能区分开。
-                        let dot = radius * 0.5;
-                        ui.rounded_rect(
-                            Rect {
-                                min: center - Vec2::splat(dot),
-                                max: center + Vec2::splat(dot),
-                            },
-                            dot,
-                            theme.accent,
-                        );
-                    }
-                    if response.focused {
-                        ui.border(outer.shrink(-2.0), radius + 2.0, 2.0, theme.focus);
-                    }
-                    ui.text(
-                        Vec2::new(outer.max.x + 8.0, rect.center().y - theme.font_size * 0.6),
-                        text,
-                        &TextStyle {
-                            size: theme.font_size,
-                            ..Default::default()
-                        },
-                        theme.text,
-                        None,
-                    );
-                }
-
-                Widget::ListItem { text, selected } => {
-                    // 选中的整行铺主色。悬停只铺一层浅的——两者叠在
-                    // 一起时选中要压过悬停，否则鼠标扫过就看不出选了谁。
-                    if *selected {
-                        ui.rounded_rect(rect, theme.radius * 0.5, theme.accent);
-                    } else if response.hovered {
-                        ui.rounded_rect(rect, theme.radius * 0.5, theme.hovered);
-                    }
-                    if response.focused && !*selected {
-                        ui.border(rect, theme.radius * 0.5, 1.0, theme.focus);
-                    }
-                    ui.text(
-                        Vec2::new(rect.min.x, rect.center().y - theme.font_size * 0.6),
-                        text,
-                        &TextStyle {
-                            size: theme.font_size,
-                            ..Default::default()
-                        },
-                        theme.text,
-                        Some(rect.size().x),
-                    );
-                }
-
-                Widget::Modal { color } => {
-                    // 铺满整个窗口，不是铺满这个节点——遮罩的意义就是
-                    // 挡住**外面**的东西，缩在布局框里就没用了。
-                    ui.rect(
-                        Rect {
-                            min: Vec2::ZERO,
-                            max: self.screen,
-                        },
-                        *color,
-                    );
-                }
-
-                Widget::DialogTitle { text } => {
-                    let fill = if response.held {
-                        theme.active
-                    } else if response.hovered {
-                        theme.hovered
-                    } else {
-                        theme.surface
-                    };
-                    ui.rect(rect, fill);
-                    ui.text(
-                        Vec2::new(
-                            rect.min.x + theme.padding.left,
-                            rect.center().y - theme.font_size * 0.6,
-                        ),
-                        text,
-                        &TextStyle {
-                            size: theme.font_size,
-                            ..Default::default()
-                        },
-                        theme.text,
-                        // 给关闭按钮让出宽度，否则长标题会把叉盖住。
-                        Some((rect.size().x - theme.row_height).max(0.0)),
-                    );
-                    // 右端的关闭标记。画成一个方块——真正的叉要画两条
-                    // 斜线，和复选框的勾一样缺非矩形图元。
-                    let mark = theme.font_size * 0.4;
-                    let center = Vec2::new(rect.max.x - theme.row_height * 0.5, rect.center().y);
-                    ui.rounded_rect(
-                        Rect {
-                            min: center - Vec2::splat(mark * 0.5),
-                            max: center + Vec2::splat(mark * 0.5),
-                        },
-                        1.0,
-                        theme.dim,
-                    );
-                }
-
-                Widget::Scrollbar { fraction, offset } => {
-                    // 竖着还是横着看布局给的形状，不额外加参数——
-                    // 一根又高又窄的条只可能是竖的。
-                    let size = rect.size();
-                    let vertical = size.y >= size.x;
-                    let track_len = if vertical { size.y } else { size.x };
-                    // 滑块再短也要能点中。太短的话内容一多就变成一根
-                    // 抓不住的线。
-                    let thumb_len = (track_len * fraction).max(SCROLLBAR_MIN_THUMB.min(track_len));
-                    // 滑块缩短了多少，可走的行程就少多少，否则滑到底时
-                    // 滑块会探出轨道。
-                    let travel = (track_len - thumb_len).max(0.0);
-                    let start = travel * offset;
-
-                    ui.rounded_rect(rect, size.min_element() * 0.5, theme.surface);
-
-                    let thumb = if vertical {
-                        Rect {
-                            min: Vec2::new(rect.min.x, rect.min.y + start),
-                            max: Vec2::new(rect.max.x, rect.min.y + start + thumb_len),
-                        }
-                    } else {
-                        Rect {
-                            min: Vec2::new(rect.min.x + start, rect.min.y),
-                            max: Vec2::new(rect.min.x + start + thumb_len, rect.max.y),
-                        }
-                    };
-                    let fill = if response.held {
-                        Vec4::ONE
-                    } else if response.hovered {
-                        theme.text
-                    } else {
-                        theme.dim
-                    };
-                    ui.rounded_rect(thumb, thumb.size().min_element() * 0.5, fill);
-                }
-
-                Widget::TextInput { text, placeholder } => {
-                    let fill = if response.focused {
-                        theme.active
-                    } else if response.hovered {
-                        theme.hovered
-                    } else {
-                        theme.surface
-                    };
-                    ui.rounded_rect(rect, theme.radius, fill);
-                    ui.border(
-                        rect,
-                        theme.radius,
-                        if response.focused { 2.0 } else { 1.0 },
-                        if response.focused {
-                            theme.focus
-                        } else {
-                            theme.outline
-                        },
-                    );
-
-                    let inner = rect.shrink(theme.padding.left.min(theme.padding.top).max(6.0));
-                    let text_style = TextStyle {
-                        size: theme.font_size,
-                        wrap: kfont::Wrap::None,
-                        ..Default::default()
-                    };
-                    let baseline = Vec2::new(inner.min.x, rect.center().y - theme.font_size * 0.62);
-
-                    // 内容会比框长。裁剪掉溢出的部分，否则文字会画到
-                    // 框外面、盖住旁边的控件。
-                    ui.push_clip(inner);
-
-                    let edit = self.text_state(declared.id);
-                    // 选区先画，文字盖在上面。反过来的话高亮会糊住文字。
-                    if edit.has_selection() {
-                        let range = edit.selection();
-                        let before = ui.measure(&text[..range.start], &text_style, None).size.x;
-                        let width = ui.measure(&text[range.clone()], &text_style, None).size.x;
-                        ui.rect(
-                            Rect {
-                                min: Vec2::new(baseline.x + before, inner.min.y),
-                                max: Vec2::new(baseline.x + before + width, inner.max.y),
-                            },
-                            theme.accent * Vec4::new(1.0, 1.0, 1.0, 0.45),
-                        );
-                    }
-
-                    if text.is_empty() {
-                        ui.text(baseline, placeholder, &text_style, theme.dim, None);
-                    } else {
-                        ui.text(baseline, text, &text_style, theme.text, None);
-                    }
-
-                    // 光标。只在有焦点时画，否则每个文本框里都杵着一根竖线。
-                    if response.focused {
-                        let before = ui
-                            .measure(&text[..edit.cursor().min(text.len())], &text_style, None)
-                            .size
-                            .x;
-                        ui.rect(
-                            Rect {
-                                min: Vec2::new(baseline.x + before, inner.min.y),
-                                max: Vec2::new(baseline.x + before + 1.5, inner.max.y),
-                            },
-                            theme.text,
-                        );
-                    }
-
-                    ui.pop_clip();
-                }
+                Widget::Panel { color, radius, .. } => crate::panel::paint(ui, theme, rect, &response, *color, *radius),
+                Widget::Label { text, color, size, .. } => crate::label::paint(ui, theme, rect, &response, text, *color, *size),
+                Widget::Button { text, .. } => crate::button::paint(ui, theme, rect, &response, text),
+                Widget::Checkbox { text, checked, .. } => crate::checkbox::paint(ui, theme, rect, &response, text, *checked),
+                Widget::Slider { value, .. } => crate::slider::paint(ui, theme, rect, &response, *value),
+                Widget::Folder { text, open, .. } => crate::folder::paint(ui, theme, rect, &response, text, *open),
+                Widget::Radio { text, selected, .. } => crate::radio::paint(ui, theme, rect, &response, text, *selected),
+                Widget::ListItem { text, selected, .. } => crate::list::paint(ui, theme, rect, &response, text, *selected),
+                Widget::Modal { color, .. } => crate::modal::paint(ui, theme, rect, &response, *color, self.screen),
+                Widget::DialogTitle { text, .. } => crate::dialog::paint(ui, theme, rect, &response, text),
+                Widget::Scrollbar { fraction, offset, .. } => crate::scrollbar::paint(ui, theme, rect, &response, *fraction, *offset),
+                Widget::TextInput { text, placeholder, .. } => crate::text_input::paint(ui, theme, rect, &response, text, placeholder, &self.text_state(declared.id)),
             }
         }
 
@@ -1324,10 +625,11 @@ impl WidgetUi {
             ui.pop_clip();
         }
     }
+
 }
 
 /// 把一个编辑动作应用到状态上。
-fn apply_edit(edit: &mut crate::TextEdit, text: &mut String, action: kui::EditAction) {
+pub(crate) fn apply_edit(edit: &mut crate::TextEdit, text: &mut String, action: kui::EditAction) {
     use kui::EditAction as A;
     match action {
         A::Backspace => edit.backspace(text),
