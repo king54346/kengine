@@ -41,6 +41,7 @@ impl WidgetUi {
             widget: Widget::Folder { text, open },
             row: None,
             grow: false,
+            tab_stop: true,
         });
         self.collapsed = was_collapsed;
 

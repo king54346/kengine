@@ -152,26 +152,43 @@ impl UiInput {
 
 /// 一个参与本帧交互的控件。
 ///
-/// 命中和焦点是**两件事**，所以分开记：面板、标签、遮罩都要参与命中
-/// （不然点在面板上不会清掉文本框的焦点），但都不该是 Tab 的一站——
-/// 走上去按回车什么也不会发生，只是让人以为焦点丢了。
+/// 命中、焦点、Tab 停靠是**三件事**，所以分三个标志记：
+///
+/// | | 命中 | [`focusable`](Hit::focusable) | [`tab_stop`](Hit::tab_stop) |
+/// |---|---|---|---|
+/// | 按钮、文本框 | ✓ | ✓ | ✓ |
+/// | 单选组里没选中的那些 | ✓ | ✓ | ✗ |
+/// | 面板、标签、遮罩 | ✓ | ✗ | ✗ |
+///
+/// 面板要参与命中（不然点在面板上不会清掉文本框的焦点），但不该拿焦点。
+///
+/// 中间那一行是 **roving tabindex**：一组二十个单选按钮，Tab 该一下
+/// 跨过整组，而不是按二十次；但**点**其中任何一个都得能选中并聚焦它。
+/// 两件事共用一个标志就做不到——把没选中的设成不可聚焦，点它们时
+/// 焦点会被当成「点在空白处」清掉。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Hit {
     /// 控件的 id。
     pub id: Id,
     /// 控件的矩形。
     pub rect: Rect,
-    /// 能不能用 Tab 走到它、能不能拿键盘焦点。
+    /// 能不能拿键盘焦点（点它、或者程序把焦点设过去）。
     pub focusable: bool,
+    /// Tab 会不会停在它上面。
+    ///
+    /// 只在 [`focusable`](Self::focusable) 为真时有意义——拿不到焦点的
+    /// 东西，Tab 自然也停不上去。
+    pub tab_stop: bool,
 }
 
 impl Hit {
-    /// 一个可以拿焦点的控件。
+    /// 一个可以拿焦点、Tab 也会停的控件。
     pub fn new(id: Id, rect: Rect) -> Self {
         Self {
             id,
             rect,
             focusable: true,
+            tab_stop: true,
         }
     }
 
@@ -181,7 +198,14 @@ impl Hit {
             id,
             rect,
             focusable: false,
+            tab_stop: false,
         }
+    }
+
+    /// 点得到、但 Tab 跳过它。单选组、列表里没选中的那些行。
+    pub fn skip_tab(mut self) -> Self {
+        self.tab_stop = false;
+        self
     }
 }
 
@@ -220,8 +244,12 @@ pub struct Interaction {
     last_pointer: Option<Vec2>,
     /// 本帧算出的各控件结果。
     responses: HashMap<Id, Response>,
-    /// 本帧参与命中的控件，按前序——焦点用 Tab 走的就是这个顺序。
+    /// 本帧能拿焦点的控件。点击要靠它判断这一下该不该把焦点接过去。
     focusable: Vec<Id>,
+    /// 本帧 Tab 会停的控件，按前序——Tab 走的就是这个顺序。
+    ///
+    /// 和 [`focusable`](Self::focusable) 分开，理由见 [`Hit`]。
+    tab_stops: Vec<Id>,
 }
 
 impl Interaction {
@@ -235,9 +263,25 @@ impl Interaction {
         self.focused
     }
 
-    /// 直接设置焦点。
+    /// 直接设置焦点。下一帧生效。
     pub fn focus(&mut self, id: Option<Id>) {
         self.focused = id;
+    }
+
+    /// 把焦点挪到某个控件上，**本帧就算数**。
+    ///
+    /// 和 [`focus`](Self::focus) 的区别是它会同步已经算好的结果表。
+    /// [`update`](Self::update) 建表时用的是那一刻的焦点，之后再挪的话
+    /// 这一帧查到的 `response.focused` 还是旧的——于是一个刚被方向键
+    /// 选中的单选按钮，本帧画出来没有焦点框，下一帧才补上，看着像闪了一下。
+    ///
+    /// 必须在 `update` **之后**调用，理由和 [`activate`](Self::activate) 一样。
+    /// 控件没参与本帧布局时只记下焦点，不动结果表。
+    pub fn focus_now(&mut self, id: Id) {
+        self.focused = Some(id);
+        for (key, response) in self.responses.iter_mut() {
+            response.focused = *key == id;
+        }
     }
 
     /// 指针指着的控件。
@@ -281,6 +325,44 @@ impl Interaction {
         }
     }
 
+    /// 焦点不在任何 Tab 停靠点上时，下一站该是哪一个。
+    ///
+    /// 会走到这里，是因为焦点停在一个「点得到但 Tab 不停」的控件上——
+    /// 用户刚用方向键在单选组里挑了一项。这时 Tab 该**接着往下走**，
+    /// 从声明顺序上排在它之后的第一个停靠点继续。
+    ///
+    /// 不这么做的话，Tab 会当成「没有焦点」而跳回开头，用户在页面
+    /// 中间挑完一项按 Tab，焦点直接飞回第一个控件。
+    ///
+    /// 返回的是 [`tab_stops`](Self::tab_stops) 里的下标。调用方保证它非空。
+    fn next_tab_stop_after_focus(&self, hit_order: &[Hit], step: i32) -> i32 {
+        let last = self.tab_stops.len() as i32 - 1;
+        let ends = if step > 0 { 0 } else { last };
+
+        let Some(focused) = self.focused else {
+            return ends;
+        };
+        let Some(position) = hit_order.iter().position(|h| h.id == focused) else {
+            return ends;
+        };
+
+        // 停靠点在 `hit_order` 里的下标。两边都是按前序过滤同一个条件，
+        // 所以这里的第 k 个就是 `tab_stops` 的第 k 个。
+        let stops: Vec<usize> = hit_order
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| h.focusable && h.tab_stop)
+            .map(|(index, _)| index)
+            .collect();
+
+        let found = if step > 0 {
+            stops.iter().position(|&index| index > position)
+        } else {
+            stops.iter().rposition(|&index| index < position)
+        };
+        found.map_or(ends, |k| k as i32)
+    }
+
     /// 按本帧的布局与输入更新一遍状态。
     ///
     /// `hit_order` 是参与交互的控件按**前序**排列；
@@ -290,6 +372,13 @@ impl Interaction {
         self.focusable.clear();
         self.focusable
             .extend(hit_order.iter().filter(|h| h.focusable).map(|h| h.id));
+        self.tab_stops.clear();
+        self.tab_stops.extend(
+            hit_order
+                .iter()
+                .filter(|h| h.focusable && h.tab_stop)
+                .map(|h| h.id),
+        );
 
         // 命中：从后往前找第一个包含指针的。
         // 从前往后的话，点在按钮上会命中它底下的面板。
@@ -310,19 +399,24 @@ impl Interaction {
             self.focused = self.hovered.filter(|id| self.focusable.contains(id));
         }
 
-        // Tab 切焦点。
-        if input.focus_step != 0 && !self.focusable.is_empty() {
+        // Tab 切焦点。走的是 `tab_stops`，不是 `focusable`——
+        // 单选组里没选中的那些点得到，但 Tab 要一下跨过整组。
+        if input.focus_step != 0 && !self.tab_stops.is_empty() {
             let current = self
                 .focused
-                .and_then(|id| self.focusable.iter().position(|f| *f == id));
-            let count = self.focusable.len() as i32;
+                .and_then(|id| self.tab_stops.iter().position(|f| *f == id));
+            let count = self.tab_stops.len() as i32;
             let next = match current {
                 Some(index) => (index as i32 + input.focus_step).rem_euclid(count),
                 // 还没有焦点时，Shift+Tab 从末尾进，Tab 从开头进。
-                None if input.focus_step > 0 => 0,
-                None => count - 1,
+                //
+                // 焦点**在组内但不在停靠点上**时也走这里：那说明用户
+                // 刚用方向键在组里挑了一项，此时 Tab 该离开整个组，
+                // 从下一站继续——而不是回到组的停靠点原地打转。
+                None if input.focus_step > 0 => self.next_tab_stop_after_focus(hit_order, 1),
+                None => self.next_tab_stop_after_focus(hit_order, -1),
             };
-            self.focused = Some(self.focusable[next as usize]);
+            self.focused = Some(self.tab_stops[next as usize]);
         }
 
         let released = input.just_released(PointerButton::Primary);
@@ -602,6 +696,78 @@ mod tests {
         ui.update(&layout(), &UiInput::default());
         ui.activate(id("从未存在"));
         assert!(!ui.response(id("从未存在")).clicked);
+    }
+
+    /// 一组「点得到但 Tab 不停」的控件，外加前后各一个普通按钮。
+    ///
+    /// 这是一个单选组的形状：组里三项都点得到，但 Tab 只停在选中的
+    /// 那一项（这里是 `r2`）上。
+    fn roving() -> Vec<Hit> {
+        vec![
+            Hit::new(id("before"), Rect::new(0.0, 0.0, 80.0, 20.0)),
+            Hit::new(id("r1"), Rect::new(0.0, 20.0, 80.0, 20.0)).skip_tab(),
+            Hit::new(id("r2"), Rect::new(0.0, 40.0, 80.0, 20.0)),
+            Hit::new(id("r3"), Rect::new(0.0, 60.0, 80.0, 20.0)).skip_tab(),
+            Hit::new(id("after"), Rect::new(0.0, 80.0, 80.0, 20.0)),
+        ]
+    }
+
+    fn tab(step: i32) -> UiInput {
+        UiInput {
+            focus_step: step,
+            ..Default::default()
+        }
+    }
+
+    /// Tab 一下跨过整个单选组，不是一项一项走。
+    ///
+    /// 一组二十个画质选项，不这么做的话用户要按二十次 Tab 才走得过去。
+    #[test]
+    fn tab_steps_over_a_roving_group() {
+        let mut ui = Interaction::new();
+        ui.update(&roving(), &tab(1));
+        assert_eq!(ui.focused(), Some(id("before")));
+        ui.update(&roving(), &tab(1));
+        assert_eq!(ui.focused(), Some(id("r2")), "该落在组里选中的那一项上");
+        ui.update(&roving(), &tab(1));
+        assert_eq!(ui.focused(), Some(id("after")), "该一下跨过整个组");
+    }
+
+    /// 跳过 Tab 的项**仍然点得到**。
+    ///
+    /// 和 `focusable` 共用一个标志的话，点组里没选中的那一项会被当成
+    /// 「点在空白处」，焦点被清掉——单选组就成了只能用键盘的控件。
+    #[test]
+    fn a_skipped_stop_can_still_be_clicked_into_focus() {
+        let mut ui = Interaction::new();
+        let mut input = at(20.0, 30.0); // r1 身上
+        input.pressed.push(PointerButton::Primary);
+        ui.update(&roving(), &input);
+        assert_eq!(ui.focused(), Some(id("r1")));
+    }
+
+    /// 焦点停在组里没选中的那一项上时，Tab 接着往下走。
+    ///
+    /// 用方向键在组里挑完一项再按 Tab，焦点该去组后面的控件，
+    /// 而不是当成「没有焦点」飞回页面开头。
+    #[test]
+    fn tab_continues_forward_from_a_skipped_stop() {
+        let mut ui = Interaction::new();
+        ui.update(&roving(), &UiInput::default());
+        ui.focus(Some(id("r3")));
+
+        ui.update(&roving(), &tab(1));
+        assert_eq!(ui.focused(), Some(id("after")));
+    }
+
+    #[test]
+    fn shift_tab_continues_backward_from_a_skipped_stop() {
+        let mut ui = Interaction::new();
+        ui.update(&roving(), &UiInput::default());
+        ui.focus(Some(id("r1")));
+
+        ui.update(&roving(), &tab(-1));
+        assert_eq!(ui.focused(), Some(id("before")));
     }
 
     #[test]

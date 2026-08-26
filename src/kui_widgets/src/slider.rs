@@ -270,6 +270,7 @@ impl WidgetUi {
             },
             row,
             grow,
+            tab_stop: true,
         });
         id
     }

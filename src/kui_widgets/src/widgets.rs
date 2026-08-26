@@ -100,6 +100,18 @@ pub(crate) enum Widget {
     },
     /// 按钮。
     Button { text: String },
+    /// 会弹出菜单的按钮。
+    MenuButton { text: String, open: bool },
+    /// 菜单里的一项。
+    MenuItem {
+        text: String,
+        /// 禁用的项画成灰的，点不动也高亮不上去。
+        enabled: bool,
+        /// 当前高亮的是它。菜单不走焦点，高亮是它自己的一套。
+        highlighted: bool,
+        /// 它右边还有一层子菜单。
+        submenu: bool,
+    },
     /// 复选框。
     Checkbox { text: String, checked: bool },
     /// 滑条。`fraction` 是值在值域里的位置，已归一化到 0..=1——
@@ -136,9 +148,13 @@ impl Widget {
     ///
     /// 面板、标签、遮罩只是背景，走上去按回车什么也不会发生。
     /// 滚动条和对话框标题栏是纯指针控件，键盘上没有对应操作。
+    /// 菜单项也不在此列：菜单开着的时候是**模态**的，方向键本来就该
+    /// 全归它，用不着先争到焦点。让它参与 Tab 反而会让「菜单关了之后
+    /// 焦点停在一个已经不存在的项上」变成一类要处理的情况。
     pub(crate) fn focusable(&self) -> bool {
         match self {
             Widget::Button { .. }
+            | Widget::MenuButton { .. }
             | Widget::Checkbox { .. }
             | Widget::Radio { .. }
             | Widget::ListItem { .. }
@@ -148,6 +164,7 @@ impl Widget {
             | Widget::TextInput { .. } => true,
             Widget::Panel { .. }
             | Widget::Label { .. }
+            | Widget::MenuItem { .. }
             | Widget::Modal { .. }
             | Widget::DialogTitle { .. }
             | Widget::Scrollbar { .. } => false,
@@ -161,9 +178,12 @@ impl Widget {
     ///
     /// 滑条也不算：它**能**拿焦点（要用方向键调值），但回车 / 空格在
     /// 一条滑条上没有任何意义，认了只会凭空多出一个说不清的语义。
+    /// 菜单项也不算：它的回车由菜单自己那套状态机处理，那里还要顺带
+    /// 关掉整条菜单链。走这条通道的话会激活两次。
     pub(crate) fn activatable(&self) -> bool {
         match self {
             Widget::Button { .. }
+            | Widget::MenuButton { .. }
             | Widget::Checkbox { .. }
             | Widget::Radio { .. }
             | Widget::ListItem { .. }
@@ -171,6 +191,7 @@ impl Widget {
             Widget::TextInput { .. }
             | Widget::Panel { .. }
             | Widget::Label { .. }
+            | Widget::MenuItem { .. }
             | Widget::Slider { .. }
             | Widget::Modal { .. }
             | Widget::DialogTitle { .. }
@@ -195,6 +216,11 @@ pub(crate) struct Declared {
     /// lil-gui 那种「标签在左、控件在右」的行，靠的就是让标签把剩下的
     /// 空间全占了，把控件挤到右边。
     pub(crate) grow: bool,
+    /// Tab 会不会停在它上面。
+    ///
+    /// 默认跟着 [`Widget::focusable`] 走，只有组会改它：一组二十个
+    /// 单选按钮在 Tab 序列里只该占**一站**。见 [`kui::Hit`]。
+    pub(crate) tab_stop: bool,
 }
 
 /// 在 [`Ui`] 之上叠一层控件能力。
@@ -244,6 +270,27 @@ pub struct WidgetUi {
     pub(crate) scroll: std::collections::HashMap<Id, f32>,
     /// 正在拖的滑条，跨帧。见 [`crate::slider::Drag`]。
     pub(crate) slider_drags: std::collections::HashMap<Id, crate::slider::Drag>,
+    /// 本帧声明的组（单选组、列表）。每帧重建。
+    pub(crate) groups: Vec<Group>,
+    /// 还没收的那个组在 `groups` 里的下标。
+    pub(crate) open_group: Option<usize>,
+    /// 每个列表本帧算出的动作，供调用方查。见 [`crate::list::ListAction`]。
+    pub(crate) list_actions: std::collections::HashMap<Id, crate::list::ListAction>,
+    /// 每个列表上一次落点在第几项，跨帧。按住 Shift 选一段要从它算起。
+    pub(crate) list_anchors: std::collections::HashMap<Id, usize>,
+    /// 本帧声明的菜单浮层。每帧重建。
+    pub(crate) menu_frames: Vec<MenuFrame>,
+    /// 还没收的那层菜单在 `menu_frames` 里的下标。
+    pub(crate) open_menu_frame: Option<usize>,
+    /// 各层菜单浮层平移之后的矩形，和 `menu_frames` 一一对应。
+    pub(crate) menu_rects: Vec<Rect>,
+    /// 打开的那条菜单链，存的是各层的锚点。跨帧。
+    ///
+    /// `[0]` 是顶层菜单按钮，后面每一项都是上一层里那个展开了子菜单
+    /// 的项。空表示没有菜单开着。
+    pub(crate) menu_chain: Vec<Id>,
+    /// 每层菜单当前高亮第几项，跨帧。键是那一层的锚点。
+    pub(crate) menu_highlight: std::collections::HashMap<Id, usize>,
     /// 每个折叠分组开着还是收着，跨帧。
     ///
     /// 状态放在这里而不是让调用方保管：折叠纯粹是**外观**，和游戏逻辑
@@ -257,6 +304,57 @@ pub struct WidgetUi {
     /// 丢弃而不是「声明了但不画」：不画的话它们仍然占布局空间，
     /// 收起来的分组会留下一大片空白。
     pub(crate) collapsed: bool,
+}
+
+/// 一组互相知道对方存在的控件：单选组、列表。
+///
+/// 这两样在键盘上的行为一样——方向键在**组内**走，Tab 一下跨过整组——
+/// 所以共用一套记法。差别只在方向键落地时做什么：单选组直接改选择，
+/// 列表还要看修饰键决定是换选、加选还是选一段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GroupKind {
+    /// 单选组。
+    Radio,
+    /// 列表。
+    List,
+}
+
+/// 本帧声明的一个组，记的是它在 `declared` 里占了哪一段。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Group {
+    pub(crate) id: Id,
+    pub(crate) kind: GroupKind,
+    /// 从第几个声明开始。
+    pub(crate) first: usize,
+    /// 到第几个为止（不含）。没收组时是 `usize::MAX`。
+    pub(crate) last: usize,
+}
+
+/// 本帧声明的一层菜单浮层。
+///
+/// 浮层的位置**不能在排版时给**：它要摆在锚点旁边，而锚点排在哪要等
+/// 这一轮求解出来才知道。所以走两步——先让它绝对定位（不占位置、
+/// 但量得出尺寸），求解之后再整段平移过去。滚动区用的也是这一招。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MenuFrame {
+    /// 这层菜单挂在谁身上：顶层是菜单按钮，子菜单是父菜单里的那一项。
+    pub(crate) anchor: Id,
+    /// 在打开的那条菜单链里排第几层。0 是顶层。
+    pub(crate) depth: usize,
+    /// 从第几个声明开始。
+    pub(crate) first: usize,
+    /// 到第几个为止（不含）。没收时是 `usize::MAX`。
+    pub(crate) last: usize,
+}
+
+impl MenuFrame {
+    /// 装这层菜单的那个布局容器的 id。
+    ///
+    /// 由锚点派生，不用另起一个名字：一个锚点只可能有一层菜单，
+    /// 而这样调用方不必为「菜单容器」再想一个不会撞的 id。
+    pub(crate) fn container(&self) -> Id {
+        self.anchor.child("__menu")
+    }
 }
 
 /// 本帧的滚动区。
@@ -300,6 +398,15 @@ impl Default for WidgetUi {
             edits: Default::default(),
             scroll: Default::default(),
             slider_drags: Default::default(),
+            groups: Vec::new(),
+            open_group: None,
+            list_actions: Default::default(),
+            list_anchors: Default::default(),
+            menu_frames: Vec::new(),
+            open_menu_frame: None,
+            menu_rects: Vec::new(),
+            menu_chain: Vec::new(),
+            menu_highlight: Default::default(),
             folders: Default::default(),
             screen: Vec2::ZERO,
             collapsed: false,
@@ -316,6 +423,14 @@ impl WidgetUi {
         self.rows = 0;
         self.row_first = false;
         self.collapsed = false;
+        self.groups.clear();
+        self.open_group = None;
+        self.menu_frames.clear();
+        self.open_menu_frame = None;
+        self.menu_rects.clear();
+        // 上一帧的列表动作也清掉：不清的话调用方会看到同一次点击
+        // 被反复报告，一下点击变成按住不放。
+        self.list_actions.clear();
         // **不重置 `root_style`**：它是配置，不是每帧的声明。
         //
         // 之前这里会把它清回默认值，于是「先 `root_style` 再 `begin`」
@@ -364,11 +479,13 @@ impl WidgetUi {
         if row.is_some() {
             self.row_first = false;
         }
+        let tab_stop = widget.focusable();
         self.declared.push(Declared {
             id,
             widget,
             row,
             grow,
+            tab_stop,
         });
         id
     }
@@ -396,6 +513,76 @@ impl WidgetUi {
         self.open_row = None;
     }
 
+    // ───────────────────────── 组 ─────────────────────────
+
+    /// 开一个组。单选组和列表共用。
+    ///
+    /// 不支持嵌套：一个列表里再套一个单选组，方向键该归谁管说不清楚，
+    /// 而这在真实界面里也不出现。重复调用等于先收上一个。
+    pub(crate) fn begin_group(&mut self, id: &str, kind: GroupKind) -> Id {
+        let id = Id::new(id);
+        if self.collapsed {
+            return id;
+        }
+        self.end_group();
+        self.open_group = Some(self.groups.len());
+        self.groups.push(Group {
+            id,
+            kind,
+            first: self.declared.len(),
+            last: usize::MAX,
+        });
+        id
+    }
+
+    /// 收一个组，并给它挑出 Tab 的那**一站**。
+    ///
+    /// 挑法：优先「组内当前有焦点的那一项」，其次「第一个选中的」，
+    /// 都没有就第一项。
+    ///
+    /// 焦点排在选中之前，是因为**响应滞后一帧**：用方向键在组里挑了
+    /// 一项之后，调用方要到下一帧才把选中状态改过去。这中间的一帧里，
+    /// 有焦点的项还不是选中项——按选中挑的话它会被设成「Tab 不停」，
+    /// 而它正是当前有焦点的那个，用户按下一次 Tab 时焦点会莫名跳走。
+    pub(crate) fn end_group(&mut self) {
+        let Some(index) = self.open_group.take() else {
+            return;
+        };
+        self.groups[index].last = self.declared.len();
+        let group = self.groups[index];
+
+        let items = self.group_items(&group);
+        if items.is_empty() {
+            return;
+        }
+
+        // 声明期读到的焦点是**上一帧**留下的，正是我们要的。
+        let focused = self.interaction.focused();
+        let stop = items
+            .iter()
+            .position(|&i| Some(self.declared[i].id) == focused)
+            .or_else(|| items.iter().position(|&i| item_selected(&self.declared[i].widget)))
+            .unwrap_or(0);
+
+        for (position, &declared) in items.iter().enumerate() {
+            self.declared[declared].tab_stop = position == stop;
+        }
+    }
+
+    /// 组里那些「算一项」的声明，在 `declared` 里的下标。
+    ///
+    /// 组里夹着的标签、面板不算——方向键要跳过它们，不然按一下方向键
+    /// 高亮会停在一个点不动的标题上。
+    pub(crate) fn group_items(&self, group: &Group) -> Vec<usize> {
+        let last = group.last.min(self.declared.len());
+        if group.first >= last {
+            return Vec::new();
+        }
+        (group.first..last)
+            .filter(|&index| is_group_item(group.kind, &self.declared[index].widget))
+            .collect()
+    }
+
     /// 某个声明是不是在滚动区里。
     fn scrolled(&self, index: usize) -> Option<ScrollFrame> {
         self.scroll_frame
@@ -420,6 +607,9 @@ impl WidgetUi {
             .collect();
 
         self.apply_scroll(input);
+        // 菜单摆位要排在滚动之后：一个从滚动区里的按钮弹出来的菜单，
+        // 该跟着那个按钮一起滚，而不是留在它原来的位置上。
+        self.apply_menu_placement();
 
         // 交互按前序的矩形判定；后面的画在上面，命中时从后往前找。
         //
@@ -433,6 +623,8 @@ impl WidgetUi {
                 id: d.id,
                 rect: *rect,
                 focusable: d.widget.focusable(),
+                // 组里没选中的那些点得到，但 Tab 一下跨过整组。
+                tab_stop: d.tab_stop,
             })
             .collect();
         self.interaction.update(&hits, input);
@@ -450,6 +642,13 @@ impl WidgetUi {
         {
             self.interaction.activate(focused);
         }
+
+        // 组内的方向键。
+        //
+        // 排在这里有两个原因：`update` 会重建结果表，先跑的话组里挑出来
+        // 的那一项会被冲掉；而列表要看得见上面那一步产生的 `clicked`——
+        // Ctrl+空格在列表里是「加选当前行」，那一下正是从那里来的。
+        self.navigate_groups(input);
 
         // 折叠开关在这里翻转，不在 `folder()` 里——`folder()` 跑在声明期，
         // 那时本帧的点击还没判出来。在这里翻的话下一帧就是新状态，
@@ -469,6 +668,64 @@ impl WidgetUi {
         }
 
         self.paint(ui);
+    }
+
+    /// 组内的方向键。
+    ///
+    /// 单选组和列表在这里分道扬镳：前者方向键直接改选择，后者还要
+    /// 看修饰键决定是换选、加选还是选一整段。
+    fn navigate_groups(&mut self, input: &kui::UiInput) {
+        // `groups` 和 `declared` 马上要被借着改，先把这一帧的项摘出来。
+        let groups = self.groups.clone();
+        for group in groups {
+            let items: Vec<(Id, bool)> = self
+                .group_items(&group)
+                .into_iter()
+                .map(|index| {
+                    let declared = &self.declared[index];
+                    (declared.id, item_selected(&declared.widget))
+                })
+                .collect();
+            if items.is_empty() {
+                continue;
+            }
+            match group.kind {
+                GroupKind::Radio => crate::radio::navigate(self, &items, input),
+                GroupKind::List => crate::list::navigate(self, group.id, &items, input),
+            }
+        }
+    }
+
+    /// 把每层菜单整段平移到它锚点旁边。
+    ///
+    /// 按声明顺序处理，所以父菜单先摆好；子菜单读到的锚点矩形已经是
+    /// **平移之后**的，不必再操心层级——这正是浮层要嵌套时最容易错的
+    /// 地方：拿没摆位的锚点去算，子菜单会飞到屏幕左上角。
+    fn apply_menu_placement(&mut self) {
+        self.menu_rects.clear();
+        let screen = self.screen;
+
+        for index in 0..self.menu_frames.len() {
+            let frame = self.menu_frames[index];
+            let last = frame.last.min(self.rects.len());
+
+            let size = self.solved.rect(frame.container()).unwrap_or_default().size();
+            let anchor = self
+                .declared
+                .iter()
+                .position(|d| d.id == frame.anchor)
+                .and_then(|position| self.rects.get(position).copied())
+                .unwrap_or_default();
+
+            let target = crate::menu::place(anchor, size, frame.depth, screen);
+            let delta = target.min - self.solved.rect(frame.container()).unwrap_or_default().min;
+
+            for rect in &mut self.rects[frame.first.min(last)..last] {
+                rect.min += delta;
+                rect.max += delta;
+            }
+            self.menu_rects.push(target);
+        }
     }
 
     /// 处理滚轮、夹取偏移，并把滚动区里的矩形整体上移。
@@ -608,10 +865,31 @@ impl WidgetUi {
     /// 子容器——于是 `response` / `rects` 那套按下标索引的逻辑不用改，
     /// 而排版上多了一层。
     fn build_tree(&self, ui: &Ui) -> LayoutNode {
-        let mut children: Vec<LayoutNode> = Vec::new();
-        let mut index = 0;
+        let children = self.build_range(ui, 0, self.declared.len());
+        LayoutNode::new(Id::new("__ui_root"), self.root_style).with_children(children)
+    }
 
-        while index < self.declared.len() {
+    /// 把 `[from, to)` 这一段声明变成一组节点。
+    ///
+    /// 递归：碰到浮层就把它整段收成一个**绝对定位**的子容器，再对它的
+    /// 内部调用自己。递归而不是拉平，是为了让子菜单也能照同一条路走——
+    /// 一层浮层和三层浮层在这里没有区别。
+    fn build_range(&self, ui: &Ui, from: usize, to: usize) -> Vec<LayoutNode> {
+        let mut children: Vec<LayoutNode> = Vec::new();
+        let mut index = from;
+
+        while index < to {
+            // 浮层：整段收进一个绝对定位的容器，不占外面的位置。
+            if let Some(frame) = self.menu_frame_at(index) {
+                let inner = self.build_range(ui, frame.first, frame.last.min(to));
+                children.push(
+                    LayoutNode::new(frame.container(), crate::menu::container_style(&self.theme))
+                        .with_children(inner),
+                );
+                index = frame.last.min(to);
+                continue;
+            }
+
             let declared = &self.declared[index];
             let Some(row) = declared.row else {
                 children.push(self.leaf_of(ui, declared));
@@ -621,7 +899,7 @@ impl WidgetUi {
 
             // 把这一行的所有控件收进一个横排容器。
             let mut row_children = Vec::new();
-            while index < self.declared.len() && self.declared[index].row == Some(row) {
+            while index < to && self.declared[index].row == Some(row) {
                 row_children.push(self.leaf_of(ui, &self.declared[index]));
                 index += 1;
             }
@@ -641,7 +919,15 @@ impl WidgetUi {
             );
         }
 
-        LayoutNode::new(Id::new("__ui_root"), self.root_style).with_children(children)
+        children
+    }
+
+    /// 从这个下标开始的浮层。
+    pub(crate) fn menu_frame_at(&self, index: usize) -> Option<MenuFrame> {
+        self.menu_frames
+            .iter()
+            .find(|frame| frame.first == index)
+            .copied()
     }
 
     /// 一个控件的内容有多大。
@@ -651,6 +937,10 @@ impl WidgetUi {
             Widget::Panel { .. } => crate::panel::size(ui, theme),
             Widget::Label { text, size, .. } => crate::label::size(ui, theme, text, *size),
             Widget::Button { text, .. } => crate::button::size(ui, theme, text),
+            Widget::MenuButton { text, .. } => crate::menu::button_size(ui, theme, text),
+            Widget::MenuItem { text, submenu, .. } => {
+                crate::menu::item_size(ui, theme, text, *submenu)
+            }
             Widget::Checkbox { text, .. } => crate::checkbox::size(ui, theme, text),
             Widget::Slider {
                 vertical, length, ..
@@ -675,6 +965,14 @@ impl WidgetUi {
 
         for (index, declared) in self.declared.iter().enumerate() {
             let rect = self.rects[index];
+
+            // 菜单的底板。要赶在这层菜单的第一项之前画，不然项被压在
+            // 底板下面，一整条菜单看起来是空的。
+            if let Some(position) = self.menu_frames.iter().position(|f| f.first == index)
+                && let Some(&panel) = self.menu_rects.get(position)
+            {
+                crate::menu::paint_backdrop(ui, theme, panel);
+            }
 
             // 进滚动区时压一层裁剪，出来时弹掉。
             let inside = self.scrolled(index).is_some();
@@ -710,6 +1008,24 @@ impl WidgetUi {
                 Widget::Button { text, .. } => {
                     crate::button::paint(ui, theme, rect, &response, text)
                 }
+                Widget::MenuButton { text, open } => {
+                    crate::menu::paint_button(ui, theme, rect, &response, text, *open)
+                }
+                Widget::MenuItem {
+                    text,
+                    enabled,
+                    highlighted,
+                    submenu,
+                } => crate::menu::paint_item(
+                    ui,
+                    theme,
+                    rect,
+                    &response,
+                    text,
+                    *enabled,
+                    *highlighted,
+                    *submenu,
+                ),
                 Widget::Checkbox { text, checked, .. } => {
                     crate::checkbox::paint(ui, theme, rect, &response, text, *checked)
                 }
@@ -751,6 +1067,22 @@ impl WidgetUi {
         if clipped {
             ui.pop_clip();
         }
+    }
+}
+
+/// 这个控件算不算它所在那种组里的一「项」。
+pub(crate) fn is_group_item(kind: GroupKind, widget: &Widget) -> bool {
+    match kind {
+        GroupKind::Radio => matches!(widget, Widget::Radio { .. }),
+        GroupKind::List => matches!(widget, Widget::ListItem { .. }),
+    }
+}
+
+/// 一个组内的项是不是选中的。
+pub(crate) fn item_selected(widget: &Widget) -> bool {
+    match widget {
+        Widget::Radio { selected, .. } | Widget::ListItem { selected, .. } => *selected,
+        _ => false,
     }
 }
 
