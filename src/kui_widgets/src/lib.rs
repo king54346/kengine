@@ -74,13 +74,17 @@ pub mod widgets;
 
 pub use menu::{Layout as MenuLayout, MenuAction, MenuKey};
 pub use popover::{Align, Placement, Side};
+pub use slider::{Orientation, Slider, TrackClick};
 pub use text_edit::TextEdit;
 pub use widgets::{Theme, WidgetUi};
 
 /// 常用类型的集中导出。
 pub mod prelude {
     pub use crate::{
-        Align, MenuAction, MenuKey, MenuLayout, Placement, Side, TextEdit, Theme, WidgetUi,
+        Align, MenuAction, MenuKey, MenuLayout, Orientation, Placement, Side, Slider, TextEdit,
+        Theme, TrackClick, WidgetUi,
     };
-    pub use kui::{AlignCross, Direction, Edges, Id, Justify, Length, Response, Style, UiInput};
+    pub use kui::{
+        AlignCross, Direction, Edges, Id, Justify, Length, NavKey, Response, Style, UiInput,
+    };
 }

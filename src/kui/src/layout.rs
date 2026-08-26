@@ -167,6 +167,15 @@ pub struct Style {
     pub grow: f32,
     /// 空间不够时收缩的比例。
     pub shrink: f32,
+    /// 脱离父容器的流式布局，**不占位置**。
+    ///
+    /// 浮层要的就是这个：菜单弹出来时不该把它下面的控件往下顶。
+    /// 节点仍然会被排（拿得到自己的尺寸），只是兄弟们当它不存在。
+    ///
+    /// 摆到哪里由调用方在求解**之后**平移——CSS 那套 `top`/`left`
+    /// 在这里没有意义，因为浮层的目标位置要先知道锚点排在哪，
+    /// 而那要等这一轮求解出来。
+    pub absolute: bool,
 }
 
 impl Default for Style {
@@ -184,6 +193,7 @@ impl Default for Style {
             grow: 0.0,
             // flexbox 的默认收缩比是 1：空间不够时元素会缩，而不是溢出。
             shrink: 1.0,
+            absolute: false,
         }
     }
 }
@@ -238,6 +248,11 @@ impl Style {
             },
             flex_grow: self.grow,
             flex_shrink: self.shrink,
+            position: if self.absolute {
+                Position::Absolute
+            } else {
+                Position::Relative
+            },
             ..Default::default()
         }
     }
@@ -581,6 +596,34 @@ mod tests {
                 ..Default::default()
             },
         )
+    }
+
+    /// 绝对定位的节点不占流里的位置。
+    ///
+    /// 浮层要的就是这个：菜单弹出来时不该把它下面的控件往下顶。
+    #[test]
+    fn an_absolute_node_does_not_push_its_siblings() {
+        let float = LayoutNode::new(
+            id("float"),
+            Style {
+                width: Length::Px(50.0),
+                height: Length::Px(50.0),
+                absolute: true,
+                ..Default::default()
+            },
+        );
+        let root = LayoutNode::new(id("root"), Style::default()).with_children([
+            fixed("a", 30.0, 20.0),
+            float,
+            fixed("b", 30.0, 20.0),
+        ]);
+        let solved = solve(&root, Vec2::new(200.0, 200.0));
+
+        let a = solved.rect(id("a")).unwrap();
+        let b = solved.rect(id("b")).unwrap();
+        assert_eq!(b.min.y, a.max.y, "浮层把兄弟顶开了：a={a:?} b={b:?}");
+        // 浮层自己仍然被排出了尺寸——不然没法拿它去算摆在哪。
+        assert_eq!(solved.rect(id("float")).unwrap().size(), Vec2::new(50.0, 50.0));
     }
 
     #[test]

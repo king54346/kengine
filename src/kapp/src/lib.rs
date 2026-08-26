@@ -36,7 +36,7 @@ mod stage;
 
 pub use context::{Context, DebugDraw};
 use kinput::{KeyCode, MouseButton};
-use kui::{EditAction, PointerButton, Ui, UiInput};
+use kui::{EditAction, NavKey, PointerButton, Ui, UiInput};
 pub use physics_clock::PhysicsClock;
 pub use stage::Stage;
 
@@ -169,6 +169,32 @@ fn translate_ui_input(input: &Input, scale: f32, out: &mut UiInput) {
     if ctrl && input.key_just_pressed(KeyCode::KeyA) {
         out.edits.push(EditAction::SelectAll);
     }
+
+    // 同一批方向键再翻译一遍，这次是**导航**的意思：滑条减一步、
+    // 单选组上一项、菜单往下走。
+    //
+    // 和上面的编辑动作**两边都填**，不在这里判断焦点——← 在文本框里是
+    // 光标左移，在滑条上是减一步，哪个生效由控件层按焦点决定。这里先
+    // 挑一个的话，就得把「谁有焦点」这件事搬到输入翻译里来，而这一层
+    // 根本不认识控件。
+    for (key, nav) in [
+        (KeyCode::ArrowUp, NavKey::Up),
+        (KeyCode::ArrowDown, NavKey::Down),
+        (KeyCode::ArrowLeft, NavKey::Left),
+        (KeyCode::ArrowRight, NavKey::Right),
+        (KeyCode::Home, NavKey::Home),
+        (KeyCode::End, NavKey::End),
+        (KeyCode::Escape, NavKey::Escape),
+    ] {
+        if input.key_just_pressed(key) {
+            out.nav.push(nav);
+        }
+    }
+
+    // 修饰键是持续量：列表按住 Shift 点第二下选出一个区间，
+    // 而那两下之间隔着好多帧。
+    out.shift = shift;
+    out.ctrl = ctrl;
 
     if input.key_just_pressed(KeyCode::Tab) {
         // Shift+Tab 往回走，和所有桌面 UI 一致。

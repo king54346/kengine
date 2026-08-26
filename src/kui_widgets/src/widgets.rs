@@ -102,8 +102,14 @@ pub(crate) enum Widget {
     Button { text: String },
     /// 复选框。
     Checkbox { text: String, checked: bool },
-    /// 滑条。`value` 已归一化到 0..=1。
-    Slider { value: f32 },
+    /// 滑条。`fraction` 是值在值域里的位置，已归一化到 0..=1——
+    /// 值域、步进这些在声明期就用掉了，绘制期只需要知道滑块画在哪。
+    Slider {
+        fraction: f32,
+        vertical: bool,
+        /// 竖着时有多长。横的铺满一行，用不到。
+        length: f32,
+    },
     /// 可折叠分组的标题条。
     Folder { text: String, open: bool },
     /// 单选按钮。和复选框的区别是它画成圆的，而且语义上「一组里只能选一个」。
@@ -130,9 +136,6 @@ impl Widget {
     ///
     /// 面板、标签、遮罩只是背景，走上去按回车什么也不会发生。
     /// 滚动条和对话框标题栏是纯指针控件，键盘上没有对应操作。
-    ///
-    /// **滑条暂时也不在此列**：它现在既没有焦点框可看，也不认方向键，
-    /// 停在那儿只会让人以为焦点丢了。等方向键调值做进来再放回来。
     pub(crate) fn focusable(&self) -> bool {
         match self {
             Widget::Button { .. }
@@ -140,10 +143,11 @@ impl Widget {
             | Widget::Radio { .. }
             | Widget::ListItem { .. }
             | Widget::Folder { .. }
+            // 滑条认方向键，也画得出焦点框，所以 Tab 该停在它上面。
+            | Widget::Slider { .. }
             | Widget::TextInput { .. } => true,
             Widget::Panel { .. }
             | Widget::Label { .. }
-            | Widget::Slider { .. }
             | Widget::Modal { .. }
             | Widget::DialogTitle { .. }
             | Widget::Scrollbar { .. } => false,
@@ -154,6 +158,9 @@ impl Widget {
     ///
     /// 文本框故意不算：那里的空格是要打出一个空格的，回车是提交。
     /// 两边都认的话，在文本框里敲空格会既打出空格又触发一次点击。
+    ///
+    /// 滑条也不算：它**能**拿焦点（要用方向键调值），但回车 / 空格在
+    /// 一条滑条上没有任何意义，认了只会凭空多出一个说不清的语义。
     pub(crate) fn activatable(&self) -> bool {
         match self {
             Widget::Button { .. }
@@ -235,6 +242,8 @@ pub struct WidgetUi {
     pub(crate) edits: std::collections::HashMap<Id, crate::TextEdit>,
     /// 每个滚动区的滚动位置，跨帧。
     pub(crate) scroll: std::collections::HashMap<Id, f32>,
+    /// 正在拖的滑条，跨帧。见 [`crate::slider::Drag`]。
+    pub(crate) slider_drags: std::collections::HashMap<Id, crate::slider::Drag>,
     /// 每个折叠分组开着还是收着，跨帧。
     ///
     /// 状态放在这里而不是让调用方保管：折叠纯粹是**外观**，和游戏逻辑
@@ -290,6 +299,7 @@ impl Default for WidgetUi {
             rects: Vec::new(),
             edits: Default::default(),
             scroll: Default::default(),
+            slider_drags: Default::default(),
             folders: Default::default(),
             screen: Vec2::ZERO,
             collapsed: false,
@@ -532,8 +542,15 @@ impl WidgetUi {
     /// 把一个声明变成叶子节点。
     fn leaf_of(&self, ui: &Ui, declared: &Declared) -> LayoutNode {
         let theme = self.theme;
+        // 竖滑条是唯一一个「自己说了算多高」的控件：横的铺满一行，
+        // 竖的没有对应的「铺满一列」——根容器的高度通常是内容撑出来的，
+        // 百分比在那里解析成 0，滑条会塌成一条看不见的线。
+        let vertical_slider = matches!(declared.widget, Widget::Slider { vertical: true, .. });
+
         let mut style = Style {
             width: match declared.widget {
+                // 竖滑条的宽度由内容（滑块粗细）定。
+                Widget::Slider { vertical: true, .. } => Length::Auto,
                 // 滑条和文本框都要占满一行才好用。
                 Widget::Slider { .. }
                 | Widget::TextInput { .. }
@@ -543,10 +560,21 @@ impl WidgetUi {
                 | Widget::Scrollbar { .. } => Length::Percent(1.0),
                 _ => Length::Auto,
             },
-            min_size: Vec2::new(0.0, theme.row_height),
+            height: match declared.widget {
+                Widget::Slider {
+                    vertical: true,
+                    length,
+                    ..
+                } => Length::Px(length),
+                _ => Length::Auto,
+            },
+            min_size: Vec2::new(0.0, if vertical_slider { 0.0 } else { theme.row_height }),
             padding: match declared.widget {
                 // 文字不加内边距——加了之后一行文字看着像个按钮。
                 Widget::Label { .. } => Edges::default(),
+                // 竖滑条的左右内边距要小：按横控件那套留 12 像素，
+                // 一条 10 像素宽的滑条会占掉 34 像素，旁边全是空的。
+                Widget::Slider { vertical: true, .. } => Edges::all(4.0),
                 _ => theme.padding,
             },
             justify: Justify::Center,
@@ -624,7 +652,9 @@ impl WidgetUi {
             Widget::Label { text, size, .. } => crate::label::size(ui, theme, text, *size),
             Widget::Button { text, .. } => crate::button::size(ui, theme, text),
             Widget::Checkbox { text, .. } => crate::checkbox::size(ui, theme, text),
-            Widget::Slider { .. } => crate::slider::size(ui, theme),
+            Widget::Slider {
+                vertical, length, ..
+            } => crate::slider::size(ui, theme, *vertical, *length),
             Widget::Folder { text, .. } => crate::folder::size(ui, theme, text),
             Widget::Radio { text, .. } => crate::radio::size(ui, theme, text),
             Widget::ListItem { text, .. } => crate::list::size(ui, theme, text),
@@ -683,9 +713,9 @@ impl WidgetUi {
                 Widget::Checkbox { text, checked, .. } => {
                     crate::checkbox::paint(ui, theme, rect, &response, text, *checked)
                 }
-                Widget::Slider { value, .. } => {
-                    crate::slider::paint(ui, theme, rect, &response, *value)
-                }
+                Widget::Slider {
+                    fraction, vertical, ..
+                } => crate::slider::paint(ui, theme, rect, &response, *fraction, *vertical),
                 Widget::Folder { text, open, .. } => {
                     crate::folder::paint(ui, theme, rect, &response, text, *open)
                 }
@@ -797,7 +827,7 @@ mod tests {
         w.begin();
         w.button("a", "按钮");
         w.checkbox("b", "开关", true);
-        w.slider("c", 0.5);
+        w.slider("c", &mut 0.5, &UiInput::default());
         w.finish(&mut ui, &UiInput::default());
         ui.end_frame();
 
@@ -991,7 +1021,7 @@ mod tests {
         w.begin();
         w.begin_row();
         let name = w.label("name", "time scale");
-        let control = w.slider("s", 0.5);
+        let control = w.slider("s", &mut 0.5, &kui::UiInput::default());
         w.end_row();
 
         let mut ui = ui();
@@ -1060,7 +1090,7 @@ mod tests {
         let title = w.label("title", "Controls");
         w.begin_row();
         let name = w.label("n", "speed");
-        w.slider("s", 0.5);
+        w.slider("s", &mut 0.5, &kui::UiInput::default());
         w.end_row();
         let footer = w.label("f", "end");
 

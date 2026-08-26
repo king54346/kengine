@@ -25,6 +25,13 @@ pub(crate) fn at(x: f32, y: f32) -> UiInput {
     }
 }
 
+/// 指针停在某处，本帧刚按下左键。
+pub(crate) fn press(x: f32, y: f32) -> UiInput {
+    let mut input = at(x, y);
+    input.pressed.push(PointerButton::Primary);
+    input
+}
+
 /// 本帧按下了激活键（回车 / 空格），指针不在窗口里。
 pub(crate) fn activate() -> UiInput {
     UiInput {

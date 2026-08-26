@@ -55,6 +55,33 @@ pub enum EditAction {
     Cancel,
 }
 
+/// 一次导航按键。滑条、单选组、列表、菜单认这些，不认具体按键。
+///
+/// 和 [`EditAction`] 分开而不是共用一个枚举，是因为**同一个物理键在
+/// 两边的意思不一样**：← 在文本框里是「光标左移一格」，在滑条上是
+/// 「减一步」，在单选组里是「上一项」。合成一个枚举的话，每个控件都得
+/// 先判断「这个动作是给我的吗」，判错一次就是按方向键时光标和滑条一起动。
+///
+/// 填这个字段的人**不必先看焦点在谁身上**，照实填就行——和
+/// [`UiInput::activate`] 一样，谁吃掉它由控件层按焦点决定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavKey {
+    /// 上方向键。
+    Up,
+    /// 下方向键。
+    Down,
+    /// 左方向键。
+    Left,
+    /// 右方向键。
+    Right,
+    /// Home。
+    Home,
+    /// End。
+    End,
+    /// Esc。
+    Escape,
+}
+
 /// 一帧的输入。由调用方（通常是 `kapp`）填。
 #[derive(Debug, Clone, Default)]
 pub struct UiInput {
@@ -82,10 +109,25 @@ pub struct UiInput {
     /// 焦点在文本框时那是文字，在按钮上时才是激活。所以填这个字段的人
     /// 不必先判断焦点，照实填就行。
     pub activate: bool,
+    /// 本帧按下的导航键，按发生顺序。
+    ///
+    /// 和 [`edits`](Self::edits) 里的方向键是**同一批物理键的两种解读**，
+    /// 两边照实填就行，理由见 [`NavKey`]。
+    pub nav: Vec<NavKey>,
+    /// Shift 正被按住。
+    ///
+    /// 是**持续量**不是一帧量：列表按住 Shift 点第二下选出一个区间，
+    /// 而那两下之间隔着好多帧。
+    pub shift: bool,
+    /// Ctrl（macOS 上是 Cmd）正被按住。
+    pub ctrl: bool,
 }
 
 impl UiInput {
     /// 清掉「刚按下 / 刚松开」这类一帧有效的量，保留指针位置。
+    ///
+    /// [`shift`](Self::shift) 与 [`ctrl`](Self::ctrl) 也留着：和指针位置
+    /// 一样是**持续量**，清掉的话按住 Shift 的第二帧就当没按。
     pub fn end_frame(&mut self) {
         self.pressed.clear();
         self.released.clear();
@@ -94,6 +136,7 @@ impl UiInput {
         self.focus_step = 0;
         self.edits.clear();
         self.activate = false;
+        self.nav.clear();
     }
 
     /// 某个键本帧刚按下。
@@ -606,12 +649,16 @@ mod tests {
         input.scroll = Vec2::new(0.0, 3.0);
         input.focus_step = 1;
         input.activate = true;
+        input.nav.push(NavKey::Down);
+        input.shift = true;
+        input.ctrl = true;
 
         input.end_frame();
 
         assert!(input.pressed.is_empty());
         assert!(input.text.is_empty());
         assert!(input.edits.is_empty());
+        assert!(input.nav.is_empty());
         assert_eq!(input.scroll, Vec2::ZERO);
         assert_eq!(input.focus_step, 0);
         assert!(!input.activate);
@@ -619,6 +666,10 @@ mod tests {
             input.pointer,
             Some(Vec2::new(10.0, 10.0)),
             "指针位置是持续量"
+        );
+        assert!(
+            input.shift && input.ctrl,
+            "修饰键是持续量：清掉的话按住 Shift 的第二帧就当没按"
         );
     }
 }
