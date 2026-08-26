@@ -1,7 +1,7 @@
 //! 列表行。选中项由调用方保管，单选多选都由它决定。
 
-use kmath::Vec2;
 use kfont::TextStyle;
+use kmath::Vec2;
 use kui::{Id, Rect, Response, Ui};
 
 use crate::widgets::{Theme, Widget, WidgetUi, text_style};
@@ -28,7 +28,14 @@ pub(crate) fn size(ui: &Ui, theme: &Theme, text: &str) -> Vec2 {
 }
 
 /// 出几何。
-pub(crate) fn paint(ui: &mut Ui, theme: &Theme, rect: Rect, response: &Response, text: &str, selected: bool) {
+pub(crate) fn paint(
+    ui: &mut Ui,
+    theme: &Theme,
+    rect: Rect,
+    response: &Response,
+    text: &str,
+    selected: bool,
+) {
     // 选中的整行铺主色。悬停只铺一层浅的——两者叠在
     // 一起时选中要压过悬停，否则鼠标扫过就看不出选了谁。
     if selected {
@@ -49,4 +56,27 @@ pub(crate) fn paint(ui: &mut Ui, theme: &Theme, rect: Rect, response: &Response,
         theme.text,
         Some(rect.size().x),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::WidgetUi;
+    use crate::testing::{SCREEN, at, ui};
+    use kui::{PointerButton, UiInput};
+
+    /// 选中的列表行要画出底色。不画的话选了等于没选。
+    #[test]
+    fn a_selected_list_item_draws_a_background() {
+        let count = |selected: bool| {
+            let mut ui = ui();
+            let mut w = WidgetUi::default();
+            w.begin();
+            w.list_item("i", "一行", selected);
+            w.finish(&mut ui, &UiInput::default());
+            ui.end_frame();
+            ui.draw_list().indices().len()
+        };
+        assert!(count(true) > count(false));
+    }
 }

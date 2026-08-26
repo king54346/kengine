@@ -1,7 +1,7 @@
 //! 单选按钮。一组里只能选一个，选中项由调用方保管。
 
-use kmath::Vec2;
 use kfont::TextStyle;
+use kmath::Vec2;
 use kui::{Id, Rect, Response, Ui};
 
 use crate::widgets::{Theme, Widget, WidgetUi, text_style};
@@ -42,7 +42,14 @@ pub(crate) fn size(ui: &Ui, theme: &Theme, text: &str) -> Vec2 {
 }
 
 /// 出几何。
-pub(crate) fn paint(ui: &mut Ui, theme: &Theme, rect: Rect, response: &Response, text: &str, selected: bool) {
+pub(crate) fn paint(
+    ui: &mut Ui,
+    theme: &Theme,
+    rect: Rect,
+    response: &Response,
+    text: &str,
+    selected: bool,
+) {
     // 和复选框同样大小，但画成圆的。形状是单选和多选
     // 唯一的视觉区别，两者混在一起时全靠它区分。
     let size = theme.row_height * 0.6;
@@ -85,4 +92,57 @@ pub(crate) fn paint(ui: &mut Ui, theme: &Theme, rect: Rect, response: &Response,
         theme.text,
         None,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::WidgetUi;
+    use crate::testing::{SCREEN, at, ui};
+    use kui::{PointerButton, UiInput};
+
+    /// 选中的单选按钮要比没选中的多画一个圆点，否则一组按钮
+    /// 看上去全都一样，用户不知道自己选了哪个。
+    #[test]
+    fn a_selected_radio_draws_more_than_an_unselected_one() {
+        let count = |selected: bool| {
+            let mut ui = ui();
+            let mut w = WidgetUi::default();
+            w.begin();
+            w.radio("r", "选项", selected);
+            w.finish(&mut ui, &UiInput::default());
+            ui.end_frame();
+            ui.draw_list().indices().len()
+        };
+        assert!(count(true) > count(false));
+    }
+
+    /// 一组单选按钮各自独立响应，点第二个不会连带点到第一个。
+    #[test]
+    fn radios_in_a_group_are_independent() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        w.begin();
+        let a = w.radio("a", "甲", true);
+        let b = w.radio("b", "乙", false);
+        w.finish(&mut ui, &UiInput::default());
+
+        // 点击要按下、松开两帧才算数。
+        let target = w.response(b).rect.center();
+        for frame in 0..2 {
+            let mut input = at(target.x, target.y);
+            if frame == 0 {
+                input.pressed.push(PointerButton::Primary);
+            } else {
+                input.released.push(PointerButton::Primary);
+            }
+            w.begin();
+            w.radio("a", "甲", true);
+            w.radio("b", "乙", false);
+            w.finish(&mut ui, &input);
+        }
+
+        assert!(w.response(b).clicked);
+        assert!(!w.response(a).clicked);
+    }
 }

@@ -1,7 +1,7 @@
 //! 可折叠分组。展开状态是纯外观，破例由控件自己存。
 
-use kmath::Vec2;
 use kfont::TextStyle;
+use kmath::Vec2;
 use kui::{Id, Rect, Response, Ui};
 
 use crate::widgets::Declared;
@@ -74,7 +74,14 @@ pub(crate) fn size(ui: &Ui, theme: &Theme, text: &str) -> Vec2 {
 }
 
 /// 出几何。
-pub(crate) fn paint(ui: &mut Ui, theme: &Theme, rect: Rect, response: &Response, text: &str, open: bool) {
+pub(crate) fn paint(
+    ui: &mut Ui,
+    theme: &Theme,
+    rect: Rect,
+    response: &Response,
+    text: &str,
+    open: bool,
+) {
     // 标题条：一条比面板稍亮的横杠，左端一个三角形。
     let fill = if response.hovered {
         theme.hovered
@@ -133,4 +140,145 @@ pub(crate) fn paint(ui: &mut Ui, theme: &Theme, rect: Rect, response: &Response,
         theme.text,
         Some(rect.size().x - theme.row_height),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::WidgetUi;
+    use crate::testing::{SCREEN, at, ui};
+    use kui::{PointerButton, UiInput};
+
+    #[test]
+    fn a_folder_starts_open() {
+        // 所有分组都收着的面板，第一眼看不出能点开。
+        let mut w = WidgetUi::default();
+        w.begin();
+        assert!(w.folder("f", "Section"));
+        w.end_folder();
+    }
+
+    #[test]
+    fn a_collapsed_folder_declares_nothing_inside() {
+        // 收起时里面的控件**根本不声明**。声明了再藏的话它们仍然占布局
+        // 空间，收起来的分组会留下一大片空白。
+        let mut w = WidgetUi::default();
+        w.begin();
+        let header = w.folder("f", "Section");
+        assert!(header);
+        w.label("inside", "hi");
+        w.end_folder();
+
+        let mut ui = ui();
+        w.finish(&mut ui, &kui::UiInput::default());
+        let open_height = w.response(Id::new("inside")).rect.size().y;
+        assert!(open_height > 0.0, "展开时里面的控件该有高度");
+
+        // 收起来。
+        w.set_folder_open(Id::new("f"), false);
+        w.begin();
+        w.folder("f", "Section");
+        w.label("inside", "hi");
+        w.end_folder();
+        w.finish(&mut ui, &kui::UiInput::default());
+
+        assert_eq!(
+            w.response(Id::new("inside")).rect.size(),
+            Vec2::ZERO,
+            "收起来了，里面的控件却还占着地方"
+        );
+    }
+
+    #[test]
+    fn a_collapsed_folder_shrinks_the_panel() {
+        // 端到端：收起之后整体高度必须变小，否则折叠没有意义。
+        let mut ui = ui();
+
+        let mut w = WidgetUi::default();
+        w.begin();
+        w.folder("f", "Section");
+        for i in 0..8 {
+            w.label(&format!("row{i}"), "content");
+        }
+        w.end_folder();
+        let tail_open = w.label("tail", "after");
+        w.finish(&mut ui, &kui::UiInput::default());
+        let open_bottom = w.response(tail_open).rect.max.y;
+
+        w.set_folder_open(Id::new("f"), false);
+        w.begin();
+        w.folder("f", "Section");
+        for i in 0..8 {
+            w.label(&format!("row{i}"), "content");
+        }
+        w.end_folder();
+        let tail_closed = w.label("tail", "after");
+        w.finish(&mut ui, &kui::UiInput::default());
+        let closed_bottom = w.response(tail_closed).rect.max.y;
+
+        assert!(
+            closed_bottom < open_bottom,
+            "收起来之后面板没变矮：{closed_bottom} vs {open_bottom}"
+        );
+    }
+
+    #[test]
+    fn the_folder_header_itself_is_always_declared() {
+        // 标题条是那个开关，收起时它自己必须还在，否则再也点不开了。
+        let mut w = WidgetUi::default();
+        w.set_folder_open(Id::new("f"), false);
+        w.begin();
+        let header = w.folder("f", "Section");
+        assert!(!header);
+        w.label("inside", "hi");
+        w.end_folder();
+
+        let mut ui = ui();
+        w.finish(&mut ui, &kui::UiInput::default());
+        assert!(
+            w.response(Id::new("f")).rect.size().y > 0.0,
+            "收起来之后标题条也没了，再也点不开"
+        );
+    }
+
+    #[test]
+    fn end_folder_restores_declaring() {
+        // 收完之后的控件不受影响。
+        let mut w = WidgetUi::default();
+        w.set_folder_open(Id::new("f"), false);
+        w.begin();
+        w.folder("f", "Section");
+        w.label("inside", "hidden");
+        w.end_folder();
+        let after = w.label("after", "visible");
+
+        let mut ui = ui();
+        w.finish(&mut ui, &kui::UiInput::default());
+        assert!(
+            w.response(after).rect.size().y > 0.0,
+            "分组之后的控件被吞了"
+        );
+    }
+
+    #[test]
+    fn a_forgotten_end_folder_does_not_leak_into_the_next_frame() {
+        // 忘了 `end_folder` 是常见手误。`begin` 必须把折叠状态清掉，
+        // 否则下一帧整个面板都是空的——而且看不出原因。
+        let mut w = WidgetUi::default();
+        w.set_folder_open(Id::new("f"), false);
+        w.begin();
+        w.folder("f", "Section");
+        w.label("inside", "hidden");
+        // 故意不调 end_folder
+
+        w.begin();
+        let normal = w.label("normal", "visible");
+
+        let mut ui = ui();
+        w.finish(&mut ui, &kui::UiInput::default());
+        assert!(
+            w.response(normal).rect.size().y > 0.0,
+            "上一帧没收的折叠漏到了这一帧，整个面板是空的"
+        );
+    }
 }

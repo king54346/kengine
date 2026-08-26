@@ -31,12 +31,19 @@ impl WidgetUi {
 }
 
 /// 量内容尺寸。布局据此决定这个控件要占多大。
-pub(crate) fn size(ui: &Ui, theme: &Theme) -> Vec2 {
+pub(crate) fn size(_ui: &Ui, _theme: &Theme) -> Vec2 {
     Vec2::new(0.0, SCROLLBAR_THICKNESS)
 }
 
 /// 出几何。
-pub(crate) fn paint(ui: &mut Ui, theme: &Theme, rect: Rect, response: &Response, fraction: f32, offset: f32) {
+pub(crate) fn paint(
+    ui: &mut Ui,
+    theme: &Theme,
+    rect: Rect,
+    response: &Response,
+    fraction: f32,
+    offset: f32,
+) {
     // 竖着还是横着看布局给的形状，不额外加参数——
     // 一根又高又窄的条只可能是竖的。
     let size = rect.size();
@@ -71,4 +78,58 @@ pub(crate) fn paint(ui: &mut Ui, theme: &Theme, rect: Rect, response: &Response,
         theme.dim
     };
     ui.rounded_rect(thumb, thumb.size().min_element() * 0.5, fill);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::WidgetUi;
+    use crate::testing::{SCREEN, at, ui};
+    use kui::{PointerButton, UiInput};
+
+    /// 内容越多滑块越短，但短到一定程度就不再短了——
+    /// 一根抓不住的线等于没有滚动条。
+    #[test]
+    fn a_scrollbar_thumb_never_gets_too_short() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        w.begin();
+        // 万分之一的可见比例：朴素算法会得到零点几像素。
+        let bar = w.scrollbar("s", 0.0001, 0.0);
+        w.finish(&mut ui, &UiInput::default());
+        ui.end_frame();
+
+        let track = w.response(bar).rect;
+        // 找出画在轨道之外的最右一点，也就是滑块的末端。
+        let vertices = ui.draw_list().vertices();
+        let widest = vertices.iter().fold(f32::MIN, |a, v| a.max(v.position[0]));
+        let thumb_len = widest - track.min.x;
+        assert!(
+            thumb_len >= SCROLLBAR_MIN_THUMB.min(track.size().x) - 0.01,
+            "滑块只有 {thumb_len} 长",
+        );
+    }
+
+    /// 滑到底时滑块的末端正好贴着轨道末端，不探出去。
+    ///
+    /// 这一条盯着的是「行程 = 轨道长 − 滑块长」：忘了减滑块长度的话，
+    /// offset 为 1 会把滑块整个推出轨道。
+    #[test]
+    fn a_scrollbar_thumb_stops_at_the_end_of_the_track() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        w.begin();
+        let bar = w.scrollbar("s", 0.25, 1.0);
+        w.finish(&mut ui, &UiInput::default());
+        ui.end_frame();
+
+        let track = w.response(bar).rect;
+        let vertices = ui.draw_list().vertices();
+        let widest = vertices.iter().fold(f32::MIN, |a, v| a.max(v.position[0]));
+        assert!(
+            widest <= track.max.x + 0.01,
+            "滑块探出轨道 {} 像素",
+            widest - track.max.x,
+        );
+    }
 }

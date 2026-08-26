@@ -22,7 +22,7 @@ impl WidgetUi {
 }
 
 /// 量内容尺寸。布局据此决定这个控件要占多大。
-pub(crate) fn size(ui: &Ui, theme: &Theme) -> Vec2 {
+pub(crate) fn size(_ui: &Ui, theme: &Theme) -> Vec2 {
     Vec2::new(120.0, theme.font_size)
 }
 
@@ -55,4 +55,34 @@ pub(crate) fn paint(ui: &mut Ui, theme: &Theme, rect: Rect, response: &Response,
         theme.text
     };
     ui.rounded_rect(knob, knob_radius, fill);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::WidgetUi;
+    use crate::testing::{SCREEN, at, ui};
+    use kui::{PointerButton, UiInput};
+
+    #[test]
+    fn the_slider_knob_stays_inside_the_track() {
+        // 不夹的话，拖到两端时滑块会掉出去一半。
+        for value in [0.0, 1.0] {
+            let mut ui = ui();
+            let mut w = WidgetUi::default();
+            w.begin();
+            let id = w.slider("s", value);
+            w.finish(&mut ui, &UiInput::default());
+            ui.end_frame();
+
+            let track = w.response(id).rect;
+            for v in ui.draw_list().vertices() {
+                assert!(
+                    v.position[0] >= track.min.x - 0.01 && v.position[0] <= track.max.x + 0.01,
+                    "value={value} 时滑块跑出了轨道：{}",
+                    v.position[0]
+                );
+            }
+        }
+    }
 }

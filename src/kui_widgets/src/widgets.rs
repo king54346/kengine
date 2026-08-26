@@ -32,7 +32,6 @@ pub(crate) fn text_style(size: f32) -> TextStyle {
     }
 }
 
-
 /// 控件的配色与尺寸。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Theme {
@@ -431,7 +430,7 @@ impl WidgetUi {
     }
 
     /// 滚动区的视口矩形。
-    fn scroll_viewport(&self) -> Option<Rect> {
+    pub(crate) fn scroll_viewport(&self) -> Option<Rect> {
         let frame = self.scroll_frame?;
         let end = frame.last.min(self.rects.len());
         let first = self.rects.get(frame.first)?;
@@ -567,9 +566,10 @@ impl WidgetUi {
             Widget::Modal { .. } => crate::modal::size(ui, theme),
             Widget::DialogTitle { text, .. } => crate::dialog::size(ui, theme, text),
             Widget::Scrollbar { .. } => crate::scrollbar::size(ui, theme),
-            Widget::TextInput { text, placeholder, .. } => crate::text_input::size(ui, theme, text, placeholder),
+            Widget::TextInput {
+                text, placeholder, ..
+            } => crate::text_input::size(ui, theme, text, placeholder),
         }
-
     }
 
     /// 走一遍求解结果，出几何。
@@ -606,18 +606,50 @@ impl WidgetUi {
             let response = self.interaction.response(declared.id);
 
             match &declared.widget {
-                Widget::Panel { color, radius, .. } => crate::panel::paint(ui, theme, rect, &response, *color, *radius),
-                Widget::Label { text, color, size, .. } => crate::label::paint(ui, theme, rect, &response, text, *color, *size),
-                Widget::Button { text, .. } => crate::button::paint(ui, theme, rect, &response, text),
-                Widget::Checkbox { text, checked, .. } => crate::checkbox::paint(ui, theme, rect, &response, text, *checked),
-                Widget::Slider { value, .. } => crate::slider::paint(ui, theme, rect, &response, *value),
-                Widget::Folder { text, open, .. } => crate::folder::paint(ui, theme, rect, &response, text, *open),
-                Widget::Radio { text, selected, .. } => crate::radio::paint(ui, theme, rect, &response, text, *selected),
-                Widget::ListItem { text, selected, .. } => crate::list::paint(ui, theme, rect, &response, text, *selected),
-                Widget::Modal { color, .. } => crate::modal::paint(ui, theme, rect, &response, *color, self.screen),
-                Widget::DialogTitle { text, .. } => crate::dialog::paint(ui, theme, rect, &response, text),
-                Widget::Scrollbar { fraction, offset, .. } => crate::scrollbar::paint(ui, theme, rect, &response, *fraction, *offset),
-                Widget::TextInput { text, placeholder, .. } => crate::text_input::paint(ui, theme, rect, &response, text, placeholder, &self.text_state(declared.id)),
+                Widget::Panel { color, radius, .. } => {
+                    crate::panel::paint(ui, theme, rect, &response, *color, *radius)
+                }
+                Widget::Label {
+                    text, color, size, ..
+                } => crate::label::paint(ui, theme, rect, &response, text, *color, *size),
+                Widget::Button { text, .. } => {
+                    crate::button::paint(ui, theme, rect, &response, text)
+                }
+                Widget::Checkbox { text, checked, .. } => {
+                    crate::checkbox::paint(ui, theme, rect, &response, text, *checked)
+                }
+                Widget::Slider { value, .. } => {
+                    crate::slider::paint(ui, theme, rect, &response, *value)
+                }
+                Widget::Folder { text, open, .. } => {
+                    crate::folder::paint(ui, theme, rect, &response, text, *open)
+                }
+                Widget::Radio { text, selected, .. } => {
+                    crate::radio::paint(ui, theme, rect, &response, text, *selected)
+                }
+                Widget::ListItem { text, selected, .. } => {
+                    crate::list::paint(ui, theme, rect, &response, text, *selected)
+                }
+                Widget::Modal { color, .. } => {
+                    crate::modal::paint(ui, theme, rect, &response, *color, self.screen)
+                }
+                Widget::DialogTitle { text, .. } => {
+                    crate::dialog::paint(ui, theme, rect, &response, text)
+                }
+                Widget::Scrollbar {
+                    fraction, offset, ..
+                } => crate::scrollbar::paint(ui, theme, rect, &response, *fraction, *offset),
+                Widget::TextInput {
+                    text, placeholder, ..
+                } => crate::text_input::paint(
+                    ui,
+                    theme,
+                    rect,
+                    &response,
+                    text,
+                    placeholder,
+                    &self.text_state(declared.id),
+                ),
             }
         }
 
@@ -625,7 +657,6 @@ impl WidgetUi {
             ui.pop_clip();
         }
     }
-
 }
 
 /// 把一个编辑动作应用到状态上。
@@ -695,70 +726,6 @@ mod tests {
     }
 
     #[test]
-    fn a_button_reports_hover_and_click() {
-        let mut ui = ui();
-        let mut w = WidgetUi::default();
-
-        // 第一帧：声明并排版。
-        w.begin();
-        let id = w.button("a", "点我");
-        w.finish(&mut ui, &UiInput::default());
-        let rect = w.response(id).rect;
-        let center = rect.center();
-
-        // 第二帧：指针移上去。
-        w.begin();
-        w.button("a", "点我");
-        w.finish(&mut ui, &at(center.x, center.y));
-        assert!(w.response(id).hovered);
-
-        // 第三帧：按下。
-        let mut input = at(center.x, center.y);
-        input.pressed.push(PointerButton::Primary);
-        w.begin();
-        w.button("a", "点我");
-        w.finish(&mut ui, &input);
-        assert!(w.response(id).held);
-        assert!(!w.response(id).clicked);
-
-        // 第四帧：松开。
-        let mut input = at(center.x, center.y);
-        input.released.push(PointerButton::Primary);
-        w.begin();
-        w.button("a", "点我");
-        w.finish(&mut ui, &input);
-        assert!(w.response(id).clicked);
-    }
-
-    #[test]
-    fn clicking_one_button_does_not_trigger_the_other() {
-        let mut ui = ui();
-        let mut w = WidgetUi::default();
-        w.begin();
-        let a = w.button("a", "甲");
-        let b = w.button("b", "乙");
-        w.finish(&mut ui, &UiInput::default());
-
-        let center = w.response(a).rect.center();
-        let mut input = at(center.x, center.y);
-        input.pressed.push(PointerButton::Primary);
-        w.begin();
-        w.button("a", "甲");
-        w.button("b", "乙");
-        w.finish(&mut ui, &input);
-
-        let mut input = at(center.x, center.y);
-        input.released.push(PointerButton::Primary);
-        w.begin();
-        w.button("a", "甲");
-        w.button("b", "乙");
-        w.finish(&mut ui, &input);
-
-        assert!(w.response(a).clicked);
-        assert!(!w.response(b).clicked);
-    }
-
-    #[test]
     fn widgets_produce_geometry() {
         let mut ui = ui();
         let mut w = WidgetUi::default();
@@ -772,224 +739,6 @@ mod tests {
         assert!(!ui.draw_list().is_empty(), "控件该画出东西来");
         // 没有裁剪、没有换纹理，一次绘制画完。
         assert_eq!(ui.draw_list().batches().len(), 1);
-    }
-
-    /// 选中的单选按钮要比没选中的多画一个圆点，否则一组按钮
-    /// 看上去全都一样，用户不知道自己选了哪个。
-    #[test]
-    fn a_selected_radio_draws_more_than_an_unselected_one() {
-        let count = |selected: bool| {
-            let mut ui = ui();
-            let mut w = WidgetUi::default();
-            w.begin();
-            w.radio("r", "选项", selected);
-            w.finish(&mut ui, &UiInput::default());
-            ui.end_frame();
-            ui.draw_list().indices().len()
-        };
-        assert!(count(true) > count(false));
-    }
-
-    /// 一组单选按钮各自独立响应，点第二个不会连带点到第一个。
-    #[test]
-    fn radios_in_a_group_are_independent() {
-        let mut ui = ui();
-        let mut w = WidgetUi::default();
-        w.begin();
-        let a = w.radio("a", "甲", true);
-        let b = w.radio("b", "乙", false);
-        w.finish(&mut ui, &UiInput::default());
-
-        // 点击要按下、松开两帧才算数。
-        let target = w.response(b).rect.center();
-        for frame in 0..2 {
-            let mut input = at(target.x, target.y);
-            if frame == 0 {
-                input.pressed.push(PointerButton::Primary);
-            } else {
-                input.released.push(PointerButton::Primary);
-            }
-            w.begin();
-            w.radio("a", "甲", true);
-            w.radio("b", "乙", false);
-            w.finish(&mut ui, &input);
-        }
-
-        assert!(w.response(b).clicked);
-        assert!(!w.response(a).clicked);
-    }
-
-    /// 选中的列表行要画出底色。不画的话选了等于没选。
-    #[test]
-    fn a_selected_list_item_draws_a_background() {
-        let count = |selected: bool| {
-            let mut ui = ui();
-            let mut w = WidgetUi::default();
-            w.begin();
-            w.list_item("i", "一行", selected);
-            w.finish(&mut ui, &UiInput::default());
-            ui.end_frame();
-            ui.draw_list().indices().len()
-        };
-        assert!(count(true) > count(false));
-    }
-
-    /// 遮罩铺满整个窗口，不是铺满它那个布局节点——
-    /// 缩在节点里的话背景根本挡不住。
-    #[test]
-    fn a_modal_covers_the_whole_window() {
-        let mut ui = ui();
-        let mut w = WidgetUi::default();
-        w.begin();
-        w.modal("m");
-        w.finish(&mut ui, &UiInput::default());
-        ui.end_frame();
-
-        let vertices = ui.draw_list().vertices();
-        let min_x = vertices.iter().fold(f32::MAX, |a, v| a.min(v.position[0]));
-        let min_y = vertices.iter().fold(f32::MAX, |a, v| a.min(v.position[1]));
-        let max_x = vertices.iter().fold(f32::MIN, |a, v| a.max(v.position[0]));
-        let max_y = vertices.iter().fold(f32::MIN, |a, v| a.max(v.position[1]));
-        assert_eq!((min_x, min_y), (0.0, 0.0));
-        assert_eq!((max_x, max_y), (SCREEN.x, SCREEN.y));
-    }
-
-    /// 遮罩之后声明的东西要能点得到——遮罩挡的是它**下面**的，
-    /// 不是它上面的对话框。命中测试从后往前找，这一条就是在钉这个顺序。
-    #[test]
-    fn a_modal_does_not_block_what_comes_after_it() {
-        let mut ui = ui();
-        let mut w = WidgetUi::default();
-        w.begin();
-        w.modal("m");
-        let b = w.button("ok", "确定");
-        w.finish(&mut ui, &UiInput::default());
-
-        let target = w.response(b).rect.center();
-        for frame in 0..2 {
-            let mut input = at(target.x, target.y);
-            if frame == 0 {
-                input.pressed.push(PointerButton::Primary);
-            } else {
-                input.released.push(PointerButton::Primary);
-            }
-            w.begin();
-            w.modal("m");
-            w.button("ok", "确定");
-            w.finish(&mut ui, &input);
-        }
-
-        assert!(w.response(b).clicked, "对话框上的按钮被遮罩吃掉了");
-    }
-
-    /// 拖标题栏得到位移增量，调用方拿它挪对话框。
-    #[test]
-    fn dragging_a_dialog_title_reports_the_delta() {
-        let mut ui = ui();
-        let mut w = WidgetUi::default();
-        w.begin();
-        let t = w.dialog_title("t", "设置");
-        w.finish(&mut ui, &UiInput::default());
-
-        let start = w.response(t).rect.center();
-        let mut input = at(start.x, start.y);
-        input.pressed.push(PointerButton::Primary);
-        w.begin();
-        w.dialog_title("t", "设置");
-        w.finish(&mut ui, &input);
-
-        // 按住不放地挪：这一帧既没按下也没松开，按住的状态由内部记着。
-        let input = at(start.x + 40.0, start.y + 25.0);
-        w.begin();
-        w.dialog_title("t", "设置");
-        w.finish(&mut ui, &input);
-
-        let drag = w.response(t).drag;
-        assert!((drag.x - 40.0).abs() < 0.01, "横向位移是 {}", drag.x);
-        assert!((drag.y - 25.0).abs() < 0.01, "纵向位移是 {}", drag.y);
-    }
-
-    /// 内容越多滑块越短，但短到一定程度就不再短了——
-    /// 一根抓不住的线等于没有滚动条。
-    #[test]
-    fn a_scrollbar_thumb_never_gets_too_short() {
-        let mut ui = ui();
-        let mut w = WidgetUi::default();
-        w.begin();
-        // 万分之一的可见比例：朴素算法会得到零点几像素。
-        let bar = w.scrollbar("s", 0.0001, 0.0);
-        w.finish(&mut ui, &UiInput::default());
-        ui.end_frame();
-
-        let track = w.response(bar).rect;
-        // 找出画在轨道之外的最右一点，也就是滑块的末端。
-        let vertices = ui.draw_list().vertices();
-        let widest = vertices.iter().fold(f32::MIN, |a, v| a.max(v.position[0]));
-        let thumb_len = widest - track.min.x;
-        assert!(
-            thumb_len >= SCROLLBAR_MIN_THUMB.min(track.size().x) - 0.01,
-            "滑块只有 {thumb_len} 长",
-        );
-    }
-
-    /// 滑到底时滑块的末端正好贴着轨道末端，不探出去。
-    ///
-    /// 这一条盯着的是「行程 = 轨道长 − 滑块长」：忘了减滑块长度的话，
-    /// offset 为 1 会把滑块整个推出轨道。
-    #[test]
-    fn a_scrollbar_thumb_stops_at_the_end_of_the_track() {
-        let mut ui = ui();
-        let mut w = WidgetUi::default();
-        w.begin();
-        let bar = w.scrollbar("s", 0.25, 1.0);
-        w.finish(&mut ui, &UiInput::default());
-        ui.end_frame();
-
-        let track = w.response(bar).rect;
-        let vertices = ui.draw_list().vertices();
-        let widest = vertices.iter().fold(f32::MIN, |a, v| a.max(v.position[0]));
-        assert!(
-            widest <= track.max.x + 0.01,
-            "滑块探出轨道 {} 像素",
-            widest - track.max.x,
-        );
-    }
-
-    #[test]
-    fn a_checked_box_draws_more_than_an_unchecked_one() {
-        // 勾没画出来的话，复选框在两个状态下长得一样，用户看不出来。
-        let count = |checked: bool| {
-            let mut ui = ui();
-            let mut w = WidgetUi::default();
-            w.begin();
-            w.checkbox("b", "开关", checked);
-            w.finish(&mut ui, &UiInput::default());
-            ui.end_frame();
-            ui.draw_list().vertices().len()
-        };
-        assert!(count(true) > count(false));
-    }
-
-    #[test]
-    fn the_slider_knob_stays_inside_the_track() {
-        // 不夹的话，拖到两端时滑块会掉出去一半。
-        for value in [0.0, 1.0] {
-            let mut ui = ui();
-            let mut w = WidgetUi::default();
-            w.begin();
-            let id = w.slider("s", value);
-            w.finish(&mut ui, &UiInput::default());
-            ui.end_frame();
-
-            let track = w.response(id).rect;
-            for v in ui.draw_list().vertices() {
-                assert!(
-                    v.position[0] >= track.min.x - 0.01 && v.position[0] <= track.max.x + 0.01,
-                    "value={value} 时滑块跑出了轨道：{}",
-                    v.position[0]
-                );
-            }
-        }
     }
 
     #[test]
@@ -1065,287 +814,6 @@ mod tests {
 
         assert!(w.response(b).rect.min.x > w.response(a).rect.min.x);
         assert_eq!(w.response(a).rect.min.y, w.response(b).rect.min.y);
-    }
-
-    /// 让某个控件拿到焦点：Tab 一次就走到第一个。
-    fn focus_first(w: &mut WidgetUi, ui: &mut Ui, declare: impl Fn(&mut WidgetUi)) {
-        let tab = UiInput {
-            focus_step: 1,
-            ..Default::default()
-        };
-        w.begin();
-        declare(w);
-        w.finish(ui, &tab);
-    }
-
-    #[test]
-    fn typing_into_a_focused_text_input_changes_the_text() {
-        let mut ui = ui();
-        let mut w = WidgetUi::default();
-        let mut text = String::new();
-
-        focus_first(&mut w, &mut ui, |w| {
-            let mut scratch = String::new();
-            w.text_input("name", &mut scratch, "名字", &UiInput::default());
-        });
-
-        let input = UiInput {
-            text: "中文".to_string(),
-            ..Default::default()
-        };
-        w.begin();
-        w.text_input("name", &mut text, "名字", &input);
-        w.finish(&mut ui, &input);
-
-        assert_eq!(text, "中文");
-    }
-
-    #[test]
-    fn an_unfocused_text_input_ignores_typing() {
-        // 不判焦点的话，界面上每个文本框都会同时收到同一串字。
-        let mut ui = ui();
-        let mut w = WidgetUi::default();
-        let mut a = String::new();
-        let mut b = String::new();
-
-        // 先让第一个拿到焦点。
-        focus_first(&mut w, &mut ui, |w| {
-            let mut s1 = String::new();
-            let mut s2 = String::new();
-            w.text_input("a", &mut s1, "", &UiInput::default());
-            w.text_input("b", &mut s2, "", &UiInput::default());
-        });
-
-        let input = UiInput {
-            text: "x".to_string(),
-            ..Default::default()
-        };
-        w.begin();
-        w.text_input("a", &mut a, "", &input);
-        w.text_input("b", &mut b, "", &input);
-        w.finish(&mut ui, &input);
-
-        assert_eq!(a, "x");
-        assert_eq!(b, "", "没有焦点的文本框不该收到输入");
-    }
-
-    #[test]
-    fn backspace_in_a_text_input_removes_a_whole_character() {
-        let mut ui = ui();
-        let mut w = WidgetUi::default();
-        let mut text = String::from("中文");
-
-        focus_first(&mut w, &mut ui, |w| {
-            let mut scratch = String::from("中文");
-            w.text_input("t", &mut scratch, "", &UiInput::default());
-        });
-        // 光标要先到末尾。
-        let to_end = UiInput {
-            edits: vec![kui::EditAction::End { select: false }],
-            ..Default::default()
-        };
-        w.begin();
-        w.text_input("t", &mut text, "", &to_end);
-        w.finish(&mut ui, &to_end);
-
-        let backspace = UiInput {
-            edits: vec![kui::EditAction::Backspace],
-            ..Default::default()
-        };
-        w.begin();
-        w.text_input("t", &mut text, "", &backspace);
-        w.finish(&mut ui, &backspace);
-
-        assert_eq!(text, "中");
-    }
-
-    #[test]
-    fn a_text_input_survives_the_text_being_replaced_externally() {
-        // 读档、重置会把文本整个换掉。光标不夹回去的话下一次切片就 panic。
-        let mut ui = ui();
-        let mut w = WidgetUi::default();
-        let mut text = String::from("很长的一段内容");
-
-        focus_first(&mut w, &mut ui, |w| {
-            let mut scratch = String::from("很长的一段内容");
-            w.text_input("t", &mut scratch, "", &UiInput::default());
-        });
-        let to_end = UiInput {
-            edits: vec![kui::EditAction::End { select: false }],
-            ..Default::default()
-        };
-        w.begin();
-        w.text_input("t", &mut text, "", &to_end);
-        w.finish(&mut ui, &to_end);
-
-        // 外部换成短的。
-        text = String::from("短");
-        w.begin();
-        w.text_input("t", &mut text, "", &UiInput::default());
-        w.finish(&mut ui, &UiInput::default());
-
-        assert!(w.text_state(Id::new("t")).cursor() <= text.len());
-    }
-
-    #[test]
-    fn an_empty_text_input_still_has_a_clickable_width() {
-        // 宽度按内容算的话，空文本框会塌成零宽，根本点不进去。
-        let mut ui = ui();
-        let mut w = WidgetUi::default();
-        let mut text = String::new();
-        w.begin();
-        let id = w.text_input("t", &mut text, "", &UiInput::default());
-        w.finish(&mut ui, &UiInput::default());
-
-        assert!(w.response(id).rect.size().x >= 160.0);
-    }
-
-    /// 一个装了 `count` 个按钮的滚动区。
-    fn scroll_list(w: &mut WidgetUi, ui: &mut Ui, input: &UiInput, count: usize) -> Id {
-        w.begin();
-        let id = w.begin_scroll("list", 100.0);
-        for i in 0..count {
-            w.button(&format!("row{i}"), format!("第 {i} 行"));
-        }
-        w.end_scroll();
-        w.finish(ui, input);
-        id
-    }
-
-    /// 视口里的一个点。
-    ///
-    /// 不硬编码坐标：测试里没有字体，按钮宽度只剩内边距（24 px），
-    /// 随手写个 x=60 就落到视口外面去了。
-    fn inside_viewport(w: &WidgetUi) -> Vec2 {
-        w.scroll_viewport().expect("应当有滚动区").center()
-    }
-
-    fn scrolling(x: f32, y: f32, amount: f32) -> UiInput {
-        UiInput {
-            pointer: Some(Vec2::new(x, y)),
-            scroll: Vec2::new(0.0, amount),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn scrolling_moves_the_content_up() {
-        let mut ui = ui();
-        let mut w = WidgetUi::default();
-
-        let list = scroll_list(&mut w, &mut ui, &UiInput::default(), 20);
-        let before = w.response(Id::new("row0")).rect.min.y;
-
-        // 滚轮向下（负 y）。指针要在视口里。
-        let point = inside_viewport(&w);
-        let input = scrolling(point.x, point.y, -3.0);
-        scroll_list(&mut w, &mut ui, &input, 20);
-
-        assert!(
-            w.scroll_offset(list) > 0.0,
-            "偏移是 {}",
-            w.scroll_offset(list)
-        );
-        assert!(
-            w.response(Id::new("row0")).rect.min.y < before,
-            "内容该往上跑"
-        );
-    }
-
-    #[test]
-    fn scrolling_stops_at_the_top_and_bottom() {
-        let mut ui = ui();
-        let mut w = WidgetUi::default();
-        let list = scroll_list(&mut w, &mut ui, &UiInput::default(), 20);
-        let p = inside_viewport(&w);
-
-        // 往上滚到头。
-        for _ in 0..50 {
-            scroll_list(&mut w, &mut ui, &scrolling(p.x, p.y, 10.0), 20);
-        }
-        assert_eq!(w.scroll_offset(list), 0.0, "不该滚到内容上面去");
-
-        // 往下滚到底。
-        for _ in 0..200 {
-            scroll_list(&mut w, &mut ui, &scrolling(p.x, p.y, -10.0), 20);
-        }
-        let max = w.scroll_offset(list);
-        scroll_list(&mut w, &mut ui, &scrolling(p.x, p.y, -10.0), 20);
-        assert_eq!(w.scroll_offset(list), max, "到底之后不该继续滚");
-    }
-
-    #[test]
-    fn a_shorter_list_clamps_the_old_offset() {
-        // 内容变短之后旧偏移会把内容整个顶出视口，看起来像列表空了。
-        let mut ui = ui();
-        let mut w = WidgetUi::default();
-        let list = scroll_list(&mut w, &mut ui, &UiInput::default(), 50);
-        let p = inside_viewport(&w);
-        for _ in 0..100 {
-            scroll_list(&mut w, &mut ui, &scrolling(p.x, p.y, -10.0), 50);
-        }
-        assert!(w.scroll_offset(list) > 0.0);
-
-        // 换成只有两行。
-        scroll_list(&mut w, &mut ui, &UiInput::default(), 2);
-        assert_eq!(w.scroll_offset(list), 0.0, "内容变短后偏移该夹回去");
-    }
-
-    #[test]
-    fn the_wheel_only_scrolls_the_area_under_the_pointer() {
-        // 不判的话页面上所有滚动区会一起滚。
-        let mut ui = ui();
-        let mut w = WidgetUi::default();
-        let list = scroll_list(&mut w, &mut ui, &UiInput::default(), 20);
-
-        scroll_list(&mut w, &mut ui, &scrolling(700.0, 500.0, -5.0), 20);
-        assert_eq!(w.scroll_offset(list), 0.0, "指针不在视口里不该滚");
-    }
-
-    #[test]
-    fn hit_testing_follows_the_scrolled_position() {
-        // 用滚动前的矩形判命中的话，会「点这一行，亮的是另一行」。
-        let mut ui = ui();
-        let mut w = WidgetUi::default();
-        scroll_list(&mut w, &mut ui, &UiInput::default(), 20);
-        let p = inside_viewport(&w);
-        for _ in 0..5 {
-            scroll_list(&mut w, &mut ui, &scrolling(p.x, p.y, -3.0), 20);
-        }
-
-        // 指针停在视口正中，命中的那一行的矩形必须真的包含这个点。
-        let point = p;
-        let input = UiInput {
-            pointer: Some(point),
-            ..Default::default()
-        };
-        scroll_list(&mut w, &mut ui, &input, 20);
-
-        let hit = (0..20)
-            .map(|i| Id::new(&format!("row{i}")))
-            .find(|id| w.response(*id).hovered);
-        if let Some(id) = hit {
-            assert!(w.response(id).rect.contains(point));
-        }
-    }
-
-    #[test]
-    fn offscreen_rows_produce_no_geometry() {
-        // 一千行的列表每帧为看不见的九百多行生成顶点的话，
-        // CPU 和带宽全花在裁剪之后会被丢掉的东西上。
-        let count_for = |rows: usize| {
-            let mut ui = ui();
-            let mut w = WidgetUi::default();
-            scroll_list(&mut w, &mut ui, &UiInput::default(), rows);
-            ui.end_frame();
-            ui.draw_list().vertices().len()
-        };
-        let few = count_for(5);
-        let many = count_for(500);
-        assert!(
-            many < few * 4,
-            "视口高度不变，几何量不该随行数线性增长：{few} → {many}"
-        );
     }
 
     #[test]
@@ -1497,188 +965,4 @@ mod tests {
         assert!(rb.min.y >= ra.max.y - 1.0, "上一帧没收的行漏到了这一帧");
     }
 
-    #[test]
-    fn a_folder_starts_open() {
-        // 所有分组都收着的面板，第一眼看不出能点开。
-        let mut w = WidgetUi::default();
-        w.begin();
-        assert!(w.folder("f", "Section"));
-        w.end_folder();
-    }
-
-    #[test]
-    fn a_collapsed_folder_declares_nothing_inside() {
-        // 收起时里面的控件**根本不声明**。声明了再藏的话它们仍然占布局
-        // 空间，收起来的分组会留下一大片空白。
-        let mut w = WidgetUi::default();
-        w.begin();
-        let header = w.folder("f", "Section");
-        assert!(header);
-        w.label("inside", "hi");
-        w.end_folder();
-
-        let mut ui = ui();
-        w.finish(&mut ui, &kui::UiInput::default());
-        let open_height = w.response(Id::new("inside")).rect.size().y;
-        assert!(open_height > 0.0, "展开时里面的控件该有高度");
-
-        // 收起来。
-        w.set_folder_open(Id::new("f"), false);
-        w.begin();
-        w.folder("f", "Section");
-        w.label("inside", "hi");
-        w.end_folder();
-        w.finish(&mut ui, &kui::UiInput::default());
-
-        assert_eq!(
-            w.response(Id::new("inside")).rect.size(),
-            Vec2::ZERO,
-            "收起来了，里面的控件却还占着地方"
-        );
-    }
-
-    #[test]
-    fn a_collapsed_folder_shrinks_the_panel() {
-        // 端到端：收起之后整体高度必须变小，否则折叠没有意义。
-        let mut ui = ui();
-
-        let mut w = WidgetUi::default();
-        w.begin();
-        w.folder("f", "Section");
-        for i in 0..8 {
-            w.label(&format!("row{i}"), "content");
-        }
-        w.end_folder();
-        let tail_open = w.label("tail", "after");
-        w.finish(&mut ui, &kui::UiInput::default());
-        let open_bottom = w.response(tail_open).rect.max.y;
-
-        w.set_folder_open(Id::new("f"), false);
-        w.begin();
-        w.folder("f", "Section");
-        for i in 0..8 {
-            w.label(&format!("row{i}"), "content");
-        }
-        w.end_folder();
-        let tail_closed = w.label("tail", "after");
-        w.finish(&mut ui, &kui::UiInput::default());
-        let closed_bottom = w.response(tail_closed).rect.max.y;
-
-        assert!(
-            closed_bottom < open_bottom,
-            "收起来之后面板没变矮：{closed_bottom} vs {open_bottom}"
-        );
-    }
-
-    #[test]
-    fn the_folder_header_itself_is_always_declared() {
-        // 标题条是那个开关，收起时它自己必须还在，否则再也点不开了。
-        let mut w = WidgetUi::default();
-        w.set_folder_open(Id::new("f"), false);
-        w.begin();
-        let header = w.folder("f", "Section");
-        assert!(!header);
-        w.label("inside", "hi");
-        w.end_folder();
-
-        let mut ui = ui();
-        w.finish(&mut ui, &kui::UiInput::default());
-        assert!(
-            w.response(Id::new("f")).rect.size().y > 0.0,
-            "收起来之后标题条也没了，再也点不开"
-        );
-    }
-
-    #[test]
-    fn end_folder_restores_declaring() {
-        // 收完之后的控件不受影响。
-        let mut w = WidgetUi::default();
-        w.set_folder_open(Id::new("f"), false);
-        w.begin();
-        w.folder("f", "Section");
-        w.label("inside", "hidden");
-        w.end_folder();
-        let after = w.label("after", "visible");
-
-        let mut ui = ui();
-        w.finish(&mut ui, &kui::UiInput::default());
-        assert!(
-            w.response(after).rect.size().y > 0.0,
-            "分组之后的控件被吞了"
-        );
-    }
-
-    #[test]
-    fn a_forgotten_end_folder_does_not_leak_into_the_next_frame() {
-        // 忘了 `end_folder` 是常见手误。`begin` 必须把折叠状态清掉，
-        // 否则下一帧整个面板都是空的——而且看不出原因。
-        let mut w = WidgetUi::default();
-        w.set_folder_open(Id::new("f"), false);
-        w.begin();
-        w.folder("f", "Section");
-        w.label("inside", "hidden");
-        // 故意不调 end_folder
-
-        w.begin();
-        let normal = w.label("normal", "visible");
-
-        let mut ui = ui();
-        w.finish(&mut ui, &kui::UiInput::default());
-        assert!(
-            w.response(normal).rect.size().y > 0.0,
-            "上一帧没收的折叠漏到了这一帧，整个面板是空的"
-        );
-    }
-
-    #[test]
-    fn a_scroll_area_never_extends_past_the_window() {
-        // 调用方给的高度是「我想要这么高」，但滚动区的起点由排版决定。
-        // 让调用方自己算准剩余空间是算不准的——漏算一次，列表最后几行
-        // 就画到窗口外面去了，而且看不出是被截断还是本来就没有。
-        let mut w = WidgetUi::default();
-        w.begin();
-        w.label("title", "Controls");
-        // 故意要一个比窗口还高的滚动区。
-        w.begin_scroll("s", 10_000.0);
-        for i in 0..40 {
-            w.label(&format!("row{i}"), "content");
-        }
-        w.end_scroll();
-
-        let mut ui = ui();
-        w.finish(&mut ui, &kui::UiInput::default());
-
-        let viewport = w.scroll_viewport().expect("该有视口");
-        assert!(
-            viewport.max.y <= 600.0 + 1e-3,
-            "视口底边跑到窗口外面了：{}",
-            viewport.max.y
-        );
-    }
-
-    #[test]
-    fn a_scroll_area_starting_offscreen_collapses_to_nothing() {
-        // 起点已经在窗口外时，夹完高度会变成负的。收成零高度，
-        // 内容整个不画，比画出一片翻转的矩形强。
-        let mut w = WidgetUi::default();
-        w.root_style(Style {
-            margin: Edges {
-                left: 0.0,
-                top: 5_000.0,
-                right: 0.0,
-                bottom: 0.0,
-            },
-            ..Default::default()
-        });
-        w.begin();
-        w.begin_scroll("s", 200.0);
-        w.label("a", "x");
-        w.end_scroll();
-
-        let mut ui = ui();
-        w.finish(&mut ui, &kui::UiInput::default());
-
-        let viewport = w.scroll_viewport().expect("该有视口");
-        assert!(viewport.max.y >= viewport.min.y, "视口翻转了：{viewport:?}");
-    }
 }

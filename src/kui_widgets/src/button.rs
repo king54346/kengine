@@ -1,7 +1,7 @@
 //! 按钮。点一下触发一次，自己不存任何状态。
 
-use kmath::Vec2;
 use kfont::TextStyle;
+use kmath::Vec2;
 use kui::{Id, Rect, Response, Ui};
 
 use crate::widgets::{Theme, Widget, WidgetUi, text_style};
@@ -42,4 +42,76 @@ pub(crate) fn paint(ui: &mut Ui, theme: &Theme, rect: Rect, response: &Response,
         },
         theme.text,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::WidgetUi;
+    use crate::testing::{SCREEN, at, ui};
+    use kui::{PointerButton, UiInput};
+
+    #[test]
+    fn a_button_reports_hover_and_click() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        // 第一帧：声明并排版。
+        w.begin();
+        let id = w.button("a", "点我");
+        w.finish(&mut ui, &UiInput::default());
+        let rect = w.response(id).rect;
+        let center = rect.center();
+
+        // 第二帧：指针移上去。
+        w.begin();
+        w.button("a", "点我");
+        w.finish(&mut ui, &at(center.x, center.y));
+        assert!(w.response(id).hovered);
+
+        // 第三帧：按下。
+        let mut input = at(center.x, center.y);
+        input.pressed.push(PointerButton::Primary);
+        w.begin();
+        w.button("a", "点我");
+        w.finish(&mut ui, &input);
+        assert!(w.response(id).held);
+        assert!(!w.response(id).clicked);
+
+        // 第四帧：松开。
+        let mut input = at(center.x, center.y);
+        input.released.push(PointerButton::Primary);
+        w.begin();
+        w.button("a", "点我");
+        w.finish(&mut ui, &input);
+        assert!(w.response(id).clicked);
+    }
+
+    #[test]
+    fn clicking_one_button_does_not_trigger_the_other() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        w.begin();
+        let a = w.button("a", "甲");
+        let b = w.button("b", "乙");
+        w.finish(&mut ui, &UiInput::default());
+
+        let center = w.response(a).rect.center();
+        let mut input = at(center.x, center.y);
+        input.pressed.push(PointerButton::Primary);
+        w.begin();
+        w.button("a", "甲");
+        w.button("b", "乙");
+        w.finish(&mut ui, &input);
+
+        let mut input = at(center.x, center.y);
+        input.released.push(PointerButton::Primary);
+        w.begin();
+        w.button("a", "甲");
+        w.button("b", "乙");
+        w.finish(&mut ui, &input);
+
+        assert!(w.response(a).clicked);
+        assert!(!w.response(b).clicked);
+    }
 }

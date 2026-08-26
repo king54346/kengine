@@ -66,6 +66,8 @@ pub mod radio;
 pub mod scrollarea;
 pub mod scrollbar;
 pub mod slider;
+#[cfg(test)]
+mod testing;
 pub mod text_edit;
 pub mod text_input;
 pub mod widgets;

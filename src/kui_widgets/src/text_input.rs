@@ -1,12 +1,12 @@
 //! 文本框。状态又大又贵，破例由控件自己存。
 
-use kmath::{Vec2, Vec4};
 use kfont::TextStyle;
+use kmath::{Vec2, Vec4};
 use kui::{Id, Rect, Response, Ui};
 
+use crate::TextEdit;
 use crate::widgets::{Declared, apply_edit};
 use crate::widgets::{Theme, Widget, WidgetUi, text_style};
-use crate::TextEdit;
 
 impl WidgetUi {
     /// 一个文本框。
@@ -73,7 +73,15 @@ pub(crate) fn size(ui: &Ui, theme: &Theme, text: &str, placeholder: &str) -> Vec
 }
 
 /// 出几何。
-pub(crate) fn paint(ui: &mut Ui, theme: &Theme, rect: Rect, response: &Response, text: &str, placeholder: &str, edit: &TextEdit) {
+pub(crate) fn paint(
+    ui: &mut Ui,
+    theme: &Theme,
+    rect: Rect,
+    response: &Response,
+    text: &str,
+    placeholder: &str,
+    edit: &TextEdit,
+) {
     let fill = if response.focused {
         theme.active
     } else if response.hovered {
@@ -142,4 +150,145 @@ pub(crate) fn paint(ui: &mut Ui, theme: &Theme, rect: Rect, response: &Response,
     }
 
     ui.pop_clip();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::WidgetUi;
+    use crate::testing::{SCREEN, at, ui};
+    use kui::{PointerButton, UiInput};
+
+    /// 让某个控件拿到焦点：Tab 一次就走到第一个。
+    fn focus_first(w: &mut WidgetUi, ui: &mut Ui, declare: impl Fn(&mut WidgetUi)) {
+        let tab = UiInput {
+            focus_step: 1,
+            ..Default::default()
+        };
+        w.begin();
+        declare(w);
+        w.finish(ui, &tab);
+    }
+
+    #[test]
+    fn typing_into_a_focused_text_input_changes_the_text() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let mut text = String::new();
+
+        focus_first(&mut w, &mut ui, |w| {
+            let mut scratch = String::new();
+            w.text_input("name", &mut scratch, "名字", &UiInput::default());
+        });
+
+        let input = UiInput {
+            text: "中文".to_string(),
+            ..Default::default()
+        };
+        w.begin();
+        w.text_input("name", &mut text, "名字", &input);
+        w.finish(&mut ui, &input);
+
+        assert_eq!(text, "中文");
+    }
+
+    #[test]
+    fn an_unfocused_text_input_ignores_typing() {
+        // 不判焦点的话，界面上每个文本框都会同时收到同一串字。
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let mut a = String::new();
+        let mut b = String::new();
+
+        // 先让第一个拿到焦点。
+        focus_first(&mut w, &mut ui, |w| {
+            let mut s1 = String::new();
+            let mut s2 = String::new();
+            w.text_input("a", &mut s1, "", &UiInput::default());
+            w.text_input("b", &mut s2, "", &UiInput::default());
+        });
+
+        let input = UiInput {
+            text: "x".to_string(),
+            ..Default::default()
+        };
+        w.begin();
+        w.text_input("a", &mut a, "", &input);
+        w.text_input("b", &mut b, "", &input);
+        w.finish(&mut ui, &input);
+
+        assert_eq!(a, "x");
+        assert_eq!(b, "", "没有焦点的文本框不该收到输入");
+    }
+
+    #[test]
+    fn backspace_in_a_text_input_removes_a_whole_character() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let mut text = String::from("中文");
+
+        focus_first(&mut w, &mut ui, |w| {
+            let mut scratch = String::from("中文");
+            w.text_input("t", &mut scratch, "", &UiInput::default());
+        });
+        // 光标要先到末尾。
+        let to_end = UiInput {
+            edits: vec![kui::EditAction::End { select: false }],
+            ..Default::default()
+        };
+        w.begin();
+        w.text_input("t", &mut text, "", &to_end);
+        w.finish(&mut ui, &to_end);
+
+        let backspace = UiInput {
+            edits: vec![kui::EditAction::Backspace],
+            ..Default::default()
+        };
+        w.begin();
+        w.text_input("t", &mut text, "", &backspace);
+        w.finish(&mut ui, &backspace);
+
+        assert_eq!(text, "中");
+    }
+
+    #[test]
+    fn a_text_input_survives_the_text_being_replaced_externally() {
+        // 读档、重置会把文本整个换掉。光标不夹回去的话下一次切片就 panic。
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let mut text = String::from("很长的一段内容");
+
+        focus_first(&mut w, &mut ui, |w| {
+            let mut scratch = String::from("很长的一段内容");
+            w.text_input("t", &mut scratch, "", &UiInput::default());
+        });
+        let to_end = UiInput {
+            edits: vec![kui::EditAction::End { select: false }],
+            ..Default::default()
+        };
+        w.begin();
+        w.text_input("t", &mut text, "", &to_end);
+        w.finish(&mut ui, &to_end);
+
+        // 外部换成短的。
+        text = String::from("短");
+        w.begin();
+        w.text_input("t", &mut text, "", &UiInput::default());
+        w.finish(&mut ui, &UiInput::default());
+
+        assert!(w.text_state(Id::new("t")).cursor() <= text.len());
+    }
+
+    #[test]
+    fn an_empty_text_input_still_has_a_clickable_width() {
+        // 宽度按内容算的话，空文本框会塌成零宽，根本点不进去。
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let mut text = String::new();
+        w.begin();
+        let id = w.text_input("t", &mut text, "", &UiInput::default());
+        w.finish(&mut ui, &UiInput::default());
+
+        assert!(w.response(id).rect.size().x >= 160.0);
+    }
 }
