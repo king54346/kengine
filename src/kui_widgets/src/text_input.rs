@@ -156,8 +156,8 @@ pub(crate) fn paint(
 mod tests {
     use super::*;
     use crate::WidgetUi;
-    use crate::testing::{SCREEN, at, ui};
-    use kui::{PointerButton, UiInput};
+    use crate::testing::ui;
+    use kui::UiInput;
 
     /// 让某个控件拿到焦点：Tab 一次就走到第一个。
     fn focus_first(w: &mut WidgetUi, ui: &mut Ui, declare: impl Fn(&mut WidgetUi)) {

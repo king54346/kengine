@@ -41,9 +41,9 @@ impl WidgetUi {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
     use crate::WidgetUi;
-    use crate::testing::{SCREEN, at, ui};
+    use crate::testing::ui;
     use kmath::Vec2;
     use kui::{Edges, Id, Style, Ui, UiInput};
 

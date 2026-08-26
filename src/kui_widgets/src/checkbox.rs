@@ -88,8 +88,8 @@ pub(crate) fn paint(
 mod tests {
     use super::*;
     use crate::WidgetUi;
-    use crate::testing::{SCREEN, at, ui};
-    use kui::{PointerButton, UiInput};
+    use crate::testing::ui;
+    use kui::UiInput;
 
     #[test]
     fn a_checked_box_draws_more_than_an_unchecked_one() {

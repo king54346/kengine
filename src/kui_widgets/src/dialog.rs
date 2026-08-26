@@ -142,7 +142,7 @@ pub fn rect(position: Vec2, size: Vec2) -> Rect {
 mod tests {
     use super::*;
     use crate::WidgetUi;
-    use crate::testing::{SCREEN, at, ui};
+    use crate::testing::{at, ui};
     use kui::{PointerButton, UiInput};
 
     /// 拖标题栏得到位移增量，调用方拿它挪对话框。
@@ -198,24 +198,26 @@ mod tests {
         assert!(first * second < 0.0, "两笔没有交叉：{first} 和 {second}");
     }
 
-    const SCREEN: Vec2 = Vec2::new(1280.0, 720.0);
+    /// 位置计算专用的窗口，比公用的 `SCREEN` 大，
+    /// 好试出「拖出屏幕还留一截」这类边界。
+    const WINDOW: Vec2 = Vec2::new(1280.0, 720.0);
     const SIZE: Vec2 = Vec2::new(400.0, 300.0);
 
     #[test]
     fn centering_puts_equal_space_on_both_sides() {
-        let at = center(SIZE, SCREEN);
+        let at = center(SIZE, WINDOW);
         assert_eq!(at, Vec2::new(440.0, 210.0));
         // 左右留白相等。
-        assert_eq!(at.x, SCREEN.x - (at.x + SIZE.x));
+        assert_eq!(at.x, WINDOW.x - (at.x + SIZE.x));
     }
 
     /// 对话框比屏幕大时居中会得到负坐标，两头超出一样多。
     #[test]
     fn centering_an_oversized_dialog_overflows_evenly() {
         let big = Vec2::new(1600.0, 900.0);
-        let at = center(big, SCREEN);
+        let at = center(big, WINDOW);
         assert!(at.x < 0.0 && at.y < 0.0);
-        assert_eq!(at.x, SCREEN.x - (at.x + big.x));
+        assert_eq!(at.x, WINDOW.x - (at.x + big.x));
     }
 
     /// 屏幕中间拖一下，就是简单地加上增量。
@@ -225,7 +227,7 @@ mod tests {
             Vec2::new(400.0, 300.0),
             Vec2::new(30.0, -20.0),
             SIZE,
-            SCREEN,
+            WINDOW,
         );
         assert_eq!(at, Vec2::new(430.0, 280.0));
     }
@@ -233,7 +235,7 @@ mod tests {
     /// 往左拖出屏幕，右边要留一截抓得住。
     #[test]
     fn dragging_off_the_left_keeps_a_grip() {
-        let at = drag(Vec2::new(0.0, 100.0), Vec2::new(-9999.0, 0.0), SIZE, SCREEN);
+        let at = drag(Vec2::new(0.0, 100.0), Vec2::new(-9999.0, 0.0), SIZE, WINDOW);
         // 右边缘还在屏幕里。
         assert_eq!(at.x + SIZE.x, MIN_VISIBLE);
         assert!(at.x < 0.0);
@@ -242,8 +244,8 @@ mod tests {
     /// 往右拖出屏幕同理，左边留一截。
     #[test]
     fn dragging_off_the_right_keeps_a_grip() {
-        let at = drag(Vec2::new(0.0, 100.0), Vec2::new(9999.0, 0.0), SIZE, SCREEN);
-        assert_eq!(at.x, SCREEN.x - MIN_VISIBLE);
+        let at = drag(Vec2::new(0.0, 100.0), Vec2::new(9999.0, 0.0), SIZE, WINDOW);
+        assert_eq!(at.x, WINDOW.x - MIN_VISIBLE);
     }
 
     /// 上边一律不许出屏幕——标题栏在顶上，出去了就抓不回来。
@@ -253,7 +255,7 @@ mod tests {
             Vec2::new(400.0, 10.0),
             Vec2::new(0.0, -9999.0),
             SIZE,
-            SCREEN,
+            WINDOW,
         );
         assert_eq!(at.y, 0.0);
     }
@@ -265,11 +267,11 @@ mod tests {
             Vec2::new(400.0, 400.0),
             Vec2::new(0.0, 9999.0),
             SIZE,
-            SCREEN,
+            WINDOW,
         );
-        assert_eq!(at.y, SCREEN.y - MIN_VISIBLE);
+        assert_eq!(at.y, WINDOW.y - MIN_VISIBLE);
         // 确实有一部分在屏幕外面。
-        assert!(at.y + SIZE.y > SCREEN.y);
+        assert!(at.y + SIZE.y > WINDOW.y);
     }
 
     /// 比 MIN_VISIBLE 还小的对话框不能被要求「留 48 像素在屏幕里」——
@@ -277,7 +279,7 @@ mod tests {
     #[test]
     fn a_tiny_dialog_is_clamped_by_its_own_size() {
         let tiny = Vec2::new(20.0, 20.0);
-        let at = drag(Vec2::new(0.0, 100.0), Vec2::new(-9999.0, 0.0), tiny, SCREEN);
+        let at = drag(Vec2::new(0.0, 100.0), Vec2::new(-9999.0, 0.0), tiny, WINDOW);
         // 整个贴在左边缘，而不是被推到屏幕外 28 像素。
         assert_eq!(at.x, 0.0);
     }
@@ -351,10 +353,10 @@ mod tests {
             Vec2::new(400.0, 300.0),
             Vec2::new(9999.0, 9999.0),
             SIZE,
-            SCREEN,
+            WINDOW,
         );
         for _ in 0..10 {
-            let next = drag(at, Vec2::ZERO, SIZE, SCREEN);
+            let next = drag(at, Vec2::ZERO, SIZE, WINDOW);
             assert_eq!(next, at);
             at = next;
         }

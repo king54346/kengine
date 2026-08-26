@@ -84,8 +84,8 @@ pub(crate) fn paint(
 mod tests {
     use super::*;
     use crate::WidgetUi;
-    use crate::testing::{SCREEN, at, ui};
-    use kui::{PointerButton, UiInput};
+    use crate::testing::ui;
+    use kui::UiInput;
 
     /// 内容越多滑块越短，但短到一定程度就不再短了——
     /// 一根抓不住的线等于没有滚动条。

@@ -96,9 +96,9 @@ pub(crate) fn paint(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
     use crate::WidgetUi;
-    use crate::testing::{SCREEN, at, ui};
+    use crate::testing::{at, ui};
     use kui::{PointerButton, UiInput};
 
     /// 选中的单选按钮要比没选中的多画一个圆点，否则一组按钮

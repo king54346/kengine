@@ -46,9 +46,9 @@ pub(crate) fn paint(ui: &mut Ui, theme: &Theme, rect: Rect, response: &Response,
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
     use crate::WidgetUi;
-    use crate::testing::{SCREEN, at, ui};
+    use crate::testing::{at, ui};
     use kui::{PointerButton, UiInput};
 
     #[test]

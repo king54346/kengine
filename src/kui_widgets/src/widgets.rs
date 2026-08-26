@@ -678,7 +678,7 @@ pub(crate) fn apply_edit(edit: &mut crate::TextEdit, text: &mut String, action: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kui::{PointerButton, UiInput};
+    use kui::UiInput;
 
     /// 一个不带字体的 UI。文字量出来是零尺寸，但布局与交互照常。
     /// 测试用的窗口大小。
@@ -964,5 +964,4 @@ mod tests {
         let (ra, rb) = (w.response(a).rect, w.response(b).rect);
         assert!(rb.min.y >= ra.max.y - 1.0, "上一帧没收的行漏到了这一帧");
     }
-
 }

@@ -59,10 +59,10 @@ pub(crate) fn paint(ui: &mut Ui, theme: &Theme, rect: Rect, response: &Response,
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
     use crate::WidgetUi;
-    use crate::testing::{SCREEN, at, ui};
-    use kui::{PointerButton, UiInput};
+    use crate::testing::ui;
+    use kui::UiInput;
 
     #[test]
     fn the_slider_knob_stays_inside_the_track() {

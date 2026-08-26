@@ -146,8 +146,8 @@ pub(crate) fn paint(
 mod tests {
     use super::*;
     use crate::WidgetUi;
-    use crate::testing::{SCREEN, at, ui};
-    use kui::{PointerButton, UiInput};
+    use crate::testing::ui;
+    
 
     #[test]
     fn a_folder_starts_open() {

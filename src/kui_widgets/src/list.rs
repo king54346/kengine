@@ -60,10 +60,10 @@ pub(crate) fn paint(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
     use crate::WidgetUi;
-    use crate::testing::{SCREEN, at, ui};
-    use kui::{PointerButton, UiInput};
+    use crate::testing::ui;
+    use kui::UiInput;
 
     /// 选中的列表行要画出底色。不画的话选了等于没选。
     #[test]
