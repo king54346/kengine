@@ -45,7 +45,11 @@ pub(crate) fn activate() -> UiInput {
 /// 焦点是**跨帧**的，而控件的矩形要等 `finish` 排完才知道，所以这必须
 /// 是两帧：第一帧走焦点，第二帧才轮得到激活。写在一处免得每个控件的
 /// 测试各踩一次。
-pub(crate) fn activate_first(w: &mut WidgetUi, ui: &mut Ui, mut declare: impl FnMut(&mut WidgetUi)) {
+pub(crate) fn activate_first(
+    w: &mut WidgetUi,
+    ui: &mut Ui,
+    mut declare: impl FnMut(&mut WidgetUi),
+) {
     let tab = UiInput {
         focus_step: 1,
         ..Default::default()

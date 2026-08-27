@@ -111,6 +111,14 @@ class Node {
         return new Vector3(v[0], v[1], v[2]);
     }
 
+    // 节点朝向的方向（世界空间，已归一化）。约定同 glTF：前方是 -Z。
+    //
+    // `lookAt` 的读侧：转过去之后要「朝着那边走」的话得能问出方向来。
+    get forward() {
+        const v = __k.getForward(this._id);
+        return new Vector3(v[0], v[1], v[2]);
+    }
+
     get visible() { return __k.getVisible(this._id); }
     set visible(v) { __k.setVisible(this._id, !!v); }
 
@@ -155,6 +163,20 @@ class Node {
 
     getNode(name) { return getNode(name); }
 
+    // 这个节点上跑着的脚本对象，没挂脚本时是 null。
+    //
+    // 脚本之间就是这么说话的：
+    //
+    //     getNode("Inventory").script.add("coin", 1);
+    //     enemy.script.hit(25);
+    //
+    // 拿到的是**对方那个实例本身**，所以能调它的方法、读它挂在 this 上的
+    // 字段（闭包里的变量仍然够不着，那是 JS 的规矩）。
+    get script() {
+        const found = globalThis.__instances[this._id];
+        return found === undefined ? null : found;
+    }
+
     toString() { return "Node(" + this.name + ")"; }
 }
 
@@ -172,6 +194,63 @@ function getNode(name) {
     const id = __k.find(name);
     return id < 0 ? null : new Node(id);
 }
+
+// 脚本实例登记表：节点下标 → 脚本返回的那个对象。
+// 由 Rust 侧的运行时在实例化与回收时维护，`Node.script` 查它。
+globalThis.__instances = {};
+
+// 按名字生成一个节点，原型由游戏侧用 `register_prototype` 登记。
+//
+//     const enemy = spawn("Enemy", new Vector3(3, 0.5, 0));
+//     enemy.script;   // ← 还是 null：新节点的脚本下一帧才实例化
+//
+// 名字没登记过时返回 null（引擎会记一条日志），一帧内生成太多同样返回 null。
+function spawn(name, position) {
+    const p = position || Vector3.ZERO();
+    const id = __k.spawn(String(name), p.x, p.y, p.z);
+    return id < 0 ? null : new Node(id);
+}
+
+// 输入。**只有动作与轴**，没有具体键位——键位绑定在 Rust 侧的 Bindings 里，
+// 脚本里写死按键的话，改键功能就永远做不了了。
+//
+//     if (Input.justPressed("attack")) { ... }
+//     const move = Input.axisVector("move_x", "move_z");
+const Input = {
+    pressed(action) { return __k.actionPressed(String(action)); },
+    justPressed(action) { return __k.actionJustPressed(String(action)); },
+    justReleased(action) { return __k.actionJustReleased(String(action)); },
+
+    // 一个轴的读数：-1、0 或 1。
+    axis(name) { return __k.axis(String(name)); },
+
+    // 两个轴合成的方向，长度不超过 1（斜着走不该比直着快）。
+    // 约定：x 轴向右为正，y 轴向前为正，返回值放在 XZ 平面上。
+    axisVector(xAxis, yAxis) {
+        const v = new Vector3(__k.axis(String(xAxis)), 0, -__k.axis(String(yAxis)));
+        return v.lengthSquared() > 1 ? v.normalized() : v;
+    },
+
+    // 鼠标键名："left" / "right" / "middle"。
+    mousePressed(button) { return __k.mousePressed(String(button)); },
+    mouseJustPressed(button) { return __k.mouseJustPressed(String(button)); },
+
+    // 光标还没进过窗口时是 null——原点是个合法坐标，混在一起没法区分。
+    get mousePosition() {
+        const p = __k.mousePosition();
+        return p === null ? null : { x: p[0], y: p[1] };
+    },
+
+    get mouseDelta() {
+        const d = __k.mouseDelta();
+        return { x: d[0], y: d[1] };
+    },
+
+    get scrollDelta() {
+        const d = __k.scrollDelta();
+        return { x: d[0], y: d[1] };
+    },
+};
 
 // 一次射线检测的结果。
 class RayHit {
@@ -259,7 +338,9 @@ const engine = {
     get deltaTime() { return __k.delta(); },
     getNode,
     raycast,
+    spawn,
     print,
     emit,
     require,
+    Input,
 };

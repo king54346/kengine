@@ -149,7 +149,10 @@ impl Plugin for UiDemo {
         let toggle = self.widgets.button("toggle", "切换换行策略");
         let reset = self.widgets.button("reset", "重置字号");
         let body_box = self.widgets.checkbox("body", "显示正文", self.show_body);
-        let volume = self.widgets.slider("volume", self.volume);
+        // 滑条直接改传进来的值：拖动、方向键的换算都在控件里，
+        // 调用方不必自己把像素折算成值。
+        self.widgets
+            .slider("volume", &mut self.volume, ctx.ui_input);
 
         // 文本框：点进去打字，支持中文输入法、方向键、选区。
         self.widgets
@@ -180,11 +183,6 @@ impl Plugin for UiDemo {
         }
         if self.widgets.response(body_box).clicked {
             self.show_body = !self.show_body;
-        }
-        // 滑条不存状态，拖动量要自己折算成值。
-        let slider = self.widgets.response(volume);
-        if slider.held && slider.rect.size().x > 0.0 {
-            self.volume = (self.volume + slider.drag.x / slider.rect.size().x).clamp(0.0, 1.0);
         }
 
         // ── 下半屏：文字排版 ──

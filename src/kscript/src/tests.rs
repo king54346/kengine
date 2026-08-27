@@ -34,7 +34,13 @@ fn process(
     let mut all = Vec::new();
     for frame in 0..frames {
         scene.update();
-        all.extend(runtime.process(scene, manager, dt, frame as f32 * dt));
+        all.extend(runtime.process(
+            scene,
+            &mut kinput::Input::new(),
+            manager,
+            dt,
+            frame as f32 * dt,
+        ));
     }
     all
 }
@@ -183,10 +189,11 @@ fn physics_process_is_separate_from_process() {
     scene.add_node(Node::new("n").with_script("a.js"));
 
     scene.update();
-    runtime.process(&mut scene, &manager, 0.016, 0.0);
+    let mut input = kinput::Input::new();
+    runtime.process(&mut scene, &mut input, &manager, 0.016, 0.0);
     // 一帧里跑两个物理子步。
-    let a = runtime.physics_process(&mut scene, 1.0 / 60.0, 0.0);
-    let b = runtime.physics_process(&mut scene, 1.0 / 60.0, 0.0);
+    let a = runtime.physics_process(&mut scene, &mut input, 1.0 / 60.0, 0.0);
+    let b = runtime.physics_process(&mut scene, &mut input, 1.0 / 60.0, 0.0);
 
     assert_eq!(a.len(), 1);
     assert_eq!(a[0].name, "fp");
@@ -367,8 +374,9 @@ fn a_script_can_push_a_rigid_body() {
     );
 
     scene.update();
-    runtime.process(&mut scene, &manager, 0.016, 0.0);
-    runtime.physics_process(&mut scene, 1.0 / 60.0, 0.0);
+    let mut input = kinput::Input::new();
+    runtime.process(&mut scene, &mut input, &manager, 0.016, 0.0);
+    runtime.physics_process(&mut scene, &mut input, 1.0 / 60.0, 0.0);
     scene.step_physics(1.0 / 60.0);
 
     assert!(

@@ -369,6 +369,8 @@ impl WidgetUi {
     /// 关掉所有菜单。
     pub fn close_menus(&mut self) {
         self.menu_chain.clear();
+        self.menu_highlight.clear();
+        self.menu_close_pending = false;
     }
 
     /// 菜单的开合、高亮、子菜单展开。
@@ -376,6 +378,18 @@ impl WidgetUi {
     /// 排在 `finish` 的交互判定之后：这里读的 `clicked` / `hovered`
     /// 都是本帧刚算出来的。
     pub(crate) fn update_menus(&mut self, input: &UiInput) {
+        // 上一帧有项被选中，这一帧才真的关。
+        //
+        // 拖这一帧是为了让调用方读得到那一下：它在**这一帧的声明期**
+        // 读 `response(item).clicked`，那时菜单还开着、项还在，读得到；
+        // 读完了这里再收摊。上一帧就关的话，那一项这一帧根本不会被
+        // 声明出来，`clicked` 无处可读。
+        if self.menu_close_pending {
+            self.menu_close_pending = false;
+            self.menu_chain.clear();
+            self.menu_highlight.clear();
+        }
+
         self.toggle_menu_buttons();
         if self.menu_chain.is_empty() {
             // 关着的时候只剩一件事要做：别让上一次的高亮留到下次打开。
@@ -408,6 +422,8 @@ impl WidgetUi {
                 self.menu_chain.push(id);
             }
             self.menu_highlight.clear();
+            // 刚开的这条菜单不该被上一条留下的「待关」顺手关掉。
+            self.menu_close_pending = false;
         }
     }
 
@@ -450,7 +466,12 @@ impl WidgetUi {
             let Some(&anchor) = self.menu_chain.last() else {
                 return;
             };
-            let Some(frame) = self.menu_frames.iter().find(|f| f.anchor == anchor).copied() else {
+            let Some(frame) = self
+                .menu_frames
+                .iter()
+                .find(|f| f.anchor == anchor)
+                .copied()
+            else {
                 return;
             };
             let items = self.menu_items(&frame);
@@ -465,8 +486,8 @@ impl WidgetUi {
                     // 报告成「被点了一下」，这样调用方不必为键盘写
                     // 第二条分支——和按钮的键盘激活是同一个道理。
                     self.interaction.activate(items[index].id);
-                    self.menu_chain.clear();
-                    self.menu_highlight.clear();
+                    // 关菜单要等下一帧，理由见 `update_menus` 开头。
+                    self.menu_close_pending = true;
                     return;
                 }
                 MenuAction::Close => {
@@ -484,10 +505,10 @@ impl WidgetUi {
                     // 顶层收到左键时不该把整条链关掉——那是「退回上一级」，
                     // 而顶层没有上一级。留着菜单开着，用户再按一下 Esc
                     // 才是关。
-                    if self.menu_chain.len() > 1 {
-                        if let Some(closed) = self.menu_chain.pop() {
-                            self.menu_highlight.remove(&closed);
-                        }
+                    if self.menu_chain.len() > 1
+                        && let Some(closed) = self.menu_chain.pop()
+                    {
+                        self.menu_highlight.remove(&closed);
                     }
                 }
                 MenuAction::Ignored => {}
@@ -505,13 +526,9 @@ impl WidgetUi {
         };
 
         let in_panel = self.menu_rects.iter().any(|rect| rect.contains(pointer));
-        let on_button = self
-            .declared
-            .iter()
-            .zip(&self.rects)
-            .any(|(d, rect)| {
-                matches!(d.widget, Widget::MenuButton { .. }) && rect.contains(pointer)
-            });
+        let on_button = self.declared.iter().zip(&self.rects).any(|(d, rect)| {
+            matches!(d.widget, Widget::MenuButton { .. }) && rect.contains(pointer)
+        });
 
         if !in_panel && !on_button {
             self.menu_chain.clear();
@@ -534,8 +551,8 @@ impl WidgetUi {
             ) && self.interaction.response(d.id).clicked
         });
         if hit {
-            self.menu_chain.clear();
-            self.menu_highlight.clear();
+            // 关菜单要等下一帧，理由见 `update_menus` 开头。
+            self.menu_close_pending = true;
         }
     }
 
@@ -615,7 +632,11 @@ pub(crate) fn container_style(theme: &Theme) -> Style {
 /// 顶层从锚点**下方**长出来（菜单按钮在上面），子菜单从**右侧**长出来。
 /// 放不下时先试相反的一侧——上下翻转比左右乱跳自然得多。
 pub(crate) fn place(anchor: Rect, size: Vec2, depth: usize, screen: Vec2) -> Rect {
-    let side = if depth == 0 { Side::Bottom } else { Side::Right };
+    let side = if depth == 0 {
+        Side::Bottom
+    } else {
+        Side::Right
+    };
     let candidates = [
         Placement::new(side, Align::Start),
         Placement::new(side.mirror(), Align::Start),
@@ -1159,7 +1180,13 @@ mod widget_tests {
         frame(&mut w, &mut ui, &nav(NavKey::Down));
         frame(&mut w, &mut ui, &activate());
         assert!(w.response(Id::new("open")).clicked, "回车该激活高亮的那项");
-        assert!(!w.menus_open(), "激活之后整条菜单链该关掉");
+
+        // 关菜单**慢一帧**：这一帧那一项还在，调用方才读得到它的
+        // `clicked`（响应本来就滞后一帧）。见
+        // [`a_clicked_item_reaches_the_caller_on_the_next_frame`]。
+        assert!(w.menus_open(), "关得太急，调用方就读不到这一下了");
+        frame(&mut w, &mut ui, &UiInput::default());
+        assert!(!w.menus_open(), "下一帧该收摊了");
     }
 
     /// 方向键跳过禁用项。
@@ -1178,10 +1205,7 @@ mod widget_tests {
         // 该落在「最近打开」而不是禁用的「保存」。
         frame(&mut w, &mut ui, &nav(NavKey::Up));
         frame(&mut w, &mut ui, &activate());
-        assert!(
-            !w.response(Id::new("save")).clicked,
-            "高亮不该停在禁用项上"
-        );
+        assert!(!w.response(Id::new("save")).clicked, "高亮不该停在禁用项上");
     }
 
     /// Esc 关掉菜单。
@@ -1339,6 +1363,8 @@ mod widget_tests {
         click(&mut w, &mut ui, open);
 
         assert!(w.response(Id::new("open")).clicked);
+        // 关菜单慢一帧，好让调用方读到上面那个 `clicked`。
+        frame(&mut w, &mut ui, &at(open.x, open.y));
         assert!(!w.menus_open(), "点了一项之后菜单该关掉");
     }
 
@@ -1530,10 +1556,235 @@ mod widget_tests {
             w.finish(&mut ui, input);
         }
 
+        assert!(w.response(Id::new("open")).clicked, "标签把高亮挤偏了一格");
+    }
+
+    /// 菜单按钮待在一**行**里，而根容器有固定宽度和外边距。
+    ///
+    /// 这是真实面板的形状：菜单栏是一行按钮，面板整体贴着窗口右缘。
+    /// 单独拿默认根容器测的话，这两件事都测不到。
+    #[test]
+    fn a_menu_opens_from_a_button_inside_a_row() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        w.root_style(kui::Style {
+            width: kui::Length::Px(264.0),
+            margin: kui::Edges {
+                left: 536.0,
+                top: 0.0,
+                right: 0.0,
+                bottom: 0.0,
+            },
+            ..Default::default()
+        });
+
+        let declare_bar = |w: &mut WidgetUi| {
+            w.begin_row();
+            w.label("pad", "");
+            let view = w.menu_button("view", "View");
+            let edit = w.menu_button("edit", "Edit");
+            w.end_row();
+            if w.begin_menu(view) {
+                w.menu_item("open", "打开");
+                w.menu_item("quit", "退出");
+                w.end_menu();
+            }
+            if w.begin_menu(edit) {
+                w.menu_item("undo", "撤销");
+                w.end_menu();
+            }
+        };
+
+        w.begin();
+        declare_bar(&mut w);
+        w.finish(&mut ui, &UiInput::default());
+
+        let button = w.response(Id::new("view")).rect;
+        assert!(button.size() != Vec2::ZERO, "菜单按钮没排出来");
+
+        // 点它。
+        let target = button.center();
+        for input in [&press(target.x, target.y), &{
+            let mut release = at(target.x, target.y);
+            release.released.push(PointerButton::Primary);
+            release
+        }] {
+            w.begin();
+            declare_bar(&mut w);
+            w.finish(&mut ui, input);
+        }
+        assert!(w.menus_open(), "点了菜单按钮，菜单没开");
+
+        // 再走一帧，菜单这时才被声明出来。
+        w.begin();
+        declare_bar(&mut w);
+        w.finish(&mut ui, &at(target.x, target.y));
+
+        let item = w.response(Id::new("open")).rect;
         assert!(
-            w.response(Id::new("open")).clicked,
-            "标签把高亮挤偏了一格"
+            item.size() != Vec2::ZERO,
+            "菜单开着，但项没有尺寸——浮层没被排出来：{item:?}"
         );
+        assert!(
+            item.min.y >= button.max.y - 1.0,
+            "菜单该在按钮下面：按钮 {button:?}，项 {item:?}"
+        );
+    }
+
+    /// **点中的那一项，调用方真的收得到。**
+    ///
+    /// 这条按真实用法写：菜单在每帧的声明里搭出来，动作紧跟着
+    /// `if w.response(item).clicked` 判断——和面板里所有别的控件一个写法。
+    ///
+    /// 这里盯的是一个很容易漏掉的死角：响应**滞后一帧**，而菜单被点中
+    /// 之后就关了。要是关得太急，下一帧那一项根本不会被声明，
+    /// `response` 查不到它，`clicked` 永远读不到——菜单看着能开能关，
+    /// 点哪一项都没反应。
+    ///
+    /// 之所以之前没发现，是因为别的测试都在 `finish` 之后**当帧**读
+    /// `clicked`。那个时机只有测试用得上，真实代码读到的是上一帧。
+    #[test]
+    fn a_clicked_item_reaches_the_caller_on_the_next_frame() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let mut fired = 0;
+
+        // 和例子里一模一样的写法。
+        fn declare(w: &mut WidgetUi, fired: &mut i32) {
+            let file = w.menu_button("file", "文件");
+            if w.begin_menu(file) {
+                let open = w.menu_item("open", "打开");
+                w.menu_item("quit", "退出");
+                w.end_menu();
+                if w.response(open).clicked {
+                    *fired += 1;
+                }
+            }
+        }
+
+        let mut run = |w: &mut WidgetUi, ui: &mut kui::Ui, input: &UiInput, fired: &mut i32| {
+            w.begin();
+            declare(w, fired);
+            w.finish(ui, input);
+        };
+
+        run(&mut w, &mut ui, &UiInput::default(), &mut fired);
+        let button = w.response(Id::new("file")).rect.center();
+
+        // 点开菜单。
+        run(&mut w, &mut ui, &press(button.x, button.y), &mut fired);
+        let mut release = at(button.x, button.y);
+        release.released.push(PointerButton::Primary);
+        run(&mut w, &mut ui, &release, &mut fired);
+        run(&mut w, &mut ui, &at(button.x, button.y), &mut fired);
+
+        let item = w.response(Id::new("open")).rect.center();
+        assert!(w.menus_open(), "菜单没开，后面就没得测了");
+
+        // 点「打开」。
+        run(&mut w, &mut ui, &press(item.x, item.y), &mut fired);
+        let mut release = at(item.x, item.y);
+        release.released.push(PointerButton::Primary);
+        run(&mut w, &mut ui, &release, &mut fired);
+        // 再跑几帧，让调用方有机会读到。
+        for _ in 0..3 {
+            run(&mut w, &mut ui, &at(item.x, item.y), &mut fired);
+        }
+
+        assert_eq!(fired, 1, "调用方没收到这一下点击");
+        assert!(!w.menus_open(), "执行完该把菜单关掉");
+    }
+
+    /// 键盘激活也一样收得到。
+    #[test]
+    fn an_activated_item_reaches_the_caller_on_the_next_frame() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        let mut fired = 0;
+
+        fn declare(w: &mut WidgetUi, fired: &mut i32) {
+            let file = w.menu_button("file", "文件");
+            if w.begin_menu(file) {
+                let open = w.menu_item("open", "打开");
+                w.end_menu();
+                if w.response(open).clicked {
+                    *fired += 1;
+                }
+            }
+        }
+
+        let mut run = |w: &mut WidgetUi, ui: &mut kui::Ui, input: &UiInput, fired: &mut i32| {
+            w.begin();
+            declare(w, fired);
+            w.finish(ui, input);
+        };
+
+        run(&mut w, &mut ui, &UiInput::default(), &mut fired);
+        let button = w.response(Id::new("file")).rect.center();
+        run(&mut w, &mut ui, &press(button.x, button.y), &mut fired);
+        let mut release = at(button.x, button.y);
+        release.released.push(PointerButton::Primary);
+        run(&mut w, &mut ui, &release, &mut fired);
+
+        // 方向键选中第一项，回车。
+        run(&mut w, &mut ui, &nav(NavKey::Down), &mut fired);
+        run(&mut w, &mut ui, &activate(), &mut fired);
+        for _ in 0..3 {
+            run(&mut w, &mut ui, &UiInput::default(), &mut fired);
+        }
+
+        assert_eq!(fired, 1, "键盘激活没传到调用方");
+    }
+
+    /// 按住不放几帧再松手，仍然能打开菜单。
+    ///
+    /// 真实的鼠标点击就是这样：按下和松开之间隔着几十毫秒、好几帧。
+    /// 前面那些测试把两者放在相邻两帧，把中间这段整个跳过了。
+    #[test]
+    fn a_slow_click_still_opens_the_menu() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        frame(&mut w, &mut ui, &UiInput::default());
+        let target = w.response(Id::new("file")).rect.center();
+
+        frame(&mut w, &mut ui, &press(target.x, target.y));
+        // 按住不动。
+        for _ in 0..6 {
+            frame(&mut w, &mut ui, &at(target.x, target.y));
+        }
+        let mut release = at(target.x, target.y);
+        release.released.push(PointerButton::Primary);
+        frame(&mut w, &mut ui, &release);
+
+        assert!(w.menus_open(), "按住几帧再松手，菜单没开");
+
+        frame(&mut w, &mut ui, &at(target.x, target.y));
+        assert!(
+            w.response(Id::new("open")).rect.size() != Vec2::ZERO,
+            "菜单开着，但项没排出来"
+        );
+    }
+
+    /// 指针停在菜单按钮上不动，菜单该一直开着。
+    ///
+    /// 打开菜单之后鼠标通常就停在那个按钮上——如果哪一帧把这看成
+    /// 「点在菜单外面」，菜单会在打开的下一帧自己关掉，表现就是
+    /// 「点了没反应」。
+    #[test]
+    fn the_menu_stays_open_while_the_pointer_rests_on_its_button() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        frame(&mut w, &mut ui, &UiInput::default());
+        let target = w.response(Id::new("file")).rect.center();
+        click(&mut w, &mut ui, target);
+        assert!(w.menus_open());
+
+        for index in 0..10 {
+            frame(&mut w, &mut ui, &at(target.x, target.y));
+            assert!(w.menus_open(), "第 {index} 帧菜单自己关掉了");
+        }
     }
 
     /// 没有菜单开着时，一切照旧。

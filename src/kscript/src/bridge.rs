@@ -9,12 +9,13 @@
 //! 取参数可能触发用户的 `toString()`，那会回调进 JS；此时若还持着场景借用，
 //! 就是重入。顺序反过来就结构上不可能发生（见 [`crate::host`]）。
 
-use crate::host::{MAX_SIGNALS, handle_of, id_of, with_host, with_scene};
+use crate::host::{MAX_SIGNALS, MAX_SPAWNS, handle_of, id_of, with_host, with_input, with_scene};
 use boa_engine::{
     Context, JsResult, JsValue, NativeFunction, js_string, object::ObjectInitializer,
     property::Attribute,
 };
 use kcore::pool::Handle;
+use kinput::MouseButton;
 use kmath::{Quat, Vec3};
 use kphysics::RayCastOptions;
 use kscene::Node;
@@ -64,6 +65,38 @@ fn array3(value: Vec3, context: &mut Context) -> JsValue {
     let _ = array.push(JsValue::from(value.y as f64), context);
     let _ = array.push(JsValue::from(value.z as f64), context);
     array.into()
+}
+
+/// 把一个二维向量变成 JS 数组。
+fn array2(value: kmath::Vec2, context: &mut Context) -> JsValue {
+    let array = boa_engine::object::builtins::JsArray::new(context);
+    let _ = array.push(JsValue::from(value.x as f64), context);
+    let _ = array.push(JsValue::from(value.y as f64), context);
+    array.into()
+}
+
+/// 取一个字符串参数，缺省当空串。
+///
+/// 与整个模块同一条纪律：这一步可能触发用户的 `toString()`，
+/// 所以必须在借场景**之前**做完。
+fn text(args: &[JsValue], index: usize, context: &mut Context) -> JsResult<String> {
+    Ok(match args.get(index) {
+        Some(value) => value.to_string(context)?.to_std_string_escaped(),
+        None => String::new(),
+    })
+}
+
+/// 把鼠标键的名字翻成 winit 的枚举。
+///
+/// 认不出的名字返回 [`None`]，调用方一律当成「没按」——脚本里把
+/// `"Left"` 写成 `"leftt"` 不该让整个脚本停掉，但也不该悄悄变成左键。
+fn mouse_button(name: &str) -> Option<MouseButton> {
+    match name.to_ascii_lowercase().as_str() {
+        "left" => Some(MouseButton::Left),
+        "right" => Some(MouseButton::Right),
+        "middle" => Some(MouseButton::Middle),
+        _ => None,
+    }
 }
 
 /// 往全局装上 `__k` 桥对象。`prelude.js` 会把它包成 `Node` / `Vector3`。
@@ -243,6 +276,26 @@ pub(crate) fn register(context: &mut Context) {
                 Ok(array3(position, context))
             }),
             js_string!("getGlobalPosition"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                // 本引擎（和 glTF）的约定：前方是 -Z。取世界矩阵的那一列，
+                // 所以父节点转了也算数。
+                let handle = node_arg(args, 0, context)?;
+                let forward = handle
+                    .and_then(|handle| {
+                        with_scene(|scene| {
+                            scene.try_get(handle).map(|node| {
+                                (-node.global_transform().z_axis.truncate()).normalize_or_zero()
+                            })
+                        })
+                    })
+                    .flatten()
+                    .unwrap_or(Vec3::NEG_Z);
+                Ok(array3(forward, context))
+            }),
+            js_string!("getForward"),
             1,
         )
         .function(
@@ -704,6 +757,142 @@ pub(crate) fn register(context: &mut Context) {
             }),
             js_string!("raycast"),
             7,
+        )
+        // ── 输入 ──
+        //
+        // 只认**动作与轴**，不认具体键位。键位绑定留在 Rust 侧的 `Bindings`：
+        // 脚本里写死 `KeyCode::KeyW`，改键功能就永远做不了了，而 kinput 那套
+        // 映射表正是为了避免这件事。
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let name = text(args, 0, context)?;
+                let pressed = with_input(|input| input.action_pressed(&name)).unwrap_or(false);
+                Ok(JsValue::from(pressed))
+            }),
+            js_string!("actionPressed"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let name = text(args, 0, context)?;
+                let pressed = with_input(|input| input.action_just_pressed(&name)).unwrap_or(false);
+                Ok(JsValue::from(pressed))
+            }),
+            js_string!("actionJustPressed"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let name = text(args, 0, context)?;
+                let released =
+                    with_input(|input| input.action_just_released(&name)).unwrap_or(false);
+                Ok(JsValue::from(released))
+            }),
+            js_string!("actionJustReleased"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let name = text(args, 0, context)?;
+                let value = with_input(|input| input.axis(&name)).unwrap_or(0.0);
+                Ok(JsValue::from(value as f64))
+            }),
+            js_string!("axis"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let name = text(args, 0, context)?;
+                let Some(button) = mouse_button(&name) else {
+                    return Ok(JsValue::from(false));
+                };
+                let pressed = with_input(|input| input.mouse_pressed(button)).unwrap_or(false);
+                Ok(JsValue::from(pressed))
+            }),
+            js_string!("mousePressed"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let name = text(args, 0, context)?;
+                let Some(button) = mouse_button(&name) else {
+                    return Ok(JsValue::from(false));
+                };
+                let pressed = with_input(|input| input.mouse_just_pressed(button)).unwrap_or(false);
+                Ok(JsValue::from(pressed))
+            }),
+            js_string!("mouseJustPressed"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, context| {
+                // 光标还没进过窗口时没有位置，那时返回 null 而不是 (0,0)——
+                // 原点是个合法坐标，混在一起脚本没法区分。
+                let position = with_input(|input| input.cursor_position()).flatten();
+                Ok(match position {
+                    Some(position) => array2(position, context),
+                    None => JsValue::null(),
+                })
+            }),
+            js_string!("mousePosition"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, context| {
+                let delta = with_input(|input| input.mouse_delta()).unwrap_or_default();
+                Ok(array2(delta, context))
+            }),
+            js_string!("mouseDelta"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, context| {
+                let delta = with_input(|input| input.scroll_delta()).unwrap_or_default();
+                Ok(array2(delta, context))
+            }),
+            js_string!("scrollDelta"),
+            0,
+        )
+        // ── 生成 ──
+        //
+        // 脚本按**名字**生成，原型由游戏侧用 `register_prototype` 登记。
+        // 让脚本直接拼网格与材质的话，等于把整个渲染栈拖进 JS 层，
+        // 而且换一套美术资源就要改脚本。
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let name = text(args, 0, context)?;
+                let position = vec3(args, 1, context)?;
+                let Some(position) = finite(position) else {
+                    return Ok(JsValue::from(-1.0));
+                };
+
+                let id = with_host(|host| {
+                    if host.spawned >= MAX_SPAWNS {
+                        return -1.0;
+                    }
+                    let Some(prototype) = host.prototypes.get(&name) else {
+                        // 名字拼错是最常见的错误，而生成失败的表现是
+                        // 「什么都没发生」——不记一条日志根本无从查起。
+                        klog::error!("脚本想生成「{name}」，但没有登记过这个原型");
+                        return -1.0;
+                    };
+
+                    let mut node = prototype();
+                    node.transform.position = position;
+
+                    let Some(scene) = host.scene.as_mut() else {
+                        return -1.0;
+                    };
+                    let handle = scene.add_node(node);
+
+                    host.spawned += 1;
+                    host.registry.id_of(handle) as f64
+                });
+
+                Ok(JsValue::from(id.unwrap_or(-1.0)))
+            }),
+            js_string!("spawn"),
+            4,
         )
         // ── 与 Rust 侧通信 ──
         .function(

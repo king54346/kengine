@@ -41,7 +41,7 @@ impl WidgetUi {
 
 #[cfg(test)]
 mod tests {
-    
+
     use crate::WidgetUi;
     use crate::testing::ui;
     use kmath::Vec2;

@@ -151,8 +151,6 @@ pub mod prelude {
         Rect as UiRect, Ui, UiInput,
     };
     // 控件层。滑条和列表要用到各自的配置 / 动作类型，一并带上。
-    pub use kui_widgets::{
-        ListAction, Slider, Theme as UiTheme, TrackClick, WidgetUi,
-    };
+    pub use kui_widgets::{ListAction, Slider, Theme as UiTheme, TrackClick, WidgetUi};
     pub use winit::event::WindowEvent;
 }

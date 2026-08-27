@@ -27,7 +27,7 @@ fn scene_with_script(source: &str) -> (Scene, ResourceManager) {
 fn tick(runtime: &mut ScriptRuntime, scene: &mut Scene, manager: &ResourceManager) -> Vec<String> {
     scene.update();
     runtime
-        .process(scene, manager, 1.0 / 60.0, 0.0)
+        .process(scene, &mut kinput::Input::new(), manager, 1.0 / 60.0, 0.0)
         .into_iter()
         .map(|s| s.name)
         .collect()

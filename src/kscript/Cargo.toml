@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 kasset = { path = "../kasset" }
 kcore = { path = "../kcore" }
+kinput = { path = "../kinput" }
 klog = { path = "../klog" }
 kmath = { path = "../kmath" }
 kscene = { path = "../kscene" }

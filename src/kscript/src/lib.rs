@@ -47,6 +47,8 @@ mod debug_tests;
 #[cfg(test)]
 mod module_tests;
 #[cfg(test)]
+mod object_tests;
+#[cfg(test)]
 mod state_tests;
 #[cfg(test)]
 mod tests;

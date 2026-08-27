@@ -26,7 +26,8 @@ fn setup(source: &str) -> (Scene, ResourceManager, ScriptRuntime) {
 
 fn tick(runtime: &mut ScriptRuntime, scene: &mut Scene, manager: &ResourceManager) {
     scene.update();
-    runtime.process(scene, manager, 1.0 / 60.0, 0.0);
+    let mut input = kinput::Input::new();
+    runtime.process(scene, &mut input, manager, 1.0 / 60.0, 0.0);
 }
 
 fn only_instance(scene: &Scene) -> crate::InstanceId {
@@ -148,7 +149,13 @@ fn reviving_clears_the_failure() {
     assert!(runtime.error(id).is_none());
 
     scene.update();
-    let signals = runtime.process(&mut scene, &manager, 1.0 / 60.0, 0.0);
+    let signals = runtime.process(
+        &mut scene,
+        &mut kinput::Input::new(),
+        &manager,
+        1.0 / 60.0,
+        0.0,
+    );
     assert_eq!(signals.len(), 1, "复活之后该继续跑");
 }
 
@@ -331,7 +338,13 @@ fn self_is_not_bound_while_the_factory_runs() {
     );
     scene.update();
     let signals: Vec<String> = runtime
-        .process(&mut scene, &manager, 1.0 / 60.0, 0.0)
+        .process(
+            &mut scene,
+            &mut kinput::Input::new(),
+            &manager,
+            1.0 / 60.0,
+            0.0,
+        )
         .into_iter()
         .map(|s| s.name)
         .collect();

@@ -31,6 +31,7 @@ use crate::{
 use boa_engine::{Context, JsObject, JsResult, JsValue, Source, js_string};
 use kasset::ResourceManager;
 use kcore::pool::Handle;
+use kinput::Input;
 use kscene::{Node, Scene, ScriptSlot};
 /// 脚本抛给游戏侧的一个信号。
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +52,11 @@ pub struct InstanceId(pub u32);
 struct Instance {
     object: JsObject,
     node: Handle<Node>,
+    /// 节点在登记处里的下标，也就是 JS 侧 `node._id`。
+    ///
+    /// 存下来是为了实例收掉时能把 `__instances` 里对应的那一项删干净——
+    /// 那时候节点句柄多半已经失效，再去登记处换一次是换不出来的。
+    node_id: u32,
     ready: bool,
     /// 出过错就停掉，不再调用任何方法。
     failed: bool,
@@ -132,6 +138,12 @@ impl ScriptRuntime {
     /// 一帧里跑到一千万次循环的脚本一定是写错了。有这道闸，`while(true){}`
     /// 会抛异常然后被停掉，而不是把整个游戏挂死。
     pub const DEFAULT_LOOP_LIMIT: u64 = 10_000_000;
+
+    /// 一次 tick 最多能 `spawn` 出多少个节点。
+    ///
+    /// 超出之后 `spawn` 返回 `null`，下一次 tick 重新放开。写错的脚本
+    /// （`for(;;) spawn('Enemy')`）会因此只糟蹋一帧，而不是把内存吃光。
+    pub const MAX_SPAWNS_PER_TICK: usize = crate::host::MAX_SPAWNS;
 
     /// 建一个装好引擎 API 的运行时。
     pub fn new() -> Self {
@@ -341,6 +353,11 @@ impl ScriptRuntime {
     ///
     /// 这不是沙箱。`eval_in(id, "self.queueFree()")` 会真的删掉那个节点。
     /// 需要场景访问，所以要传 `scene`——和一次正常的 tick 走的是同一条路。
+    ///
+    /// # 期间发出的信号会丢
+    ///
+    /// 求值里调 `emit` 攒下的信号没人来取，下一次 tick 开始时被清掉。
+    /// 调试面板要看结果的话，读返回的字符串，别指望走信号那条路。
     pub fn eval_in(
         &mut self,
         id: InstanceId,
@@ -354,7 +371,11 @@ impl ScriptRuntime {
 
         // 和一次正常 tick 一样把场景寄存进去，否则表达式里的 `self`、
         // `getNode`、`raycast` 全都拿不到场景。
-        let guard = HostGuard::park(scene, &mut self.host, &mut self.spare, 0.0, 0.0);
+        //
+        // 输入给一份空的：REPL 是调试面板在帧外调的，「此刻按着哪个键」
+        // 对它没有意义，而借真正的那份会把调用方的签名拖长一截。
+        let mut input = Input::new();
+        let guard = HostGuard::park(scene, &mut input, &mut self.host, &mut self.spare, 0.0, 0.0);
         with_host(|host| host.current = node);
 
         // 包成一个函数再调，才能把 `this` 绑到实例对象上。
@@ -382,25 +403,65 @@ impl ScriptRuntime {
         text
     }
 
+    /// 登记一个可供脚本 `spawn` 的原型。
+    ///
+    /// ```ignore
+    /// runtime.register_prototype("Enemy", || {
+    ///     Node::new("Enemy").with_mesh(Mesh::cube()).with_script("scripts/enemy.js")
+    /// });
+    /// ```
+    /// ```js
+    /// const enemy = spawn("Enemy", new Vector3(3, 0.5, 0));
+    /// ```
+    ///
+    /// 闭包每次生成时调用一次，因此每个实例拿到的是独立的网格与材质设置。
+    /// 同名重复登记会覆盖前一个。
+    ///
+    /// # 原型带脚本时晚一帧
+    ///
+    /// 生成的节点当帧就在场景里（也已经进了物理世界），但它自己的脚本要等
+    /// 下一次 [`process`](Self::process) 才实例化——`_ready` 因此比生成它的
+    /// 那一帧晚一拍。子弹这类东西要注意：出生位置得由生成方设好，
+    /// 不能指望脚本在同一帧里摆。
+    pub fn register_prototype(
+        &mut self,
+        name: impl Into<String>,
+        factory: impl Fn() -> Node + 'static,
+    ) {
+        self.host.prototypes.insert(name.into(), Box::new(factory));
+    }
+
+    /// 已登记的原型名。
+    pub fn prototypes(&self) -> impl Iterator<Item = &str> {
+        self.host.prototypes.keys().map(String::as_str)
+    }
+
     /// 每渲染帧调一次：实例化新脚本，调 `_ready` 与 `_process`。
     pub fn process(
         &mut self,
         scene: &mut Scene,
+        input: &mut Input,
         resources: &ResourceManager,
         dt: f32,
         elapsed: f32,
     ) -> Vec<Signal> {
         self.stats = ScriptStats::default();
         self.instantiate_pending(scene, resources);
-        self.run("_process", scene, dt, elapsed)
+        self.run("_process", scene, input, dt, elapsed)
     }
 
     /// 每物理子步调一次：调 `_physics_process`。
     ///
     /// `dt` 恒等于物理步长——在这里写 `v * delta` 却拿到帧间隔的话，
     /// 定长调度就白做了，那正是它要消除的东西。
-    pub fn physics_process(&mut self, scene: &mut Scene, dt: f32, elapsed: f32) -> Vec<Signal> {
-        self.run("_physics_process", scene, dt, elapsed)
+    pub fn physics_process(
+        &mut self,
+        scene: &mut Scene,
+        input: &mut Input,
+        dt: f32,
+        elapsed: f32,
+    ) -> Vec<Signal> {
+        self.run("_physics_process", scene, input, dt, elapsed)
     }
 
     /// 把场景里还没实例化的脚本槽位建出来。
@@ -482,9 +543,14 @@ impl ScriptRuntime {
             return None;
         };
 
+        // 登记处此刻没被寄存出去，直接问它要下标。走 `host::id_of` 的话
+        // 会因为不在 tick 里而拿到 -1。
+        let node_id = self.host.registry.id_of(node);
+
         let instance = Instance {
             object: object.clone(),
             node,
+            node_id,
             ready: false,
             failed: false,
             name: script.name().to_string(),
@@ -502,6 +568,12 @@ impl ScriptRuntime {
                 self.instances.len() - 1
             }
         };
+
+        // 挂进 `__instances`，别的脚本于是能用 `getNode("X").script.method()`
+        // 直接调过来。纯 JS 侧的表，不经过桥——在原生函数里回调进 VM 正是
+        // `host` 那条不变量禁止的事。
+        register_instance(&mut self.context, node_id, &object);
+
         Some(InstanceId(id as u32))
     }
 
@@ -617,9 +689,17 @@ impl ScriptRuntime {
     }
 
     /// 跑一轮生命周期回调。
-    fn run(&mut self, method: &str, scene: &mut Scene, dt: f32, elapsed: f32) -> Vec<Signal> {
-        // 场景与宿主状态整个搬进线程局部，原生函数于是能拿到真正的 `&mut Scene`。
-        let guard = HostGuard::park(scene, &mut self.host, &mut self.spare, dt, elapsed);
+    fn run(
+        &mut self,
+        method: &str,
+        scene: &mut Scene,
+        input: &mut Input,
+        dt: f32,
+        elapsed: f32,
+    ) -> Vec<Signal> {
+        // 场景、输入与宿主状态整个搬进线程局部，原生函数于是能拿到真正的
+        // `&mut Scene`。
+        let guard = HostGuard::park(scene, input, &mut self.host, &mut self.spare, dt, elapsed);
 
         for index in 0..self.instances.len() {
             let Some(instance) = self.instances[index].as_ref() else {
@@ -629,9 +709,10 @@ impl ScriptRuntime {
                 continue;
             }
 
-            let (object, node, ready, name) = (
+            let (object, node, node_id, ready, name) = (
                 instance.object.clone(),
                 instance.node,
+                instance.node_id,
                 instance.ready,
                 instance.name.clone(),
             );
@@ -640,6 +721,10 @@ impl ScriptRuntime {
             let alive = with_scene(|scene| scene.try_get(node).is_some()).unwrap_or(false);
             if !alive {
                 self.instances[index] = None;
+                // 借用已经还回去了，这里碰 VM 是安全的（不变量 2 说的是
+                // 「借用**期间**不碰 VM」）。不注销的话别的脚本还能通过
+                // `node.script` 摸到一个挂在死节点上的对象。
+                unregister_instance(&mut self.context, node_id);
                 continue;
             }
 
@@ -708,8 +793,14 @@ impl ScriptRuntime {
 
             if slot.is_live() {
                 // 槽位记的下标就是实例数组的下标。
+                let mut stale = None;
                 if let Some(entry) = self.instances.get_mut(slot.instance as usize) {
-                    *entry = None;
+                    stale = entry.take().map(|instance| instance.node_id);
+                }
+                if let Some(node_id) = stale {
+                    // 旧对象要从 `__instances` 里拿掉：下一帧重建时会挂上新的，
+                    // 中间这一帧别的脚本不该还能调到改文件之前的那个。
+                    unregister_instance(&mut self.context, node_id);
                 }
             }
             slot.instance = ScriptSlot::NO_INSTANCE;
@@ -722,9 +813,18 @@ impl ScriptRuntime {
     }
 
     /// 销毁全部实例并清空句柄登记处。切场景时调。
+    ///
+    /// 原型保留：它们是游戏侧登记的，跟场景没关系，切一次场景就得重新登记
+    /// 一遍的话，每个换关卡的地方都得记着这件事。
     pub fn clear(&mut self) {
-        self.instances.clear();
-        self.host = Host::default();
+        for instance in self.instances.drain(..).flatten() {
+            unregister_instance(&mut self.context, instance.node_id);
+        }
+        let prototypes = std::mem::take(&mut self.host.prototypes);
+        self.host = Host {
+            prototypes,
+            ..Host::default()
+        };
     }
 }
 
@@ -756,6 +856,43 @@ fn fail(
         }
     }
     stats.failed += 1;
+}
+
+/// 把一个实例对象挂进 JS 侧的 `__instances`，键是节点在登记处里的下标。
+///
+/// 这张表是脚本之间互相调用的全部机制：`prelude.js` 里
+/// `Node.prototype.script` 就是查它。为什么不做成一个桥函数——
+/// 那需要在原生函数里回调进 VM，正是 [`crate::host`] 不变量 2 禁止的事。
+fn register_instance(context: &mut Context, node_id: u32, object: &JsObject) {
+    let Ok(table) = context
+        .global_object()
+        .get(js_string!("__instances"), context)
+    else {
+        return;
+    };
+    let Some(table) = table.as_object() else {
+        klog::error!("找不到 __instances，前奏脚本没跑成功？");
+        return;
+    };
+    let key = js_string!(node_id.to_string().as_str());
+    if table.set(key, object.clone(), true, context).is_err() {
+        klog::error!("实例登记失败：节点 {node_id}");
+    }
+}
+
+/// 把一项从 `__instances` 里删掉。实例收掉或重建时调。
+fn unregister_instance(context: &mut Context, node_id: u32) {
+    let Ok(table) = context
+        .global_object()
+        .get(js_string!("__instances"), context)
+    else {
+        return;
+    };
+    let Some(table) = table.as_object() else {
+        return;
+    };
+    let key: boa_engine::property::PropertyKey = js_string!(node_id.to_string().as_str()).into();
+    let _ = table.delete_property_or_throw(key, context);
 }
 
 /// 调用实例上的一个方法。方法不存在时安静跳过——生命周期方法都是可选的。

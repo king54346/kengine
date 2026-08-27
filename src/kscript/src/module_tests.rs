@@ -22,7 +22,13 @@ fn run_on(
         return Vec::new();
     };
     runtime
-        .process(scene, &kasset::ResourceManager::new(), 1.0 / 60.0, 0.0)
+        .process(
+            scene,
+            &mut kinput::Input::new(),
+            &kasset::ResourceManager::new(),
+            1.0 / 60.0,
+            0.0,
+        )
         .into_iter()
         .map(|signal| signal.name)
         .collect()

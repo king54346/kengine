@@ -44,7 +44,7 @@ use kasset::{HotReload, ResourceIo, ResourceManager};
 use kaudio::AudioDevice;
 use kinput::Input;
 use krender::{RenderOutcome, Renderer};
-use kscene::Scene;
+use kscene::{Node, Scene};
 use kscript::{ScriptRuntime, Signal};
 use kwinit::{AppHandler, FrameOutcome, WindowConfig};
 use std::{sync::Arc, time::Instant};
@@ -101,6 +101,13 @@ pub trait Plugin: 'static {
 }
 
 /// 运行期状态。窗口与渲染器要等 `resumed` 之后才能创建，故与 [`App`] 分开。
+///
+/// **[`App`] 里存的是 `Box<Runtime>`**，不是它本身。这东西有几十 KB
+/// （光一个 `Scene` 就一万多字节，脚本运行时还要两个），而 `App` 是靠
+/// `.with_xxx(mut self) -> Self` 一路链下来的：内联的话每一环都要在栈上
+/// 复制一整份，debug 构建又不会把这些复制优化掉。Windows 主线程只有 1 MB，
+/// 链上七八个 `with_` 就能把它用光——症状是程序在 `resumed` 之前
+/// `STATUS_STACK_OVERFLOW`，什么日志都来不及打。
 struct Runtime {
     window: Arc<Window>,
     renderer: Renderer,
@@ -206,8 +213,7 @@ fn translate_ui_input(input: &Input, scale: f32, out: &mut UiInput) {
     // 这两个键同时还有别的身份——回车上面刚被翻成了 `Submit`，空格会作为
     // 一个字符走 `out.text`。**照实填两边就行**：控件层按焦点在谁身上决定
     // 谁吃掉它（文本框吃字符，按钮吃激活），这里不必先判断焦点。
-    out.activate =
-        input.key_just_pressed(KeyCode::Enter) || input.key_just_pressed(KeyCode::Space);
+    out.activate = input.key_just_pressed(KeyCode::Enter) || input.key_just_pressed(KeyCode::Space);
 }
 
 /// 应用。装载插件、注册系统，然后接管主循环。
@@ -215,13 +221,16 @@ pub struct App {
     config: WindowConfig,
     plugins: Vec<Box<dyn Plugin>>,
     systems: Vec<(Stage, System)>,
-    runtime: Option<Runtime>,
+    /// 装箱的理由见 [`Runtime`] 的文档：不装的话链式构建会把主线程栈用光。
+    runtime: Option<Box<Runtime>>,
     initialized: bool,
     physics_hz: f32,
     hot_reload: bool,
     /// 资源的字节从哪来。默认是本地文件系统。
     resource_io: Option<Arc<dyn ResourceIo>>,
     audio: bool,
+    /// 待登记的脚本原型。运行时是在窗口就绪之后才建的，所以先攒在这里。
+    prototypes: Vec<(String, Box<dyn Fn() -> Node>)>,
 }
 
 impl Default for App {
@@ -243,7 +252,30 @@ impl App {
             hot_reload: true,
             resource_io: None,
             audio: true,
+            prototypes: Vec::new(),
         }
+    }
+
+    /// 登记一个原型，脚本里用 `spawn("名字", 位置)` 生成。
+    ///
+    /// ```ignore
+    /// App::new().with_prototype("Enemy", || {
+    ///     Node::new("Enemy")
+    ///         .with_mesh(Mesh::cube())
+    ///         .with_script("assets/scripts/enemy.js")
+    /// })
+    /// ```
+    ///
+    /// 闭包每次生成时调用一次。让脚本直接拼网格与材质是另一条路，但那会把
+    /// 整个渲染栈拖进 JS 层，而且换一套美术资源就得改脚本——名字是两边
+    /// 唯一该共享的东西。
+    pub fn with_prototype(
+        mut self,
+        name: impl Into<String>,
+        factory: impl Fn() -> Node + 'static,
+    ) -> Self {
+        self.prototypes.push((name.into(), Box::new(factory)));
+        self
     }
 
     /// 开关音频输出。默认开启。
@@ -433,7 +465,7 @@ impl AppHandler for App {
         let renderer = pollster::block_on(Renderer::new(window.clone()));
         let now = Instant::now();
 
-        self.runtime = Some(Runtime {
+        self.runtime = Some(Box::new(Runtime {
             window,
             renderer,
             scene: Scene::new(),
@@ -451,12 +483,18 @@ impl AppHandler for App {
             } else {
                 AudioDevice::silent()
             },
-            scripts: ScriptRuntime::new(),
+            scripts: {
+                let mut scripts = ScriptRuntime::new();
+                for (name, factory) in self.prototypes.drain(..) {
+                    scripts.register_prototype(name, factory);
+                }
+                scripts
+            },
             script_events: Vec::new(),
             debug: DebugDraw::none(),
             ui: Ui::new(),
             ui_input: UiInput::default(),
-        });
+        }));
 
         // 看门人要在资源管理器建好之后再建，它一上来就要把现有资源的
         // 修改时间记成基线。
@@ -527,10 +565,13 @@ impl AppHandler for App {
             let now = Instant::now();
             let dt = now.duration_since(runtime.last_frame).as_secs_f32();
             let elapsed = now.duration_since(runtime.start_time).as_secs_f32();
-            runtime.script_events =
-                runtime
-                    .scripts
-                    .process(&mut runtime.scene, &runtime.resources, dt, elapsed);
+            runtime.script_events = runtime.scripts.process(
+                &mut runtime.scene,
+                &mut runtime.input,
+                &runtime.resources,
+                dt,
+                elapsed,
+            );
         }
 
         // UI 开一帧。**必须排在插件 `update` 之前**——它们要往里画东西，
@@ -586,9 +627,10 @@ impl AppHandler for App {
             let now = Instant::now()
                 .duration_since(runtime.start_time)
                 .as_secs_f32();
-            let signals = runtime
-                .scripts
-                .physics_process(&mut runtime.scene, step, now);
+            let signals =
+                runtime
+                    .scripts
+                    .physics_process(&mut runtime.scene, &mut runtime.input, step, now);
             runtime.script_events.extend(signals);
 
             runtime.scene.step_physics(step);
@@ -676,5 +718,27 @@ impl AppHandler for App {
 
     fn on_exit(&mut self) {
         self.dispatch(|plugin, ctx| plugin.on_deinit(ctx));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::App;
+
+    #[test]
+    fn the_app_stays_small_enough_to_pass_by_value() {
+        // `App` 是靠 `.with_xxx(mut self) -> Self` 一路链下来的，每一环
+        // debug 构建都会在栈上复制一整份。它里头曾经内联着整个 `Runtime`
+        // （光 `Scene` 就一万多字节），于是链上七八个 `with_` 就能把 Windows
+        // 主线程那 1 MB 栈耗光——程序在第一帧之前 STATUS_STACK_OVERFLOW，
+        // 一行日志都来不及打。
+        //
+        // 这条线守的就是那件事：往 `App` 里加字段可以，但别再把大块头
+        // 内联进来。
+        assert!(
+            size_of::<App>() < 1024,
+            "App 涨到了 {} 字节，链式构建会开始啃栈",
+            size_of::<App>()
+        );
     }
 }

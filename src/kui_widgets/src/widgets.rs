@@ -291,6 +291,12 @@ pub struct WidgetUi {
     pub(crate) menu_chain: Vec<Id>,
     /// 每层菜单当前高亮第几项，跨帧。键是那一层的锚点。
     pub(crate) menu_highlight: std::collections::HashMap<Id, usize>,
+    /// 有菜单项刚被选中，整条链该关了——但要**等下一帧**。
+    ///
+    /// 当场关的话，被点中的那一项下一帧就不再被声明，而调用方正是在
+    /// 下一帧按老规矩读 `response(id).clicked` 的（响应滞后一帧）。
+    /// 那一读什么也读不到：菜单看着能开能关，点哪一项都没反应。
+    pub(crate) menu_close_pending: bool,
     /// 每个折叠分组开着还是收着，跨帧。
     ///
     /// 状态放在这里而不是让调用方保管：折叠纯粹是**外观**，和游戏逻辑
@@ -407,6 +413,7 @@ impl Default for WidgetUi {
             menu_rects: Vec::new(),
             menu_chain: Vec::new(),
             menu_highlight: Default::default(),
+            menu_close_pending: false,
             folders: Default::default(),
             screen: Vec2::ZERO,
             collapsed: false,
@@ -561,7 +568,11 @@ impl WidgetUi {
         let stop = items
             .iter()
             .position(|&i| Some(self.declared[i].id) == focused)
-            .or_else(|| items.iter().position(|&i| item_selected(&self.declared[i].widget)))
+            .or_else(|| {
+                items
+                    .iter()
+                    .position(|&i| item_selected(&self.declared[i].widget))
+            })
             .unwrap_or(0);
 
         for (position, &declared) in items.iter().enumerate() {
@@ -838,11 +849,27 @@ impl WidgetUi {
         // 百分比在那里解析成 0，滑条会塌成一条看不见的线。
         let vertical_slider = matches!(declared.widget, Widget::Slider { vertical: true, .. });
 
+        // 铺满一行的控件，在**行里**要改成「分掉剩余宽度」。
+        //
+        // `Percent(1.0)` 在一行里的意思是「占满整行」，于是同行的标签和
+        // 数值被挤出容器外——`名字 [滑条] 0.42` 这种再常见不过的行，
+        // 右边那个数值会画到面板外面去，看起来像被窗口切掉了。
+        let stretchy = matches!(
+            declared.widget,
+            Widget::Slider {
+                vertical: false,
+                ..
+            } | Widget::TextInput { .. }
+        );
+        let in_row = declared.row.is_some();
+
         let mut style = Style {
             width: match declared.widget {
                 // 竖滑条的宽度由内容（滑块粗细）定。
                 Widget::Slider { vertical: true, .. } => Length::Auto,
-                // 滑条和文本框都要占满一行才好用。
+                // 行里的滑条 / 文本框改走 `grow`，见上面。
+                _ if stretchy && in_row => Length::Auto,
+                // 滑条和文本框独占一行时才真的铺满。
                 Widget::Slider { .. }
                 | Widget::TextInput { .. }
                 | Widget::ListItem { .. }
@@ -859,7 +886,14 @@ impl WidgetUi {
                 } => Length::Px(length),
                 _ => Length::Auto,
             },
-            min_size: Vec2::new(0.0, if vertical_slider { 0.0 } else { theme.row_height }),
+            min_size: Vec2::new(
+                0.0,
+                if vertical_slider {
+                    0.0
+                } else {
+                    theme.row_height
+                },
+            ),
             padding: match declared.widget {
                 // 文字不加内边距——加了之后一行文字看着像个按钮。
                 Widget::Label { .. } => Edges::default(),
@@ -876,6 +910,11 @@ impl WidgetUi {
         // 行内的第一个控件把剩余空间吃掉，把后面的挤到右边。
         if declared.grow {
             style.grow = 1.0;
+        }
+        // 行里的滑条 / 文本框也分一份，而且分得比标签多——
+        // 一条能拖的滑条比它的名字更需要宽度。
+        if stretchy && in_row {
+            style.grow = 2.0;
         }
 
         // 内容的固有尺寸。文字节点不给的话 flexbox 认为它零尺寸，
@@ -911,13 +950,7 @@ impl WidgetUi {
     ///
     /// `inside` 是**正在构建的那层浮层**，要从匹配里排掉——不排的话，
     /// 递归进去之后会在同一个下标上再次认出它自己，无限套下去。
-    fn build_range(
-        &self,
-        ui: &Ui,
-        from: usize,
-        to: usize,
-        inside: Option<Id>,
-    ) -> Vec<LayoutNode> {
+    fn build_range(&self, ui: &Ui, from: usize, to: usize, inside: Option<Id>) -> Vec<LayoutNode> {
         let mut children: Vec<LayoutNode> = Vec::new();
         let mut index = from;
 
@@ -1322,7 +1355,11 @@ mod tests {
         declare(&mut w);
         w.finish(&mut ui, &input);
 
-        assert_eq!(w.interaction.hovered(), Some(Id::new("l")), "标签该参与命中");
+        assert_eq!(
+            w.interaction.hovered(),
+            Some(Id::new("l")),
+            "标签该参与命中"
+        );
         assert!(!w.wants_keyboard(), "但不该把焦点接过去");
     }
 
@@ -1444,6 +1481,45 @@ mod tests {
             control_rect.max.x > 300.0,
             "控件没被挤到右边，右边缘在 x={}",
             control_rect.max.x
+        );
+    }
+
+    /// `名字 [滑条] 数值` 这一行整个待在容器里。
+    ///
+    /// 滑条独占一行时宽度是 `Percent(1.0)`；在**行里**照搬这个值的话，
+    /// 它一个人就占满整行，把同行的标签和数值挤到容器外面——右边那个
+    /// 数值会画到面板外去，看起来像被窗口切掉了。
+    #[test]
+    fn a_slider_shares_its_row_instead_of_taking_all_of_it() {
+        let width = 400.0;
+        let mut w = WidgetUi::default();
+        w.root_style(Style {
+            width: Length::Px(width),
+            padding: Edges::default(),
+            ..Default::default()
+        });
+        w.begin();
+        w.begin_row();
+        let name = w.label("name", "idle weight");
+        w.slider("s", &mut 0.5, &UiInput::default());
+        let value = w.dim_label("v", "0.50");
+        w.end_row();
+
+        let mut ui = ui();
+        w.finish(&mut ui, &UiInput::default());
+
+        let name_rect = w.response(name).rect;
+        let value_rect = w.response(value).rect;
+        assert!(
+            value_rect.max.x <= width + 0.5,
+            "数值被挤出了容器：容器宽 {width}，数值右边缘在 {}",
+            value_rect.max.x
+        );
+        assert!(name_rect.size().x > 0.5, "标签被滑条挤没了：{name_rect:?}");
+        // 三个都还在同一行上。
+        assert!(
+            name_rect.min.y < value_rect.max.y && value_rect.min.y < name_rect.max.y,
+            "行被挤断了：{name_rect:?} / {value_rect:?}"
         );
     }
 

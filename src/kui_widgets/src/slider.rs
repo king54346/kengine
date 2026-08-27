@@ -231,13 +231,7 @@ impl WidgetUi {
     /// # let mut volume = 50.0;
     /// w.slider_with("volume", &mut volume, Slider::new(0.0..=100.0).with_precision(0), &input);
     /// ```
-    pub fn slider_with(
-        &mut self,
-        id: &str,
-        value: &mut f32,
-        spec: Slider,
-        input: &UiInput,
-    ) -> Id {
+    pub fn slider_with(&mut self, id: &str, value: &mut f32, spec: Slider, input: &UiInput) -> Id {
         let id = Id::new(id);
         if self.collapsed {
             return id;
@@ -294,6 +288,10 @@ impl WidgetUi {
 
         let geometry = geometry(&self.theme, response.rect, spec.fraction(*value), vertical);
 
+        // 这里不能用 `entry`：要插进去的 `start_value` 得等下面那段
+        // 轨道点击跑完才定得下来（`Snap` 和 `Step` 都会改 `*value`），
+        // 而那段还要读 `self.theme`——`entry` 会把整张表借住。
+        #[allow(clippy::map_entry)]
         if !self.slider_drags.contains_key(&id) {
             // 按下的那一刻。按在滑块上还是轨道上，决定这一下做什么。
             let on_thumb = input.pointer.is_some_and(|p| geometry.thumb.contains(p));
@@ -561,10 +559,7 @@ mod tests {
         let high = geometry(&theme, rect, 1.0, false);
         assert!(low.thumb.min.x >= rect.min.x - 0.01, "0 处滑块探出左边");
         assert!(high.thumb.max.x <= rect.max.x + 0.01, "1 处滑块探出右边");
-        assert!(
-            high.thumb.min.x > low.thumb.min.x,
-            "两端算出来是同一个位置"
-        );
+        assert!(high.thumb.min.x > low.thumb.min.x, "两端算出来是同一个位置");
     }
 
     /// 点在轨道上取到的比例，和该比例画出的滑块中心对得上。
@@ -756,7 +751,13 @@ mod tests {
         let target = rect.center();
 
         // 按在正中间。第一帧 held 还没算出来，所以要两帧。
-        frame(&mut w, &mut ui, &mut value, spec, &press(target.x, target.y));
+        frame(
+            &mut w,
+            &mut ui,
+            &mut value,
+            spec,
+            &press(target.x, target.y),
+        );
         frame(&mut w, &mut ui, &mut value, spec, &at(target.x, target.y));
 
         assert!(
@@ -777,7 +778,13 @@ mod tests {
         let rect = w.response(Id::new("s")).rect;
         let target = rect.center();
 
-        frame(&mut w, &mut ui, &mut value, spec, &press(target.x, target.y));
+        frame(
+            &mut w,
+            &mut ui,
+            &mut value,
+            spec,
+            &press(target.x, target.y),
+        );
         frame(&mut w, &mut ui, &mut value, spec, &at(target.x, target.y));
         assert_eq!(value, 0.0, "Drag 模式点轨道不该改值");
     }
@@ -797,7 +804,13 @@ mod tests {
         // 点在靠右的地方 = 往上走一步。
         let target = Vec2::new(rect.max.x - 10.0, rect.center().y);
 
-        frame(&mut w, &mut ui, &mut value, spec, &press(target.x, target.y));
+        frame(
+            &mut w,
+            &mut ui,
+            &mut value,
+            spec,
+            &press(target.x, target.y),
+        );
         frame(&mut w, &mut ui, &mut value, spec, &at(target.x, target.y));
         assert_eq!(value, 60.0);
     }
@@ -816,7 +829,13 @@ mod tests {
         let start = rect.min.x + 5.0;
 
         // 按住最左端。
-        frame(&mut w, &mut ui, &mut value, spec, &press(start, rect.center().y));
+        frame(
+            &mut w,
+            &mut ui,
+            &mut value,
+            spec,
+            &press(start, rect.center().y),
+        );
         // 往右拖半个行程。
         frame(
             &mut w,

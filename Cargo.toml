@@ -99,6 +99,11 @@ harness = false
 name = "backdrop_water"
 path = "examples/kengine/backdrop_water.rs"
 
+# 对象驱动的小游戏：Rust 摆场景、登记原型，玩法全在 scripts/ 的 JS 里。
+[[example]]
+name = "demo"
+path = "examples/kengine/demo/main.rs"
+
 [[example]]
 name = "skinning_blending"
 path = "examples/kengine/skinning_blending.rs"

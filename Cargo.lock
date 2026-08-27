@@ -2022,6 +2022,7 @@ dependencies = [
  "fxhash",
  "kasset",
  "kcore",
+ "kinput",
  "klog",
  "kmath",
  "kparticle",

@@ -183,7 +183,11 @@ mod tests {
     fn declare(w: &mut WidgetUi, selected: usize) {
         w.begin_radio_group("quality");
         for index in 0..3 {
-            w.radio(&format!("q{index}"), format!("第 {index} 档"), index == selected);
+            w.radio(
+                &format!("q{index}"),
+                format!("第 {index} 档"),
+                index == selected,
+            );
         }
         w.end_radio_group();
     }
@@ -289,10 +293,7 @@ mod tests {
         w.begin();
         declare_all(&mut w);
         w.finish(&mut ui, &tab());
-        assert!(
-            w.response(Id::new("after")).focused,
-            "该一下跨过整组"
-        );
+        assert!(w.response(Id::new("after")).focused, "该一下跨过整组");
     }
 
     /// 组里没选中的那些**仍然点得到**。

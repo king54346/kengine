@@ -23,6 +23,7 @@
 
 use crate::runtime::Signal;
 use kcore::pool::Handle;
+use kinput::Input;
 use kscene::{Node, Scene};
 use std::cell::RefCell;
 
@@ -43,7 +44,7 @@ pub(crate) struct Registry {
 }
 
 impl Registry {
-    fn id_of(&mut self, handle: Handle<Node>) -> u32 {
+    pub(crate) fn id_of(&mut self, handle: Handle<Node>) -> u32 {
         if let Some(id) = self.lookup.get(&handle) {
             return *id;
         }
@@ -58,13 +59,28 @@ impl Registry {
     }
 }
 
+/// 一个节点原型：游戏侧登记，脚本按名字 `spawn` 出来。
+///
+/// 脚本不该认识 `Mesh` 与材质——那等于把整个渲染栈拖进 JS 层，
+/// 而且换一套美术资源就要改脚本。名字是两边唯一的约定。
+pub(crate) type Prototype = Box<dyn Fn() -> Node>;
+
 /// tick 期间原生函数能碰到的一切。
 #[derive(Default)]
 pub(crate) struct Host {
     pub(crate) scene: Option<Scene>,
+    /// 本帧的输入。和场景一样是搬进来的，跑完搬回去。
+    pub(crate) input: Option<Input>,
     pub(crate) registry: Registry,
+    /// 可供 `spawn` 的原型，按名字取。
+    ///
+    /// 属于运行时而不是某一次 tick：随 [`Host`] 一起进出线程局部，
+    /// 注册一次之后一直在。
+    pub(crate) prototypes: fxhash::FxHashMap<String, Prototype>,
     /// 当前正在跑的脚本挂在哪个节点上，`self` 读它。
     pub(crate) current: Handle<Node>,
+    /// 本次 tick 已经生成了多少个节点。
+    pub(crate) spawned: usize,
     pub(crate) dt: f32,
     pub(crate) elapsed: f32,
     pub(crate) signals: Vec<Signal>,
@@ -75,9 +91,16 @@ pub(crate) struct Host {
 /// 防的是写错的脚本：`for(;;) emit('x')` 会在循环上限触发之前先把内存吃光。
 pub(crate) const MAX_SIGNALS: usize = 4096;
 
+/// 一次 tick 最多生成多少个节点。
+///
+/// 同一个道理，只是更凶：`for(;;) spawn('Enemy')` 每次都会往场景池里塞一个
+/// 带网格带物理的节点，比攒信号吃内存快得多。
+pub(crate) const MAX_SPAWNS: usize = 1024;
+
 /// 宿主状态的寄存凭证。析构时把一切搬回原处。
 pub(crate) struct HostGuard<'a> {
     owner_scene: &'a mut Scene,
+    owner_input: &'a mut Input,
     owner_host: &'a mut Host,
 }
 
@@ -89,18 +112,24 @@ impl Drop for HostGuard<'_> {
         if let Some(mut scene) = parked.scene.take() {
             std::mem::swap(self.owner_scene, &mut scene);
         }
-        // 登记处与累计的信号都还给运行时。
+        if let Some(mut input) = parked.input.take() {
+            std::mem::swap(self.owner_input, &mut input);
+        }
+        // 登记处、原型表与累计的信号都还给运行时。
         std::mem::swap(self.owner_host, &mut parked);
     }
 }
 
 impl<'a> HostGuard<'a> {
-    /// 把场景与宿主状态寄存进线程局部。
+    /// 把场景、输入与宿主状态寄存进线程局部。
     ///
     /// `spare` 是用来占位的空壳场景，由运行时长期持有并复用：每次现造一个
     /// `Scene` 要新建一整个物理世界（实测约 50 µs），复用之后只剩两次 memcpy。
+    ///
+    /// 输入不需要这份小心：`Input::default()` 只是几个空表，直接 `take` 即可。
     pub(crate) fn park(
         scene: &'a mut Scene,
+        input: &'a mut Input,
         host: &'a mut Host,
         spare: &mut Scene,
         dt: f32,
@@ -111,7 +140,9 @@ impl<'a> HostGuard<'a> {
 
         let mut parked = std::mem::take(host);
         parked.scene = Some(real_scene);
+        parked.input = Some(std::mem::take(input));
         parked.current = Handle::NONE;
+        parked.spawned = 0;
         parked.dt = dt;
         parked.elapsed = elapsed;
         parked.signals.clear();
@@ -120,6 +151,7 @@ impl<'a> HostGuard<'a> {
 
         Self {
             owner_scene: scene,
+            owner_input: input,
             owner_host: host,
         }
     }
@@ -141,6 +173,11 @@ pub(crate) fn with_scene<R>(f: impl FnOnce(&mut Scene) -> R) -> Option<R> {
     with_host(|host| host.scene.as_mut().map(f)).flatten()
 }
 
+/// 借用寄存中的输入。
+pub(crate) fn with_input<R>(f: impl FnOnce(&Input) -> R) -> Option<R> {
+    with_host(|host| host.input.as_ref().map(f)).flatten()
+}
+
 /// 登记一个句柄，拿到给 JS 用的下标。
 pub(crate) fn id_of(handle: Handle<Node>) -> f64 {
     with_host(|host| host.registry.id_of(handle) as f64).unwrap_or(-1.0)
@@ -159,19 +196,19 @@ mod test {
     use super::*;
     use kmath::Vec3;
 
-    /// 建一套「场景 + 宿主 + 空壳」。
-    fn stage() -> (Scene, Host, Scene) {
-        (Scene::new(), Host::default(), Scene::new())
+    /// 建一套「场景 + 输入 + 宿主 + 空壳」。
+    fn stage() -> (Scene, Input, Host, Scene) {
+        (Scene::new(), Input::new(), Host::default(), Scene::new())
     }
 
     #[test]
     fn a_parked_scene_can_be_read_and_written_live() {
         // 整套方案的核心：写下去立刻生效，不是攒到帧末。
-        let (mut scene, mut host, mut spare) = stage();
+        let (mut scene, mut input, mut host, mut spare) = stage();
         let node = scene.add_node(Node::new("probe"));
 
         {
-            let _guard = HostGuard::park(&mut scene, &mut host, &mut spare, 0.016, 1.0);
+            let _guard = HostGuard::park(&mut scene, &mut input, &mut host, &mut spare, 0.016, 1.0);
             with_scene(|live| live[node].transform.position = Vec3::Y * 42.0).unwrap();
             let read = with_scene(|live| live[node].transform.position).unwrap();
             assert_eq!(read, Vec3::Y * 42.0, "同一次 tick 里没读到刚写的值");
@@ -188,11 +225,11 @@ mod test {
     fn everything_comes_back_even_if_the_tick_panics() {
         // 手动搬回的话，脚本一抛异常场景就永远留在线程局部里，
         // 调用方拿到个空壳——整个游戏静默失效，比崩溃还难查。
-        let (mut scene, mut host, mut spare) = stage();
+        let (mut scene, mut input, mut host, mut spare) = stage();
         let node = scene.add_node(Node::new("survivor"));
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = HostGuard::park(&mut scene, &mut host, &mut spare, 0.016, 0.0);
+            let _guard = HostGuard::park(&mut scene, &mut input, &mut host, &mut spare, 0.016, 0.0);
             panic!("脚本炸了");
         }));
 
@@ -205,19 +242,33 @@ mod test {
     fn the_registry_belongs_to_the_runtime_not_the_thread() {
         // 登记处留在线程局部长住的话，同一条线程上的两个运行时会互相看到
         // 对方的句柄——并行跑测试时这个 bug 原形毕露过一次。
-        let (mut scene_a, mut host_a, mut spare_a) = stage();
+        let (mut scene_a, mut input_a, mut host_a, mut spare_a) = stage();
         let node_a = scene_a.add_node(Node::new("a"));
         let id_a = {
-            let _guard = HostGuard::park(&mut scene_a, &mut host_a, &mut spare_a, 0.0, 0.0);
+            let _guard = HostGuard::park(
+                &mut scene_a,
+                &mut input_a,
+                &mut host_a,
+                &mut spare_a,
+                0.0,
+                0.0,
+            );
             id_of(node_a)
         };
 
         // 另一套完全独立的宿主，登记处应当从零开始。
-        let (mut scene_b, mut host_b, mut spare_b) = stage();
+        let (mut scene_b, mut input_b, mut host_b, mut spare_b) = stage();
         scene_b.add_node(Node::new("filler"));
         let node_b = scene_b.add_node(Node::new("b"));
         let (id_b, resolved) = {
-            let _guard = HostGuard::park(&mut scene_b, &mut host_b, &mut spare_b, 0.0, 0.0);
+            let _guard = HostGuard::park(
+                &mut scene_b,
+                &mut input_b,
+                &mut host_b,
+                &mut spare_b,
+                0.0,
+                0.0,
+            );
             (id_of(node_b), handle_of(id_of(node_b)))
         };
 
@@ -229,15 +280,15 @@ mod test {
     #[test]
     fn the_registry_survives_between_ticks_of_the_same_runtime() {
         // 同一个运行时里，脚本上一帧拿到的下标这一帧还得管用。
-        let (mut scene, mut host, mut spare) = stage();
+        let (mut scene, mut input, mut host, mut spare) = stage();
         let node = scene.add_node(Node::new("stable"));
 
         let first = {
-            let _guard = HostGuard::park(&mut scene, &mut host, &mut spare, 0.0, 0.0);
+            let _guard = HostGuard::park(&mut scene, &mut input, &mut host, &mut spare, 0.0, 0.0);
             id_of(node)
         };
         let (second, resolved) = {
-            let _guard = HostGuard::park(&mut scene, &mut host, &mut spare, 0.0, 0.0);
+            let _guard = HostGuard::park(&mut scene, &mut input, &mut host, &mut spare, 0.0, 0.0);
             (id_of(node), handle_of(first))
         };
 
@@ -248,8 +299,8 @@ mod test {
     #[test]
     fn a_bogus_id_resolves_to_nothing() {
         // 脚本可以往里塞任何数字，编不出一个指向任意内存的句柄才是关键。
-        let (mut scene, mut host, mut spare) = stage();
-        let _guard = HostGuard::park(&mut scene, &mut host, &mut spare, 0.0, 0.0);
+        let (mut scene, mut input, mut host, mut spare) = stage();
+        let _guard = HostGuard::park(&mut scene, &mut input, &mut host, &mut spare, 0.0, 0.0);
 
         for bad in [-1.0, f64::NAN, f64::INFINITY, 1e30, 999.0] {
             assert_eq!(handle_of(bad), None, "{bad} 竟然解出了句柄");
@@ -265,8 +316,8 @@ mod test {
     #[test]
     fn re_entrancy_is_refused_instead_of_panicking() {
         // 借用中再借用：`RefCell` 默认会 panic，这里必须降级成「没做成」。
-        let (mut scene, mut host, mut spare) = stage();
-        let _guard = HostGuard::park(&mut scene, &mut host, &mut spare, 0.0, 0.0);
+        let (mut scene, mut input, mut host, mut spare) = stage();
+        let _guard = HostGuard::park(&mut scene, &mut input, &mut host, &mut spare, 0.0, 0.0);
 
         let inner = with_host(|_outer| with_host(|_| 1)).unwrap();
 
@@ -275,8 +326,8 @@ mod test {
 
     #[test]
     fn timing_is_visible_to_the_bridge() {
-        let (mut scene, mut host, mut spare) = stage();
-        let _guard = HostGuard::park(&mut scene, &mut host, &mut spare, 0.25, 7.5);
+        let (mut scene, mut input, mut host, mut spare) = stage();
+        let _guard = HostGuard::park(&mut scene, &mut input, &mut host, &mut spare, 0.25, 7.5);
 
         let (dt, elapsed) = with_host(|host| (host.dt, host.elapsed)).unwrap();
 

@@ -623,7 +623,10 @@ mod tests {
         let b = solved.rect(id("b")).unwrap();
         assert_eq!(b.min.y, a.max.y, "浮层把兄弟顶开了：a={a:?} b={b:?}");
         // 浮层自己仍然被排出了尺寸——不然没法拿它去算摆在哪。
-        assert_eq!(solved.rect(id("float")).unwrap().size(), Vec2::new(50.0, 50.0));
+        assert_eq!(
+            solved.rect(id("float")).unwrap().size(),
+            Vec2::new(50.0, 50.0)
+        );
     }
 
     #[test]
