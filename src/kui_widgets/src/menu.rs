@@ -1428,6 +1428,64 @@ mod widget_tests {
         assert!(open > closed, "菜单开着该比关着画出更多东西");
     }
 
+    /// 从滚动区里的按钮弹出来的菜单，跟着那个按钮一起滚。
+    ///
+    /// 这条盯的是「位移算了两遍」：`rects` 这时已经被滚动整体挪过，
+    /// 摆位再拿没挪过的求解结果做基准的话，滚动的偏移会被重复算一次，
+    /// 菜单会飘到离按钮很远的地方。
+    #[test]
+    fn a_menu_anchored_inside_a_scroll_area_follows_its_button() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        let declare_scrolled = |w: &mut WidgetUi| {
+            w.begin_scroll("area", 80.0);
+            for index in 0..6 {
+                w.button(&format!("row{index}"), format!("第 {index} 行"));
+            }
+            let file = w.menu_button("file", "文件");
+            w.end_scroll();
+
+            if w.begin_menu(file) {
+                w.menu_item("open", "打开");
+                w.end_menu();
+            }
+        };
+
+        // 排一帧，打开菜单。
+        w.begin();
+        declare_scrolled(&mut w);
+        w.finish(&mut ui, &UiInput::default());
+
+        let button = w.response(Id::new("file")).rect.center();
+        for input in [&press(button.x, button.y), &{
+            let mut release = at(button.x, button.y);
+            release.released.push(PointerButton::Primary);
+            release
+        }] {
+            w.begin();
+            declare_scrolled(&mut w);
+            w.finish(&mut ui, input);
+        }
+        assert!(w.menus_open());
+
+        // 滚一下，再看菜单和按钮的相对位置。
+        let mut scrolled = at(button.x, button.y);
+        scrolled.scroll = Vec2::new(0.0, -1.0);
+        for input in [&scrolled, &at(button.x, button.y)] {
+            w.begin();
+            declare_scrolled(&mut w);
+            w.finish(&mut ui, input);
+        }
+
+        let anchor = w.response(Id::new("file")).rect;
+        let item = w.response(Id::new("open")).rect;
+        assert!(
+            (item.min.y - anchor.max.y).abs() < 20.0,
+            "滚动之后菜单脱离了按钮：按钮 {anchor:?}，项 {item:?}"
+        );
+    }
+
     /// 菜单里夹一个标签，高亮仍然落在对的项上。
     ///
     /// 高亮的下标和方向键那边的下标必须是同一个口径（都数**菜单项**）。

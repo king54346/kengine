@@ -722,19 +722,39 @@ impl WidgetUi {
         for index in 0..self.menu_frames.len() {
             let frame = self.menu_frames[index];
             let last = frame.last.min(self.rects.len());
+            let first = frame.first.min(last);
 
-            let size = self.solved.rect(frame.container()).unwrap_or_default().size();
+            let container = self.solved.rect(frame.container()).unwrap_or_default();
             let anchor = self
                 .declared
                 .iter()
                 .position(|d| d.id == frame.anchor)
                 .and_then(|position| self.rects.get(position).copied())
                 .unwrap_or_default();
+            let target = crate::menu::place(anchor, container.size(), frame.depth, screen);
 
-            let target = crate::menu::place(anchor, size, frame.depth, screen);
-            let delta = target.min - self.solved.rect(frame.container()).unwrap_or_default().min;
+            // 位移按**第一项现在在哪**算，不是按它求解出来的位置算。
+            //
+            // 差别在滚动：`rects` 这时可能已经被滚动整体挪过了，拿没挪过
+            // 的求解结果做基准的话，那个偏移会被重复算一遍——从滚动区里
+            // 的按钮弹出来的菜单会飘到离按钮很远的地方。
+            //
+            // 用「第一项相对容器的偏移」把容器的位置换算出来，就和这一路
+            // 上谁挪过 `rects` 无关了。
+            let delta = match self.rects.get(first) {
+                Some(current) => {
+                    let solved_first = self
+                        .solved
+                        .rect(self.declared[first].id)
+                        .unwrap_or_default();
+                    let inner = solved_first.min - container.min;
+                    (target.min + inner) - current.min
+                }
+                // 空菜单：没有项可挪，底板照样要摆对位置。
+                None => Vec2::ZERO,
+            };
 
-            for rect in &mut self.rects[frame.first.min(last)..last] {
+            for rect in &mut self.rects[first..last] {
                 rect.min += delta;
                 rect.max += delta;
             }

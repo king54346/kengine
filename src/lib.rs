@@ -147,10 +147,12 @@ pub mod prelude {
     pub use ktexture::{Sampler, Texture, TextureLoader};
     // 核心层：布局、样式、绘制图元。
     pub use kui::{
-        AlignCross, Direction as UiDirection, Edges, Id as UiId, Justify, Length, Rect as UiRect,
-        Ui, UiInput,
+        AlignCross, Direction as UiDirection, Edges, Id as UiId, Justify, Length, NavKey,
+        Rect as UiRect, Ui, UiInput,
     };
-    // 控件层。
-    pub use kui_widgets::{Theme as UiTheme, WidgetUi};
+    // 控件层。滑条和列表要用到各自的配置 / 动作类型，一并带上。
+    pub use kui_widgets::{
+        ListAction, Slider, Theme as UiTheme, TrackClick, WidgetUi,
+    };
     pub use winit::event::WindowEvent;
 }
