@@ -470,9 +470,20 @@ impl AppHandler for App {
             renderer,
             scene: Scene::new(),
             input: Input::new(),
-            resources: match self.resource_io.clone() {
-                Some(io) => ResourceManager::with_io(io),
-                None => ResourceManager::new(),
+            resources: {
+                let resources = match self.resource_io.clone() {
+                    Some(io) => ResourceManager::with_io(io),
+                    None => ResourceManager::new(),
+                };
+                // 脚本加载器是引擎自己要用的：`Node::with_script` 存的是
+                // 一条资源路径，运行时每帧拿它去 `request::<Script>`。
+                // 不在这儿装的话，谁都想不到还得自己注册一个——症状是
+                // 挂了脚本的节点安安静静地什么都不做，日志里只有一句
+                // 「没有能处理 js 的加载器」。
+                //
+                // glTF、贴图那些不一样，那是游戏自己要的资源，由游戏注册。
+                resources.add_loader(kscript::ScriptLoader);
+                resources
             },
             start_time: now,
             last_frame: now,
