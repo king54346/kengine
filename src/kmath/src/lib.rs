@@ -14,7 +14,16 @@ mod bounding;
 mod bvh;
 mod curve;
 mod geometry;
+mod primitives;
+mod rng;
 mod visit;
+
+pub use primitives::{
+    Annulus, Arc2d, Bounded2d, Bounded3d, Capsule2d, Capsule3d, Circle, CircularSector,
+    CircularSegment, Cone, ConicalFrustum, Cuboid, Cylinder, Ellipse, Rectangle, RegularPolygon,
+    Segment2d, Segment3d, ShapeSample, Sphere, Tetrahedron, Torus, Triangle2d, Triangle3d,
+};
+pub use rng::Rng;
 
 pub use bounding::{Aabb2d, BoundingCircle, Ray2d, Ray3d};
 pub use bvh::Bvh;

@@ -144,5 +144,9 @@ name = "cubic_splines"
 path = "examples/kengine/math/cubic_splines.rs"
 
 [[example]]
+name = "random_sampling"
+path = "examples/kengine/math/random_sampling.rs"
+
+[[example]]
 name = "skinning_blending"
 path = "examples/kengine/skinning_blending.rs"
