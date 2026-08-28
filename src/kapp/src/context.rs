@@ -22,6 +22,10 @@ pub struct DebugDraw {
     pub scene: SceneDebugOptions,
     /// 物理：碰撞体线框、刚体坐标轴、关节、接触点。
     pub physics: PhysicsDebugOptions,
+    /// **2D** 物理，画在 XY 平面上。
+    ///
+    /// 和上面那个分开：两个物理世界互相独立，绝大多数游戏只用其中一个。
+    pub physics2d: kscene::d2::PhysicsDebugOptions2d,
 }
 
 impl DebugDraw {
@@ -34,12 +38,13 @@ impl DebugDraw {
         Self {
             scene: SceneDebugOptions::default(),
             physics: PhysicsDebugOptions::none(),
+            physics2d: kscene::d2::PhysicsDebugOptions2d::none(),
         }
     }
 
     /// 一项都没开。
     pub fn is_empty(&self) -> bool {
-        self.scene.is_empty() && self.physics.is_empty()
+        self.scene.is_empty() && self.physics.is_empty() && self.physics2d.is_empty()
     }
 }
 

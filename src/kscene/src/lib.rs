@@ -32,6 +32,10 @@ pub use kmath::{Aabb, Intersection};
 pub use kmesh::{Mesh, Vertex};
 pub use kparticle::ParticleSystem;
 pub use kphysics::PhysicsDebugOptions;
+// 2D 的那套整个转出来，不逐个列举：它是一整套平行的类型
+// （`d2::PhysicsWorld`、`d2::JointDesc`…），名字和 3D 的一模一样，
+// 平铺到同一个命名空间里只会让人分不清手里拿的是哪一维的。
+pub use kphysics::d2;
 pub use kphysics::{
     BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, CollisionEvent, InteractionGroups,
     JointDesc, JointHandle, JointKind, PhysicsWorld, RayCastOptions, RayHit, RigidBodyDesc,

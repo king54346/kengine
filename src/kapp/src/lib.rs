@@ -687,6 +687,7 @@ impl AppHandler for App {
         let debug = runtime.debug;
         runtime.scene.debug_draw(debug.scene);
         runtime.scene.debug_draw_physics(debug.physics);
+        runtime.scene.debug_draw_physics_2d(debug.physics2d);
 
         // UI 一帧的收尾。插件在 `update` 里画，这里封口——
         // 不封的话最后一批图元会静默丢失。

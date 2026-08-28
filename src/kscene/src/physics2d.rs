@@ -211,4 +211,42 @@ mod test {
         let y = scene.try_get(node).unwrap().transform.position.y;
         assert!((y - 1.0).abs() < 0.15, "节点该跟到 y≈1.0，实测 {y}");
     }
+
+    #[test]
+    fn joints_need_no_scene_level_plumbing() {
+        // 3D 的关节是**节点组件**（`Node::with_joint`），所以 `Scene::update`
+        // 得负责把它建进物理世界。2D 这边不需要那一层：物理世界本身就是
+        // 暴露的，关节直接加在它上面。
+        //
+        // 这条测试是那个设计决定的凭据——哪天有人觉得「2D 关节没接线」，
+        // 看这里就知道它本来就通。
+        let mut scene = Scene::new();
+
+        let anchor = scene.physics2d_mut().add_body(&RigidBodyDesc::fixed(), 0);
+        let bob = scene.physics2d_mut().add_body(
+            &RigidBodyDesc::dynamic().with_position(Vec2::new(2.0, 0.0)),
+            1,
+        );
+        scene
+            .physics2d_mut()
+            .add_collider(&ColliderDesc::ball(0.2), Some(bob), 1);
+
+        scene.physics2d_mut().add_joint(
+            anchor,
+            bob,
+            &kphysics::d2::JointDesc::revolute(Vec2::ZERO, Vec2::new(-2.0, 0.0), None),
+        );
+
+        for _ in 0..180 {
+            scene.step_physics_2d(1.0 / 60.0);
+        }
+
+        let position = scene.physics2d().body(bob).expect("摆锤还在").position();
+        assert_eq!(scene.physics2d().joint_count(), 1);
+        assert!(
+            (position.length() - 2.0).abs() < 0.15,
+            "关节没约束住，离锚点 {}",
+            position.length()
+        );
+    }
 }

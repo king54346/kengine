@@ -9,7 +9,7 @@
 use crate::Scene;
 use kgizmo::Color;
 use kmath::{Aabb, Vec3};
-use kphysics::PhysicsDebugOptions;
+use kphysics::{PhysicsDebugOptions, d2::PhysicsDebugOptions2d};
 
 /// 画哪些场景信息。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -65,6 +65,33 @@ impl Scene {
         self.physics().debug_render(options, &mut |a, b, hsla| {
             // rapier 给的是 HSLA，直接当 RGBA 用会得到一片惨白。
             gizmos.line(a, b, Color::from_hsla(hsla[0], hsla[1], hsla[2], hsla[3]));
+        });
+        *self.gizmos_mut() = gizmos;
+    }
+
+    /// 把 **2D** 物理世界画进调试线缓冲。
+    ///
+    /// 2D 世界躺在 **XY 平面**（z = 0）上，所以线段直接把 `Vec2` 补一个
+    /// z = 0 提升成三维——配一台正交相机正对这个平面，画出来就是二维图。
+    ///
+    /// 和 [`debug_draw_physics`](Self::debug_draw_physics) 是分开的两个方法，
+    /// 理由和 [`step_physics_2d`](Self::step_physics_2d) 一样：两个世界互相
+    /// 独立，绝大多数场景只用其中一个，合成一个方法等于让 3D 游戏每帧白问
+    /// 一次空的 2D 世界。
+    pub fn debug_draw_physics_2d(&mut self, options: PhysicsDebugOptions2d) {
+        if !self.gizmos().enabled() || options.is_empty() {
+            return;
+        }
+
+        // 同 3D：物理世界和 gizmo 缓冲都挂在 self 上，同时可变借用会撞车。
+        // 取出来用完再放回去。
+        let mut gizmos = std::mem::take(self.gizmos_mut());
+        self.physics2d().debug_render(options, &mut |a, b, hsla| {
+            gizmos.line(
+                a.extend(0.0),
+                b.extend(0.0),
+                Color::from_hsla(hsla[0], hsla[1], hsla[2], hsla[3]),
+            );
         });
         *self.gizmos_mut() = gizmos;
     }
@@ -526,5 +553,97 @@ mod tests {
             point > directional,
             "点光 {point} 段，方向光 {directional} 段"
         );
+    }
+
+    // ── 2D 物理 ──
+
+    /// 一个装了 2D 刚体的场景。
+    fn scene_with_a_2d_box() -> Scene {
+        use kmath::Vec2;
+
+        let mut scene = scene_with_gizmos();
+        let body = scene
+            .physics2d_mut()
+            .add_body(&kphysics::d2::RigidBodyDesc::dynamic(), 0);
+        scene
+            .physics2d_mut()
+            .add_collider(
+                &kphysics::d2::ColliderDesc::cuboid(Vec2::splat(0.5)),
+                Some(body),
+                0,
+            )
+            .expect("碰撞体");
+        // 碰撞体要步进一次才真正进物理世界。
+        scene.step_physics_2d(1.0 / 60.0);
+        scene
+    }
+
+    #[test]
+    fn two_dimensional_physics_produces_lines() {
+        let mut scene = scene_with_a_2d_box();
+
+        scene.debug_draw_physics_2d(PhysicsDebugOptions2d::shapes_only());
+
+        assert!(!scene.gizmos().is_empty(), "2D 碰撞体一条线都没画");
+    }
+
+    #[test]
+    fn two_dimensional_lines_lie_on_the_xy_plane() {
+        // 2D 世界躺在 z = 0 上。线段跑到别的深度去的话，正交相机正对
+        // XY 平面时会被近远平面裁掉，表现为「开了调试却什么都看不见」。
+        let mut scene = scene_with_a_2d_box();
+
+        scene.debug_draw_physics_2d(PhysicsDebugOptions2d::shapes_only());
+
+        for vertex in scene.gizmos().vertices(Layer::Depth) {
+            assert_eq!(vertex.position[2], 0.0, "2D 调试线跑出了 XY 平面");
+        }
+    }
+
+    #[test]
+    fn the_two_worlds_are_drawn_independently() {
+        // 两个物理世界互不感知：画 2D 的时候不该把 3D 的碰撞体也画出来，
+        // 反过来也一样。合成一个方法就会犯这个错。
+        let mut scene = scene_with_a_2d_box();
+        scene.add_node(Node::new("body3d").with_collider(Collider::cuboid(Vec3::splat(0.5))));
+        scene.update();
+        scene.step_physics(1.0 / 60.0);
+
+        scene.debug_draw_physics_2d(PhysicsDebugOptions2d::shapes_only());
+        let only_2d = line_count(&scene);
+
+        scene.gizmos_mut().clear();
+        scene.debug_draw_physics(PhysicsDebugOptions::shapes_only());
+        let only_3d = line_count(&scene);
+
+        // 2D 的矩形是四条边，3D 的盒子是十二条棱——数目对不上就说明串了。
+        assert_eq!(only_2d, 4, "2D 只该画出那个矩形的四条边");
+        assert_eq!(only_3d, 12, "3D 只该画出那个盒子的十二条棱");
+    }
+
+    #[test]
+    fn an_empty_2d_option_set_draws_nothing() {
+        let mut scene = scene_with_a_2d_box();
+
+        scene.debug_draw_physics_2d(PhysicsDebugOptions2d::none());
+
+        assert!(scene.gizmos().is_empty());
+    }
+
+    #[test]
+    fn two_dimensional_colors_are_converted_out_of_hsla() {
+        // 同 3D：rapier 给的是 HSLA，不转换的话画出来一片过曝的白。
+        let mut scene = scene_with_a_2d_box();
+
+        scene.debug_draw_physics_2d(PhysicsDebugOptions2d::shapes_only());
+
+        assert!(!scene.gizmos().is_empty());
+        for vertex in scene.gizmos().vertices(Layer::Depth) {
+            assert!(
+                vertex.color.iter().all(|c| (0.0..=1.0).contains(c)),
+                "颜色分量越界：{:?}",
+                vertex.color
+            );
+        }
     }
 }
