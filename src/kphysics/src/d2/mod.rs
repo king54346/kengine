@@ -39,6 +39,10 @@
 #[cfg(test)]
 mod events_tests;
 #[cfg(test)]
+mod joint_tests;
+#[cfg(test)]
+mod shape_cast_tests;
+#[cfg(test)]
 mod tests;
 
 mod body;
@@ -47,12 +51,17 @@ mod character;
 mod character_tests;
 mod collider;
 mod convert;
+mod debug;
+mod joint;
+mod visit;
 mod world;
 
 pub use body::{BodyMut, BodyRef, RigidBodyDesc};
 pub use character::{CharacterCollision, CharacterController, CharacterMovement};
 pub use collider::{ColliderDesc, ColliderMut, ColliderRef, ColliderShape};
+pub use debug::PhysicsDebugOptions2d;
+pub use joint::{JointDesc, JointKind};
 pub use world::{
-    BodyHandle, ColliderHandle, CollisionEvent2d, ContactForceEvent2d, PhysicsWorld,
-    RayCastOptions, RayHit,
+    BodyHandle, ColliderHandle, CollisionEvent2d, ContactForceEvent2d, JointHandle, PhysicsWorld,
+    RayCastOptions, RayHit, ShapeCastOptions, ShapeHit,
 };

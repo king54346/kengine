@@ -71,7 +71,11 @@ pub enum ColliderShape {
 }
 
 impl ColliderShape {
-    fn build(&self) -> Option<rg::SharedShape> {
+    /// 转成 rapier 的形状。形状退化（顶点不足、半径为负…）时返回 [`None`]。
+    ///
+    /// `pub(crate)` 是给形状扫掠用的：那条查询要拿一个**不属于任何碰撞体**
+    /// 的形状去扫，所以需要单独构造一份。
+    pub(crate) fn build(&self) -> Option<rg::SharedShape> {
         let shape = match self {
             ColliderShape::Ball { radius } => rg::SharedShape::ball(*radius),
             ColliderShape::Cuboid { half_extents } => {

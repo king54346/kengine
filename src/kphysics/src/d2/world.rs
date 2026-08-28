@@ -2,8 +2,9 @@
 
 use super::{
     body::{BodyMut, BodyRef, RigidBodyDesc},
-    collider::{ColliderDesc, ColliderMut, ColliderRef},
-    convert::{from_rv, to_rv},
+    collider::{ColliderDesc, ColliderMut, ColliderRef, ColliderShape},
+    convert::{from_rv, to_rp, to_rv},
+    joint::JointDesc,
 };
 use crate::IntegrationParameters;
 use kmath::Vec2;
@@ -17,6 +18,10 @@ use std::sync::mpsc;
 /// 2D 刚体的句柄。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BodyHandle(pub(crate) rapier2d::dynamics::RigidBodyHandle);
+
+/// 2D 关节的句柄。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct JointHandle(pub(crate) rapier2d::dynamics::ImpulseJointHandle);
 
 /// 2D 碰撞体的句柄。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -61,6 +66,56 @@ impl Default for RayCastOptions {
             direction: Vec2::new(0.0, -1.0),
             max_distance: f32::MAX,
             solid: true,
+            groups: crate::InteractionGroups::ALL,
+        }
+    }
+}
+
+/// 形状扫掠命中的结果。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShapeHit {
+    /// 被撞上的碰撞体。
+    pub collider: ColliderHandle,
+    /// 扫掠形状上的接触点（世界空间）。
+    pub witness_on_shape: Vec2,
+    /// 被撞碰撞体上的接触点（世界空间）。
+    pub witness_on_collider: Vec2,
+    /// 被撞碰撞体在接触处的法线。
+    ///
+    /// 角色贴墙滑动就是靠它：把速度里沿法线的那一份减掉，剩下的是沿墙的分量。
+    pub normal: Vec2,
+    /// 沿扫掠方向走了多远撞上的。0 表示一开始就重叠。
+    pub distance: f32,
+}
+
+/// 一次形状扫掠的参数。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShapeCastOptions {
+    /// 形状的起始位置。
+    pub position: Vec2,
+    /// 形状的起始朝向（弧度）。
+    pub rotation: f32,
+    /// 扫掠方向与速度。长度参与 `max_distance` 的换算。
+    pub velocity: Vec2,
+    /// 最大扫掠距离。
+    pub max_distance: f32,
+    /// 一开始就重叠时是否算命中。
+    ///
+    /// 做「这个位置站不站得下」的检测要设 `true`：否则已经卡在墙里的角色
+    /// 会得到「前方无阻挡」，然后一头扎得更深。
+    pub stop_at_penetration: bool,
+    /// 过滤：只检测这些组。
+    pub groups: crate::InteractionGroups,
+}
+
+impl Default for ShapeCastOptions {
+    fn default() -> Self {
+        Self {
+            position: Vec2::ZERO,
+            rotation: 0.0,
+            velocity: Vec2::new(0.0, -1.0),
+            max_distance: 1.0,
+            stop_at_penetration: true,
             groups: crate::InteractionGroups::ALL,
         }
     }
@@ -355,6 +410,38 @@ impl PhysicsWorld {
         &self.contact_force_events
     }
 
+    // ───────────────────────── 关节 ─────────────────────────
+
+    /// 用关节把两个刚体连起来。
+    pub fn add_joint(
+        &mut self,
+        body1: BodyHandle,
+        body2: BodyHandle,
+        desc: &JointDesc,
+    ) -> JointHandle {
+        JointHandle(
+            self.inner
+                .insert_impulse_joint(body1.0, body2.0, desc.build()),
+        )
+    }
+
+    /// 删一个关节。
+    pub fn remove_joint(&mut self, handle: JointHandle) {
+        self.inner.remove_impulse_joint(handle.0);
+    }
+
+    /// 关节是否还存在。
+    pub fn has_joint(&self, handle: JointHandle) -> bool {
+        self.inner.impulse_joints().any(|(h, _)| h == handle.0)
+    }
+
+    /// 世界里的关节数量。
+    pub fn joint_count(&self) -> usize {
+        self.inner.impulse_joints().count()
+    }
+
+    // ───────────────────────── 查询 ─────────────────────────
+
     /// 射线检测，返回最近的一次命中。
     pub fn cast_ray(&mut self, options: &RayCastOptions) -> Option<RayHit> {
         // 查询结构在步进时才更新。刚加完刚体就查询的话，查询树里
@@ -374,6 +461,47 @@ impl PhysicsWorld {
             point: from_rv(ray.point_at(intersection.time_of_impact)),
             normal: from_rv(intersection.normal),
             time_of_impact: intersection.time_of_impact,
+        })
+    }
+
+    /// 把一个形状沿方向扫过去，返回第一个撞上的碰撞体。
+    ///
+    /// 比射线贵，但能回答射线答不出的问题：射线是**一条线**，
+    /// 它答的是「这条线打到什么」；扫掠推的是**一整个形状**，答的是
+    /// 「这个东西整体挪过去会不会撞上」。
+    ///
+    /// 两处非它不可的地方：
+    ///
+    /// - **子弹的连续检测**。逐帧做重叠测试会漏掉快速运动——这一帧在墙前、
+    ///   下一帧在墙后，两帧都不重叠，于是穿墙而过。
+    /// - **角色贴墙滑动**。先扫一次拿到撞击距离与法线，把速度投影到墙面上，
+    ///   再扫一次——这就是运动学角色控制器每帧在做的事。
+    pub fn cast_shape(&mut self, shape: &ColliderShape, opts: &ShapeCastOptions) -> Option<ShapeHit> {
+        // 和射线一样：查询结构在步进时才更新，刚加完碰撞体就查会静默扫空。
+        self.update_query_structures();
+
+        let shape = shape.build()?;
+        let filter = QueryFilter::default().groups(opts.groups.to_rapier2d());
+
+        let cast_options = rapier2d::parry::query::ShapeCastOptions {
+            max_time_of_impact: opts.max_distance,
+            stop_at_penetration: opts.stop_at_penetration,
+            ..Default::default()
+        };
+
+        let (handle, hit) = self.inner.query_pipeline_with_filter(filter).cast_shape(
+            &to_rp(opts.position, opts.rotation),
+            to_rv(opts.velocity),
+            shape.as_ref(),
+            cast_options,
+        )?;
+
+        Some(ShapeHit {
+            collider: ColliderHandle(handle),
+            witness_on_shape: from_rv(hit.witness1),
+            witness_on_collider: from_rv(hit.witness2),
+            normal: from_rv(hit.normal2),
+            distance: hit.time_of_impact,
         })
     }
 
