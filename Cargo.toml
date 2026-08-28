@@ -155,6 +155,31 @@ path = "examples/kengine/math/render_primitives.rs"
 name = "custom_primitives"
 path = "examples/kengine/math/custom_primitives.rs"
 
+# ── bevy 的 examples/camera 移植 ──
+[[example]]
+name = "camera_orbit"
+path = "examples/kengine/camera/camera_orbit.rs"
+
+[[example]]
+name = "free_camera_controller"
+path = "examples/kengine/camera/free_camera_controller.rs"
+
+[[example]]
+name = "pan_camera_controller"
+path = "examples/kengine/camera/pan_camera_controller.rs"
+
+[[example]]
+name = "screen_shake_2d"
+path = "examples/kengine/camera/2d_screen_shake.rs"
+
+[[example]]
+name = "projection_zoom"
+path = "examples/kengine/camera/projection_zoom.rs"
+
+[[example]]
+name = "custom_projection"
+path = "examples/kengine/camera/custom_projection.rs"
+
 [[example]]
 name = "skinning_blending"
 path = "examples/kengine/skinning_blending.rs"

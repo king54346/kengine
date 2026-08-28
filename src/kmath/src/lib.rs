@@ -128,6 +128,59 @@ pub fn slerp(a: Quat, b: Quat, t: f32) -> Quat {
     a.slerp(b, t)
 }
 
+/// 帧率无关的指数逼近系数。
+///
+/// # 为什么需要它
+///
+/// 相机跟随、数值缓动最常见的写法是 `current = lerp(current, target, 0.1)`。
+/// 这行代码**跟着帧率走**：60 帧下每秒逼近 60 次，144 帧下逼近 144 次，
+/// 于是同一个游戏在高刷屏上跟得更紧。改成乘 `dt` 也不对——那只是让它
+/// 从「每帧固定比例」变成「每帧固定比例乘时间」，仍然不是指数曲线。
+///
+/// 正确的系数是 `1 - e^(-decay·dt)`：不管一帧多长，走完同样的时间就
+/// 逼近同样的比例。`decay` 是「每秒的急迫程度」，越大跟得越紧；
+/// 常用范围 2~20。
+///
+/// ```
+/// # use kmath::{exp_decay, lerp};
+/// // 同样的 0.1 秒，拆成一大步还是若干小步，结果几乎一样。
+/// let one_step = lerp(0.0, 10.0, exp_decay(8.0, 0.1));
+///
+/// let mut many = 0.0_f32;
+/// for _ in 0..10 {
+///     many = lerp(many, 10.0, exp_decay(8.0, 0.01));
+/// }
+///
+/// assert!((one_step - many).abs() < 0.05);
+/// ```
+#[inline]
+pub fn exp_decay(decay: f32, dt: f32) -> f32 {
+    if !(decay.is_finite() && dt.is_finite()) || dt <= 0.0 {
+        return 0.0;
+    }
+    1.0 - (-decay * dt).exp()
+}
+
+/// 帧率无关地把 `current` 朝 `target` 推一步。
+///
+/// 就是 [`lerp`] 配上 [`exp_decay`] 的系数，见那里的说明。
+#[inline]
+pub fn smooth_nudge(current: f32, target: f32, decay: f32, dt: f32) -> f32 {
+    lerp(current, target, exp_decay(decay, dt))
+}
+
+/// [`smooth_nudge`] 的三维版本。相机跟随最常用的那个。
+#[inline]
+pub fn smooth_nudge_vec3(current: Vec3, target: Vec3, decay: f32, dt: f32) -> Vec3 {
+    current.lerp(target, exp_decay(decay, dt))
+}
+
+/// [`smooth_nudge`] 的二维版本。
+#[inline]
+pub fn smooth_nudge_vec2(current: Vec2, target: Vec2, decay: f32, dt: f32) -> Vec2 {
+    current.lerp(target, exp_decay(decay, dt))
+}
+
 // ── 平滑步函数 ────────────────────────────────────────────────────────────────
 /// Hermite 平滑步：将 `x` 从 `[edge0, edge1]` 映射到 `[0, 1]` 并施加缓入缓出
 #[inline]
@@ -278,6 +331,7 @@ pub mod prelude {
         Vec4,
         // 函数
         deg_to_rad,
+        exp_decay,
         fast_inv_sqrt,
         lerp,
         lerp_clamped,
@@ -292,6 +346,9 @@ pub mod prelude {
         rotate_around_point,
         scale_around_point,
         slerp,
+        smooth_nudge,
+        smooth_nudge_vec2,
+        smooth_nudge_vec3,
         smootherstep,
         smoothstep,
         srgb_to_linear,
@@ -309,6 +366,49 @@ mod tests {
         assert!((lerp(0.0, 10.0, 0.5) - 5.0).abs() < 1e-6);
         assert!((lerp(0.0, 10.0, 0.0) - 0.0).abs() < 1e-6);
         assert!((lerp(0.0, 10.0, 1.0) - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn exp_decay_is_frame_rate_independent() {
+        // 这正是它存在的理由：同样的时间跨度，拆成一大步还是许多小步，
+        // 结果必须几乎一样。用 `lerp(cur, target, 0.1)` 那种写法的话，
+        // 60 帧和 144 帧下跟随速度会差一大截。
+        let big = lerp(0.0, 100.0, exp_decay(6.0, 0.5));
+
+        let mut small = 0.0_f32;
+        for _ in 0..50 {
+            small = lerp(small, 100.0, exp_decay(6.0, 0.01));
+        }
+
+        assert!((big - small).abs() < 0.5, "一大步 {big}，许多小步 {small}");
+    }
+
+    #[test]
+    fn exp_decay_never_overshoots() {
+        // 系数必须落在 [0, 1)：超过 1 会冲过头再弹回来。
+        for dt in [0.0, 0.001, 0.016, 1.0, 100.0] {
+            let k = exp_decay(20.0, dt);
+            assert!((0.0..1.0).contains(&k), "dt={dt} 给出了 {k}");
+        }
+    }
+
+    #[test]
+    fn exp_decay_survives_a_bad_dt() {
+        // 第一帧的 dt 有时是 0 或者奇怪的值。返回 0 表示「这一帧不动」，
+        // 比让 NaN 顺着位置传下去强——那会让相机再也回不来。
+        assert_eq!(exp_decay(5.0, f32::NAN), 0.0);
+        assert_eq!(exp_decay(f32::NAN, 0.016), 0.0);
+        assert_eq!(exp_decay(5.0, -1.0), 0.0);
+    }
+
+    #[test]
+    fn smooth_nudge_approaches_but_does_not_pass() {
+        let mut value = 0.0_f32;
+        for _ in 0..600 {
+            value = smooth_nudge(value, 10.0, 8.0, 1.0 / 60.0);
+            assert!(value <= 10.0, "冲过头了：{value}");
+        }
+        assert!((value - 10.0).abs() < 0.01, "十秒之后还差 {}", 10.0 - value);
     }
 
     #[test]
