@@ -148,5 +148,13 @@ name = "random_sampling"
 path = "examples/kengine/math/random_sampling.rs"
 
 [[example]]
+name = "render_primitives"
+path = "examples/kengine/math/render_primitives.rs"
+
+[[example]]
+name = "custom_primitives"
+path = "examples/kengine/math/custom_primitives.rs"
+
+[[example]]
 name = "skinning_blending"
 path = "examples/kengine/skinning_blending.rs"

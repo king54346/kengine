@@ -131,6 +131,26 @@ impl Node {
         self
     }
 
+    /// 就地挂上（或换掉）光源。
+    ///
+    /// 和 [`with_light`](Self::with_light) 的区别只在借用形式，但差别很实在：
+    /// 那个吃掉 `self`，只能在构造节点时用。运行时给一个已经在场景里的节点
+    /// 挂上灯，就得走这条。
+    ///
+    /// [`light_mut`](Self::light_mut) 也不顶用——组件还不存在时它返回
+    /// `None`，而「本来没有、现在要有」正是这里要解决的事。
+    pub fn set_light(&mut self, light: Light) {
+        self.light = Some(light);
+    }
+
+    /// 就地挂上（或换掉）相机。
+    ///
+    /// 运行时在透视与正交之间切换走这条：换的是整个 [`Camera`]，
+    /// 而不是去改它的某个字段。
+    pub fn set_camera(&mut self, camera: Camera) {
+        self.camera = Some(camera);
+    }
+
     /// 挂上粒子系统。发射器的位置与朝向取自本节点的世界变换。
     pub fn with_particles(mut self, particles: ParticleSystem) -> Self {
         self.particles = Some(Box::new(particles));

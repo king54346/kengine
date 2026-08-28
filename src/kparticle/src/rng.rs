@@ -82,7 +82,6 @@ impl Lerp for Vec3 {
     }
 }
 
-
 #[cfg(test)]
 mod test {
     use super::*;

@@ -733,11 +733,7 @@ impl Bounded3d for Capsule3d {
     fn aabb_3d(&self, translation: Vec3) -> Aabb {
         Aabb::from_center_half_extents(
             translation,
-            Vec3::new(
-                self.radius,
-                self.half_length + self.radius,
-                self.radius,
-            ),
+            Vec3::new(self.radius, self.half_length + self.radius, self.radius),
         )
     }
 }
@@ -754,10 +750,7 @@ impl Bounded3d for Cone {
 impl Bounded3d for Torus {
     fn aabb_3d(&self, translation: Vec3) -> Aabb {
         let reach = self.major_radius + self.minor_radius;
-        Aabb::from_center_half_extents(
-            translation,
-            Vec3::new(reach, self.minor_radius, reach),
-        )
+        Aabb::from_center_half_extents(translation, Vec3::new(reach, self.minor_radius, reach))
     }
 }
 
@@ -996,7 +989,10 @@ mod tests {
         assert!((many - circle).abs() < 1e-3, "720 边形面积 {many}");
 
         let square = RegularPolygon::new(1.0, 4).area();
-        assert!((square - 2.0).abs() < 1e-5, "外接圆半径为 1 的正方形面积是 2");
+        assert!(
+            (square - 2.0).abs() < 1e-5,
+            "外接圆半径为 1 的正方形面积是 2"
+        );
     }
 
     #[test]
@@ -1045,7 +1041,11 @@ mod tests {
         let ellipse = Ellipse::new(3.0, 1.0);
         let turned = ellipse.aabb_2d(Vec2::ZERO, PI / 2.0);
 
-        assert!((turned.half_size().x - 1.0).abs() < 1e-4, "{}", turned.half_size());
+        assert!(
+            (turned.half_size().x - 1.0).abs() < 1e-4,
+            "{}",
+            turned.half_size()
+        );
         assert!((turned.half_size().y - 3.0).abs() < 1e-4);
     }
 

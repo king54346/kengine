@@ -36,9 +36,11 @@
 //! ```
 
 mod color;
+mod primitives;
 mod shapes;
 
 pub use color::Color;
+pub use primitives::{Gizmo2d, Gizmo3d, Outline};
 
 use bytemuck::{Pod, Zeroable};
 use kmath::Vec3;
