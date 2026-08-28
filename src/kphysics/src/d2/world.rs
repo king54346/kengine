@@ -80,9 +80,11 @@ pub struct ShapeHit {
     pub witness_on_shape: Vec2,
     /// 被撞碰撞体上的接触点（世界空间）。
     pub witness_on_collider: Vec2,
-    /// 被撞碰撞体在接触处的法线。
+    /// 被撞表面的外法线，**指向扫掠形状这一侧**。
     ///
+    /// 也就是说它和扫掠方向的点积总是负的——「迎面挡住我的那一面」。
     /// 角色贴墙滑动就是靠它：把速度里沿法线的那一份减掉，剩下的是沿墙的分量。
+    /// 判断脚下是地面还是斜坡也看它（和 +Y 的夹角）。
     pub normal: Vec2,
     /// 沿扫掠方向走了多远撞上的。0 表示一开始就重叠。
     pub distance: f32,
@@ -476,7 +478,11 @@ impl PhysicsWorld {
     ///   下一帧在墙后，两帧都不重叠，于是穿墙而过。
     /// - **角色贴墙滑动**。先扫一次拿到撞击距离与法线，把速度投影到墙面上，
     ///   再扫一次——这就是运动学角色控制器每帧在做的事。
-    pub fn cast_shape(&mut self, shape: &ColliderShape, opts: &ShapeCastOptions) -> Option<ShapeHit> {
+    pub fn cast_shape(
+        &mut self,
+        shape: &ColliderShape,
+        opts: &ShapeCastOptions,
+    ) -> Option<ShapeHit> {
         // 和射线一样：查询结构在步进时才更新，刚加完碰撞体就查会静默扫空。
         self.update_query_structures();
 
@@ -500,7 +506,11 @@ impl PhysicsWorld {
             collider: ColliderHandle(handle),
             witness_on_shape: from_rv(hit.witness1),
             witness_on_collider: from_rv(hit.witness2),
-            normal: from_rv(hit.normal2),
+            // 取负：这条路径上 rapier 给的 `normal2` 朝着**运动方向**
+            // （撞上去的那一面的法线），而调用方要的是「被撞的表面朝我这边
+            // 的法线」——推开角色、算反弹、判断是地面还是墙，都按后者理解。
+            // 实测过：球从左往右撞墙，rapier 给 (1,0)，墙面朝外该是 (-1,0)。
+            normal: -from_rv(hit.normal2),
             distance: hit.time_of_impact,
         })
     }

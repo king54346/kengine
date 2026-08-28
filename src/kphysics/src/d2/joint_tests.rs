@@ -72,7 +72,11 @@ fn a_fixed_joint_carries_its_body_along() {
 fn a_rope_stops_the_fall_at_its_length() {
     // 绳索只限制最大距离：重物一路自由落体，到绳长处被拽住。
     let (mut world, anchor, weight) = anchor_and_bob(Vec2::ZERO);
-    world.add_joint(anchor, weight, &JointDesc::rope(Vec2::ZERO, Vec2::ZERO, 3.0));
+    world.add_joint(
+        anchor,
+        weight,
+        &JointDesc::rope(Vec2::ZERO, Vec2::ZERO, 3.0),
+    );
 
     simulate(&mut world, 300);
 

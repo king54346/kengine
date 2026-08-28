@@ -47,6 +47,7 @@ fn a_shape_cast_catches_what_frame_by_frame_tests_would_miss() {
         "撞上的距离是 {}",
         hit.distance
     );
+    // 法线指向撞过来的那一侧：球从左边来，所以墙面法线朝左。
     assert!(hit.normal.x < -0.9, "法线该朝左，实际是 {:?}", hit.normal);
 }
 
@@ -65,6 +66,38 @@ fn a_cast_that_falls_short_reports_nothing() {
     );
 
     assert!(hit.is_none(), "还没走到就不该报命中");
+}
+
+#[test]
+fn the_normal_always_faces_the_incoming_shape() {
+    // 法线的方向约定：**指向撞过来的那一侧**，所以它和扫掠方向的点积
+    // 恒为负。两边都撞一次才能钉死这条——只测一个方向的话，
+    // 把符号写反了也照样过。
+    //
+    // （rapier 在这条路径上给的是朝着运动方向的那个法线，`cast_shape`
+    // 里取了负。这条测试就是那一步的守门人。）
+    for velocity in [Vec2::X, Vec2::NEG_X] {
+        let mut world = world_with_a_wall();
+        let start = Vec2::new(-10.0 * velocity.x, 0.0);
+
+        let hit = world
+            .cast_shape(
+                &ball(),
+                &ShapeCastOptions {
+                    position: start,
+                    velocity,
+                    max_distance: 20.0,
+                    ..Default::default()
+                },
+            )
+            .expect("该撞上墙");
+
+        assert!(
+            hit.normal.dot(velocity) < 0.0,
+            "从 {start:?} 朝 {velocity:?} 撞，法线 {:?} 该迎着来向",
+            hit.normal
+        );
+    }
 }
 
 #[test]

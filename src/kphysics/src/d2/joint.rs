@@ -86,12 +86,7 @@ impl JointDesc {
     }
 
     /// 滑轨。
-    pub fn prismatic(
-        anchor1: Vec2,
-        anchor2: Vec2,
-        axis: Vec2,
-        limits: Option<[f32; 2]>,
-    ) -> Self {
+    pub fn prismatic(anchor1: Vec2, anchor2: Vec2, axis: Vec2, limits: Option<[f32; 2]>) -> Self {
         Self::new(JointKind::Prismatic { axis, limits }, anchor1, anchor2)
     }
 
@@ -137,11 +132,19 @@ impl JointDesc {
             JointKind::Rope { .. } => (Mask::empty(), 0.0),
         };
 
-        let mut joint = rd::GenericJointBuilder::new(locked)
+        let mut builder = rd::GenericJointBuilder::new(locked)
             .local_frame1(to_rp(self.local_anchor1, angle))
             .local_frame2(to_rp(self.local_anchor2, angle))
-            .contacts_enabled(self.contacts_enabled)
-            .build();
+            .contacts_enabled(self.contacts_enabled);
+
+        // 绳索要限制的是**欧氏距离**，不是某一根轴上的投影。把两个线性轴
+        // 耦合起来，下面那条 `LinX` 限位才代表「两点之间有多远」——
+        // 少了这一句，绳子只会限制横向分量，重物照样一路掉下去。
+        if matches!(self.kind, JointKind::Rope { .. }) {
+            builder = builder.coupled_axes(Mask::LIN_AXES);
+        }
+
+        let mut joint = builder.build();
 
         match &self.kind {
             JointKind::Fixed => {}
@@ -210,10 +213,16 @@ mod tests {
     #[test]
     fn limits_reach_the_joint() {
         let hinge = JointDesc::revolute(Vec2::ZERO, Vec2::ZERO, Some([-0.5, 0.5])).build();
-        assert_eq!(hinge.limits(Ax::AngX).map(|l| [l.min, l.max]), Some([-0.5, 0.5]));
+        assert_eq!(
+            hinge.limits(Ax::AngX).map(|l| [l.min, l.max]),
+            Some([-0.5, 0.5])
+        );
 
         let rail = JointDesc::prismatic(Vec2::ZERO, Vec2::ZERO, Vec2::Y, Some([0.0, 2.0])).build();
-        assert_eq!(rail.limits(Ax::LinX).map(|l| [l.min, l.max]), Some([0.0, 2.0]));
+        assert_eq!(
+            rail.limits(Ax::LinX).map(|l| [l.min, l.max]),
+            Some([0.0, 2.0])
+        );
     }
 
     #[test]
@@ -248,10 +257,6 @@ mod tests {
         // 滑轨的自由轴在 rapier 里恒定是 X，所以方向是靠转关节坐标系表达的。
         assert!((JointDesc::angle_of(Vec2::X) - 0.0).abs() < 1e-6);
         assert!((JointDesc::angle_of(Vec2::Y) - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
-        assert_eq!(
-            JointDesc::angle_of(Vec2::ZERO),
-            0.0,
-            "退化的轴不该产生 NaN"
-        );
+        assert_eq!(JointDesc::angle_of(Vec2::ZERO), 0.0, "退化的轴不该产生 NaN");
     }
 }

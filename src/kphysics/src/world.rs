@@ -514,7 +514,12 @@ impl PhysicsWorld {
             body_user_data,
             witness_on_shape: from_rv(hit.witness1),
             witness_on_collider: from_rv(hit.witness2),
-            normal: from_rv(hit.normal2),
+            // 取负：这条路径上 rapier 给的 `normal2` 朝着**运动方向**
+            // （撞上去的那一面的法线），而调用方要的是「被撞的表面朝我这边
+            // 的法线」——推开角色、算反弹、判断脚下是地面还是斜坡，
+            // 都按后者理解。实测过：往下扫撞地面，rapier 给 (0,-1,0)，
+            // 地面朝外该是 (0,1,0)。
+            normal: -from_rv(hit.normal2),
             distance: hit.time_of_impact,
         })
     }
@@ -815,6 +820,38 @@ mod test {
             (hit.distance - 4.0).abs() < 0.05,
             "扫掠距离 {}",
             hit.distance
+        );
+    }
+
+    #[test]
+    fn the_shape_cast_normal_faces_the_incoming_shape() {
+        // 法线的方向约定：**指向撞过来的那一侧**，所以它和扫掠方向的点积
+        // 恒为负。往下扫撞地面，法线该朝上。
+        //
+        // 这条是补 2D 那边时一并加的，而且**当场抓到三维这边也是反的**：
+        // rapier 在这条路径上给的 `normal2` 朝着运动方向，和 parry 文档写的
+        // 「被撞形状的外法线」相反。两边现在都取了负。
+        //
+        // 这个方向错了不会让任何东西崩，只会让「把角色推离表面」朝着
+        // 表面里推——所以它一直没被发现，直到有人为它写了一条断言。
+        let (world, _) = ball_over_ground();
+
+        let hit = world
+            .cast_shape(
+                &ColliderShape::ball(0.5),
+                &ShapeCastOptions {
+                    position: Vec3::new(20.0, 5.0, 0.0),
+                    velocity: Vec3::NEG_Y,
+                    max_distance: 100.0,
+                    ..Default::default()
+                },
+            )
+            .expect("该撞到地面");
+
+        assert!(
+            hit.normal.dot(Vec3::NEG_Y) < 0.0,
+            "法线 {:?} 该迎着来向（往下扫，法线朝上）",
+            hit.normal
         );
     }
 

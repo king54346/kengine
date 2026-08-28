@@ -284,10 +284,7 @@ mod tests {
     /// 所以由调用方给一个。
     fn roundtrip<T: Visit + Clone>(value: &T, mut blank: T) -> T {
         let mut writer = Visitor::new();
-        value
-            .clone()
-            .visit("Root", &mut writer)
-            .expect("写失败");
+        value.clone().visit("Root", &mut writer).expect("写失败");
         let bytes = writer.save_binary_to_vec().expect("序列化失败");
 
         let mut reader = Visitor::load_from_memory(&bytes).expect("反序列化失败");
