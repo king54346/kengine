@@ -94,7 +94,7 @@ pub mod prelude {
         BoxedLoaderFuture, LoadError, Resource, ResourceData, ResourceIo, ResourceLoader,
         ResourceManager,
     };
-    pub use kcamera::{Camera, Frustum, Projection};
+    pub use kcamera::{Camera, FlyCamera, Frustum, OrbitCamera, PanCamera, Projection, ScreenShake};
     pub use kcore::pool::Handle;
     // `Color` 在引擎里只有调试线用得上，导出时冠上来源，免得和材质的
     // 颜色向量混起来。

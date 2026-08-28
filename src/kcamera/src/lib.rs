@@ -24,14 +24,23 @@
 
 use kmath::{Aabb, Intersection, Mat4, Plane, Vec3};
 
-/// 轨道相机。
+/// 轨道相机：绕着一个目标点转。
 pub mod orbit;
+/// 自由飞行相机：走到哪算哪。
+pub mod fly;
+/// 平移相机：在一个平面上拖着看。
+pub mod pan;
+/// 屏幕震动。
+pub mod shake;
 
+pub use fly::FlyCamera;
+pub use pan::PanCamera;
 pub use orbit::OrbitCamera;
+pub use shake::ScreenShake;
 
 /// 常用类型的集中导出。
 pub mod prelude {
-    pub use crate::{Camera, Frustum, OrbitCamera, Projection};
+    pub use crate::{Camera, FlyCamera, Frustum, OrbitCamera, PanCamera, Projection, ScreenShake};
     pub use kmath::Intersection;
 }
 
@@ -47,6 +56,21 @@ pub enum Projection {
     Orthographic {
         /// 垂直方向的可视高度，宽度按宽高比推导。
         height: f32,
+    },
+    /// 自己给一整个投影矩阵。
+    ///
+    /// 上面两种覆盖了绝大多数情况，但**不是全部**：斜投影（灭点不在画面
+    /// 中心）、离轴投影（多屏拼接、CAVE）、为镜面反射临时改造的投影，
+    /// 都不是「视场角」或「可视高度」能描述的。
+    ///
+    /// 矩阵要按 wgpu 的约定给：右手坐标系、深度范围 `[0, 1]`。
+    /// 拿 `Mat4::perspective_rh` 之类先造一个再改，比从头推稳妥。
+    ///
+    /// **宽高比要自己处理**：引擎不知道你这个矩阵想怎么响应窗口大小，
+    /// 所以窗口变化时不会替你重算——需要的话在 `update` 里自己重设。
+    Custom {
+        /// 视图空间 → 裁剪空间的矩阵。
+        clip_from_view: Mat4,
     },
 }
 
@@ -91,6 +115,7 @@ impl Projection {
         match self {
             Self::Perspective { .. } => 0,
             Self::Orthographic { .. } => 1,
+            Self::Custom { .. } => 2,
         }
     }
 }
@@ -112,6 +137,9 @@ impl kcore::visitor::Visit for Projection {
                     fov_y_degrees: 45.0,
                 },
                 1 => Self::Orthographic { height: 1.0 },
+                2 => Self::Custom {
+                    clip_from_view: Mat4::IDENTITY,
+                },
                 other => {
                     return Err(kcore::visitor::error::VisitError::User(format!(
                         "未知的投影类型标签 {other}"
@@ -123,6 +151,7 @@ impl kcore::visitor::Visit for Projection {
         match self {
             Self::Perspective { fov_y_degrees } => fov_y_degrees.visit("FovY", &mut region)?,
             Self::Orthographic { height } => height.visit("Height", &mut region)?,
+            Self::Custom { clip_from_view } => clip_from_view.visit("Matrix", &mut region)?,
         }
 
         Ok(())
@@ -162,6 +191,16 @@ impl Camera {
         }
     }
 
+    /// 用自己算好的投影矩阵创建一台相机。
+    ///
+    /// 见 [`Projection::Custom`]——斜投影、离轴投影这类走它。
+    pub fn custom_projection(clip_from_view: Mat4) -> Self {
+        Self {
+            projection: Projection::Custom { clip_from_view },
+            ..Default::default()
+        }
+    }
+
     /// 按给定宽高比计算投影矩阵。
     ///
     /// 采用右手坐标系 + `[0, 1]` 深度范围，与 wgpu 的 NDC 约定一致。
@@ -182,6 +221,9 @@ impl Camera {
                 self.z_near,
                 self.z_far,
             ),
+            // 自己给的矩阵原样交出去，连宽高比都不碰——引擎不知道它
+            // 想怎么响应窗口大小，替它猜只会猜错。
+            Projection::Custom { clip_from_view } => clip_from_view,
             Projection::Orthographic { height } => {
                 let half_height = (height * 0.5).max(f32::EPSILON);
                 let half_width = half_height * aspect;
@@ -201,7 +243,7 @@ impl Camera {
     pub fn fov_y_degrees(&self) -> Option<f32> {
         match self.projection {
             Projection::Perspective { fov_y_degrees } => Some(fov_y_degrees),
-            Projection::Orthographic { .. } => None,
+            Projection::Orthographic { .. } | Projection::Custom { .. } => None,
         }
     }
 
@@ -514,6 +556,42 @@ mod test {
     fn fov_only_applies_to_perspective() {
         assert_eq!(Camera::perspective(75.0).fov_y_degrees(), Some(75.0));
         assert_eq!(Camera::orthographic(5.0).fov_y_degrees(), None);
+        assert_eq!(Camera::custom_projection(Mat4::IDENTITY).fov_y_degrees(), None);
+    }
+
+    #[test]
+    fn a_custom_projection_is_handed_back_untouched() {
+        // 自己给的矩阵不该被引擎改动——连宽高比都不碰。替它猜怎么响应
+        // 窗口大小只会猜错，而错了的表现是画面被莫名其妙地拉伸。
+        let oblique = {
+            let mut matrix = Mat4::perspective_rh(1.0, 16.0 / 9.0, 0.1, 100.0);
+            // 把灭点推离画面中心，这正是斜投影。
+            *matrix.col_mut(2).as_mut().get_mut(0).unwrap() = 0.2;
+            matrix
+        };
+        let camera = Camera::custom_projection(oblique);
+
+        assert_eq!(camera.projection_matrix(16.0 / 9.0), oblique);
+        // 换个宽高比也一样：它不参与换算。
+        assert_eq!(camera.projection_matrix(1.0), oblique);
+    }
+
+    #[test]
+    fn a_custom_projection_survives_serialization() {
+        use kcore::visitor::{Visit, Visitor};
+
+        let matrix = Mat4::perspective_rh(0.8, 1.5, 0.5, 200.0);
+        let mut camera = Camera::custom_projection(matrix);
+
+        let mut writer = Visitor::new();
+        camera.visit("Root", &mut writer).expect("写");
+        let bytes = writer.save_binary_to_vec().expect("序列化");
+
+        let mut reader = Visitor::load_from_memory(&bytes).expect("反序列化");
+        let mut restored = Camera::default();
+        restored.visit("Root", &mut reader).expect("读");
+
+        assert_eq!(restored.projection, Projection::Custom { clip_from_view: matrix });
     }
 
     // ── 屏幕射线 ──
