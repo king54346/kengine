@@ -111,9 +111,12 @@ pub struct ScriptRuntime {
     host: Host,
     /// 寄存场景时用的空壳。
     ///
-    /// 长期持有并复用：每次现造一个 `Scene` 要新建一整个物理世界（实测约 50 µs），
-    /// 复用之后每帧只剩两次 6 KB 的 memcpy。
-    spare: Scene,
+    /// 长期持有并复用：每次现造一个 `Scene` 要新建一整个物理世界（连造带拆
+    /// 实测 63 µs），复用之后每帧只剩几次结构体 memcpy。
+    ///
+    /// tick 期间是 [`None`]——那个空壳正顶在调用方的场景变量上，
+    /// 详见 [`HostGuard::park`]。
+    spare: Option<Scene>,
     stats: ScriptStats,
 }
 
@@ -167,7 +170,7 @@ impl ScriptRuntime {
             context,
             instances: Vec::new(),
             host: Host::default(),
-            spare: Scene::new(),
+            spare: Some(Scene::new()),
             stats: ScriptStats::default(),
         }
     }

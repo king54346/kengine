@@ -92,6 +92,10 @@ harness = false
 name = "serialization"
 harness = false
 
+[[bench]]
+name = "script"
+harness = false
+
 # three.js 例子的 kengine 移植。放在 examples/kengine/ 下单独一个目录，
 # 和引擎自己的例子分开——它们的目的不同：那些是「怎么用某个功能」，
 # 这些是「对着一个成熟引擎的例子查自己缺什么」。
@@ -103,6 +107,37 @@ path = "examples/kengine/backdrop_water.rs"
 [[example]]
 name = "demo"
 path = "examples/kengine/demo/main.rs"
+
+# ── bevy 的 examples/gltf 移植 ──
+# 用的是 bevy-main/assets/ 里的原始资源，两边画面能对着看。
+[[example]]
+name = "load_gltf"
+path = "examples/kengine/gltf/load_gltf.rs"
+
+[[example]]
+name = "update_gltf_scene"
+path = "examples/kengine/gltf/update_gltf_scene.rs"
+
+[[example]]
+name = "edit_material_on_gltf"
+path = "examples/kengine/gltf/edit_material_on_gltf.rs"
+
+[[example]]
+name = "gltf_skinned_mesh"
+path = "examples/kengine/gltf/gltf_skinned_mesh.rs"
+
+[[example]]
+name = "load_gltf_extras"
+path = "examples/kengine/gltf/load_gltf_extras.rs"
+
+[[example]]
+name = "query_gltf_primitives"
+path = "examples/kengine/gltf/query_gltf_primitives.rs"
+
+# ── bevy 的 examples/math 移植 ──
+[[example]]
+name = "bounding_2d"
+path = "examples/kengine/math/bounding_2d.rs"
 
 [[example]]
 name = "skinning_blending"

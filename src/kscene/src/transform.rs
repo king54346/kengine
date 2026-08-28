@@ -35,6 +35,24 @@ impl Transform {
         }
     }
 
+    /// 仅指定旋转。
+    ///
+    /// 方向光最常用：它只关心朝哪儿照，摆在哪儿没有意义。
+    pub fn from_rotation(rotation: Quat) -> Self {
+        Self {
+            rotation,
+            ..Self::IDENTITY
+        }
+    }
+
+    /// 仅指定缩放。
+    pub fn from_scale(scale: Vec3) -> Self {
+        Self {
+            scale,
+            ..Self::IDENTITY
+        }
+    }
+
     /// 构造一个位于 `eye`、朝向 `target` 的变换，常用于相机节点。
     pub fn looking_at(eye: Vec3, target: Vec3, up: Vec3) -> Self {
         // `look_at` 得到的是世界 → 观察空间的矩阵，取逆才是该节点在世界中的位姿。

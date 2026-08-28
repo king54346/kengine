@@ -102,6 +102,8 @@ pub(crate) struct HostGuard<'a> {
     owner_scene: &'a mut Scene,
     owner_input: &'a mut Input,
     owner_host: &'a mut Host,
+    /// 空壳的家。tick 期间是 [`None`]——那个空壳正占着调用方的位置。
+    owner_spare: &'a mut Option<Scene>,
 }
 
 impl Drop for HostGuard<'_> {
@@ -109,8 +111,11 @@ impl Drop for HostGuard<'_> {
         let Some(mut parked) = PARKED.with(|slot| slot.borrow_mut().take()) else {
             return;
         };
-        if let Some(mut scene) = parked.scene.take() {
-            std::mem::swap(self.owner_scene, &mut scene);
+        if let Some(real_scene) = parked.scene.take() {
+            // 真场景回到调用方手里，换出来的空壳收回 `spare` 等下一次用。
+            // 这里要是让它落地析构，就等于每帧拆掉一个物理世界再建一个。
+            let empty = std::mem::replace(self.owner_scene, real_scene);
+            *self.owner_spare = Some(empty);
         }
         if let Some(mut input) = parked.input.take() {
             std::mem::swap(self.owner_input, &mut input);
@@ -123,20 +128,29 @@ impl Drop for HostGuard<'_> {
 impl<'a> HostGuard<'a> {
     /// 把场景、输入与宿主状态寄存进线程局部。
     ///
-    /// `spare` 是用来占位的空壳场景，由运行时长期持有并复用：每次现造一个
-    /// `Scene` 要新建一整个物理世界（实测约 50 µs），复用之后只剩两次 memcpy。
+    /// # 那个空壳
+    ///
+    /// 场景要整个搬进线程局部，调用方的位置上就得放点东西顶着。现造一个
+    /// `Scene` 要新建一整个 rapier 物理世界，连造带拆实测 **63 µs**——
+    /// 每帧两三次 park 就是每帧一大截白烧。
+    ///
+    /// 所以空壳**只造一次**，之后在 `spare` 与调用方的位置之间来回倒：
+    /// park 时从 `spare` 取出来顶上，[`Drop`] 时再收回 `spare`。稳态下
+    /// 这条路径上一次分配都没有，只剩几次结构体 memcpy。
     ///
     /// 输入不需要这份小心：`Input::default()` 只是几个空表，直接 `take` 即可。
     pub(crate) fn park(
         scene: &'a mut Scene,
         input: &'a mut Input,
         host: &'a mut Host,
-        spare: &mut Scene,
+        spare: &'a mut Option<Scene>,
         dt: f32,
         elapsed: f32,
     ) -> Self {
-        std::mem::swap(scene, spare);
-        let real_scene = std::mem::take(spare);
+        // 取不出空壳只可能是第一次 park（或者上一个凭证被 forget 了），
+        // 那就现造一个——这是整条路径上唯一会分配的地方。
+        let empty = spare.take().unwrap_or_default();
+        let real_scene = std::mem::replace(scene, empty);
 
         let mut parked = std::mem::take(host);
         parked.scene = Some(real_scene);
@@ -153,6 +167,7 @@ impl<'a> HostGuard<'a> {
             owner_scene: scene,
             owner_input: input,
             owner_host: host,
+            owner_spare: spare,
         }
     }
 }
@@ -197,8 +212,13 @@ mod test {
     use kmath::Vec3;
 
     /// 建一套「场景 + 输入 + 宿主 + 空壳」。
-    fn stage() -> (Scene, Input, Host, Scene) {
-        (Scene::new(), Input::new(), Host::default(), Scene::new())
+    fn stage() -> (Scene, Input, Host, Option<Scene>) {
+        (
+            Scene::new(),
+            Input::new(),
+            Host::default(),
+            Some(Scene::new()),
+        )
     }
 
     #[test]
@@ -219,6 +239,28 @@ mod test {
             Vec3::Y * 42.0,
             "改动没搬回来"
         );
+    }
+
+    #[test]
+    fn the_empty_shell_is_recycled_not_rebuilt() {
+        // 空壳要是每次 park 都现造一个、收场时又析构掉，那就是每帧连造带拆
+        // 一整个 rapier 物理世界——实测 63 µs，一帧两三次 park 就很可观。
+        //
+        // 直接量时间的断言在 CI 上必然会闪，所以改成给空壳做个记号：
+        // 它要是被换成新造的，记号就没了。
+        let (mut scene, mut input, mut host, mut spare) = stage();
+        let mark = spare
+            .as_mut()
+            .expect("空壳")
+            .add_node(Node::new("shell-marker"));
+
+        for _ in 0..3 {
+            let guard = HostGuard::park(&mut scene, &mut input, &mut host, &mut spare, 0.0, 0.0);
+            drop(guard);
+        }
+
+        let shell = spare.as_ref().expect("空壳没还回来");
+        assert_eq!(shell[mark].name, "shell-marker", "空壳被重造了");
     }
 
     #[test]

@@ -143,6 +143,15 @@ impl From<Resource<Texture>> for MaterialValue {
 #[derive(Debug, Clone)]
 pub struct Material {
     id: Uuid,
+    /// 作者给它起的名字，通常来自 glTF 的 `materials[i].name`。
+    ///
+    /// 存在的理由是**按名字找到它**：美术在 Blender 里把头盔的皮革部分命名为
+    /// `LeatherPartsMat`，游戏侧就该能凭这个名字把那一块染成红色，而不必去数
+    /// 「第几个 primitive」——那个序号在美术重新导出一次之后就变了。
+    ///
+    /// 没有名字的材质（代码里现造的）是 [`None`]，不是空串：
+    /// 「没起名字」和「名字是空的」在按名字查找时是两回事。
+    name: Option<String>,
     blend_mode: BlendMode,
     /// 内容版本号，每次改动 +1。
     ///
@@ -183,11 +192,38 @@ impl Material {
     pub fn new() -> Self {
         Self {
             id: Uuid::new_v4(),
+            name: None,
             blend_mode: BlendMode::Opaque,
             version: 0,
             shader: None,
             values: FxHashMap::default(),
         }
+    }
+
+    /// 材质的名字，没有就是 [`None`]。
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// 改名字。
+    ///
+    /// 不 bump `version`：名字不参与渲染，改它没有必要让渲染器重建任何东西。
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = Some(name.into());
+    }
+
+    /// 链式版本的 [`set_name`](Self::set_name)。
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.set_name(name);
+        self
+    }
+
+    /// 名字是不是这个。
+    ///
+    /// 比 `material.name() == Some("X")` 顺手，而按名字比对正是这个字段
+    /// 存在的全部理由。
+    pub fn is_named(&self, name: &str) -> bool {
+        self.name.as_deref() == Some(name)
     }
 
     /// 创建标准材质：白色、非金属、中等粗糙度。
@@ -305,6 +341,15 @@ impl Material {
         self.with(standard::BASE_COLOR, color)
     }
 
+    /// 就地设置基础颜色。
+    ///
+    /// 和上面那个链式版本的区别只在借用形式，但差别很实在：运行时拿到的
+    /// 几乎总是 `&mut Material`（受击闪红、选中高亮、按名字染色），
+    /// 而链式版本要吃掉 `self`，在 `&mut` 后面用不了。
+    pub fn set_base_color(&mut self, color: Vec4) {
+        self.set(standard::BASE_COLOR, color);
+    }
+
     /// 金属度，未设置时为 `0.0`。
     pub fn metallic(&self) -> f32 {
         self.get(standard::METALLIC)
@@ -317,6 +362,11 @@ impl Material {
         self.with(standard::METALLIC, value)
     }
 
+    /// 就地设置金属度。
+    pub fn set_metallic(&mut self, value: f32) {
+        self.set(standard::METALLIC, value);
+    }
+
     /// 粗糙度，未设置时为 `0.5`。
     pub fn roughness(&self) -> f32 {
         self.get(standard::ROUGHNESS)
@@ -327,6 +377,11 @@ impl Material {
     /// 设置粗糙度。
     pub fn with_roughness(self, value: f32) -> Self {
         self.with(standard::ROUGHNESS, value)
+    }
+
+    /// 就地设置粗糙度。
+    pub fn set_roughness(&mut self, value: f32) {
+        self.set(standard::ROUGHNESS, value);
     }
 
     /// 基础颜色贴图。
@@ -405,6 +460,16 @@ impl Visit for Material {
 
         self.id.visit("Id", &mut region)?;
         kasset::visit_resource_option("Shader", &mut self.shader, &mut region)?;
+
+        // 名字是后加的字段。老存档里没有这块区域，读不到就当匿名——
+        // 为了一个不参与渲染的字符串让整个场景读不进来，不划算。
+        // 空串按「没起名字」处理，理由见 `Material::name`。
+        let mut name = self.name.clone().unwrap_or_default();
+        if name.visit("Name", &mut region).is_ok() {
+            self.name = (!name.is_empty()).then_some(name);
+        } else if region.is_reading() {
+            self.name = None;
+        }
 
         // `FxHashMap` 的 `Visit` 要求键值都实现 `Visit`，这里手工展开成
         // 「一个长度 + 若干个键值区域」，顺带保证读出来的顺序稳定。

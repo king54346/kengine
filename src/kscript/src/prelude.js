@@ -59,17 +59,31 @@ Vector3.BACK = () => new Vector3(0, 0, 1);
 // 直接返回一个普通 Vector3 的话，`.y += 1` 改的是那个临时副本，
 // 写完就被丢掉——脚本看起来在动，物体纹丝不动，而且不报错。
 class BoundVector3 {
+    // 用**私有字段**（`#`）存内部账本，而不是普通属性。
+    //
+    // 目的和原来那句 `Object.defineProperty(this, "_id", { enumerable: false })`
+    // 一样——脚本作者不该看见它，`JSON.stringify` 与 `for...in` 也不该带上它
+    // （`_save()` 里顺手存了个节点的话，存档里会多出一串没有意义的下标）。
+    // 区别在于代价：`defineProperty` 每次都要走一遍属性描述符的完整流程，
+    // 而 `self.position.y += dt` **每写一次就新建一个 BoundVector3**，
+    // 这条是脚本里最常走的路。私有字段是类的内建槽位，没有那套开销。
+    //
+    // 这条路径到底多贵，`benches/script.rs` 里有一档 `raw_bridge` 做对照：
+    // 它绕开整个包装层直接捅桥，两者的差值就是包装的价钱。
+    #id;
+    #field;
+
     constructor(id, field) {
-        Object.defineProperty(this, "_id", { value: id, enumerable: false });
-        Object.defineProperty(this, "_field", { value: field, enumerable: false });
+        this.#id = id;
+        this.#field = field;
     }
 
-    get x() { return __k.getComponent(this._id, this._field, 0); }
-    set x(v) { __k.setComponent(this._id, this._field, 0, v); }
-    get y() { return __k.getComponent(this._id, this._field, 1); }
-    set y(v) { __k.setComponent(this._id, this._field, 1, v); }
-    get z() { return __k.getComponent(this._id, this._field, 2); }
-    set z(v) { __k.setComponent(this._id, this._field, 2, v); }
+    get x() { return __k.getComponent(this.#id, this.#field, 0); }
+    set x(v) { __k.setComponent(this.#id, this.#field, 0, v); }
+    get y() { return __k.getComponent(this.#id, this.#field, 1); }
+    set y(v) { __k.setComponent(this.#id, this.#field, 1, v); }
+    get z() { return __k.getComponent(this.#id, this.#field, 2); }
+    set z(v) { __k.setComponent(this.#id, this.#field, 2, v); }
 
     // 下面这些和 Vector3 同名同义，直接借它的实现，省得两处维护。
     add(o) { return this.clone().add(o); }
@@ -91,23 +105,26 @@ const FIELD_SCALE = 1;
 
 // 一个场景节点。属性读写**立刻**作用在场景上。
 class Node {
+    // 私有字段，理由同 `BoundVector3`：`self` 每取一次就新建一个 Node。
+    #id;
+
     constructor(id) {
-        Object.defineProperty(this, "_id", { value: id, enumerable: false });
+        this.#id = id;
     }
 
-    get name() { return __k.getName(this._id); }
+    get name() { return __k.getName(this.#id); }
 
-    get valid() { return __k.isValid(this._id); }
+    get valid() { return __k.isValid(this.#id); }
 
-    get position() { return new BoundVector3(this._id, FIELD_POSITION); }
-    set position(v) { __k.setVec(this._id, FIELD_POSITION, v.x, v.y, v.z); }
+    get position() { return new BoundVector3(this.#id, FIELD_POSITION); }
+    set position(v) { __k.setVec(this.#id, FIELD_POSITION, v.x, v.y, v.z); }
 
-    get scale() { return new BoundVector3(this._id, FIELD_SCALE); }
-    set scale(v) { __k.setVec(this._id, FIELD_SCALE, v.x, v.y, v.z); }
+    get scale() { return new BoundVector3(this.#id, FIELD_SCALE); }
+    set scale(v) { __k.setVec(this.#id, FIELD_SCALE, v.x, v.y, v.z); }
 
     // 世界坐标是每帧算出来的派生值，只读。
     get globalPosition() {
-        const v = __k.getGlobalPosition(this._id);
+        const v = __k.getGlobalPosition(this.#id);
         return new Vector3(v[0], v[1], v[2]);
     }
 
@@ -115,51 +132,51 @@ class Node {
     //
     // `lookAt` 的读侧：转过去之后要「朝着那边走」的话得能问出方向来。
     get forward() {
-        const v = __k.getForward(this._id);
+        const v = __k.getForward(this.#id);
         return new Vector3(v[0], v[1], v[2]);
     }
 
-    get visible() { return __k.getVisible(this._id); }
-    set visible(v) { __k.setVisible(this._id, !!v); }
+    get visible() { return __k.getVisible(this.#id); }
+    set visible(v) { __k.setVisible(this.#id, !!v); }
 
     get linearVelocity() {
-        const v = __k.getLinvel(this._id);
+        const v = __k.getLinvel(this.#id);
         return new Vector3(v[0], v[1], v[2]);
     }
 
-    translate(v) { __k.translate(this._id, v.x, v.y, v.z); return this; }
-    rotateY(a) { __k.rotateY(this._id, a); return this; }
-    lookAt(target) { __k.lookAt(this._id, target.x, target.y, target.z); return this; }
+    translate(v) { __k.translate(this.#id, v.x, v.y, v.z); return this; }
+    rotateY(a) { __k.rotateY(this.#id, a); return this; }
+    lookAt(target) { __k.lookAt(this.#id, target.x, target.y, target.z); return this; }
 
-    applyImpulse(v) { __k.applyImpulse(this._id, v.x, v.y, v.z); return this; }
-    setLinearVelocity(v) { __k.setLinvel(this._id, v.x, v.y, v.z); return this; }
+    applyImpulse(v) { __k.applyImpulse(this.#id, v.x, v.y, v.z); return this; }
+    setLinearVelocity(v) { __k.setLinvel(this.#id, v.x, v.y, v.z); return this; }
 
     // ── 动画 ──
     //
     // 名字取剪辑名，和 glTF 里导出的一致。找不到时返回 false 而不是抛异常，
     // 美术改个剪辑名不该让整个脚本停掉。
-    playAnimation(name) { return __k.playAnimation(this._id, String(name)); }
-    stopAnimation() { __k.setAnimationPlaying(this._id, false); return this; }
-    resumeAnimation() { __k.setAnimationPlaying(this._id, true); return this; }
-    get animationPlaying() { return __k.isAnimationPlaying(this._id); }
-    set animationSpeed(v) { __k.setAnimationSpeed(this._id, v); }
+    playAnimation(name) { return __k.playAnimation(this.#id, String(name)); }
+    stopAnimation() { __k.setAnimationPlaying(this.#id, false); return this; }
+    resumeAnimation() { __k.setAnimationPlaying(this.#id, true); return this; }
+    get animationPlaying() { return __k.isAnimationPlaying(this.#id); }
+    set animationSpeed(v) { __k.setAnimationSpeed(this.#id, v); }
 
     // ── 粒子 ──
-    startParticles() { __k.setParticlesPlaying(this._id, true); return this; }
-    stopParticles() { __k.setParticlesPlaying(this._id, false); return this; }
-    set emissionRate(v) { __k.setEmissionRate(this._id, v); }
-    burst(count) { __k.burstParticles(this._id, count === undefined ? 1 : count); return this; }
-    get particleCount() { return __k.particleCount(this._id); }
+    startParticles() { __k.setParticlesPlaying(this.#id, true); return this; }
+    stopParticles() { __k.setParticlesPlaying(this.#id, false); return this; }
+    set emissionRate(v) { __k.setEmissionRate(this.#id, v); }
+    burst(count) { __k.burstParticles(this.#id, count === undefined ? 1 : count); return this; }
+    get particleCount() { return __k.particleCount(this.#id); }
 
     // ── 音频 ──
-    playSound() { __k.playSound(this._id); return this; }
-    stopSound() { __k.stopSound(this._id); return this; }
-    set volume(v) { __k.setSoundGain(this._id, v); }
-    set pitch(v) { __k.setSoundPitch(this._id, v); }
-    set soundLooping(v) { __k.setSoundLooping(this._id, !!v); }
+    playSound() { __k.playSound(this.#id); return this; }
+    stopSound() { __k.stopSound(this.#id); return this; }
+    set volume(v) { __k.setSoundGain(this.#id, v); }
+    set pitch(v) { __k.setSoundPitch(this.#id, v); }
+    set soundLooping(v) { __k.setSoundLooping(this.#id, !!v); }
 
     // 名字取自 GDScript 的 `queue_free()`：删除在本次操作里立即生效。
-    queueFree() { __k.queueFree(this._id); }
+    queueFree() { __k.queueFree(this.#id); }
 
     getNode(name) { return getNode(name); }
 
@@ -173,7 +190,7 @@ class Node {
     // 拿到的是**对方那个实例本身**，所以能调它的方法、读它挂在 this 上的
     // 字段（闭包里的变量仍然够不着，那是 JS 的规矩）。
     get script() {
-        const found = globalThis.__instances[this._id];
+        const found = globalThis.__instances[this.#id];
         return found === undefined ? null : found;
     }
 

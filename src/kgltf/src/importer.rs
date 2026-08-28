@@ -1,7 +1,7 @@
 //! glTF 导入实现。
 
 use crate::{
-    model::{MeshPart, Model, ModelNode, ModelSkin, NodeTransform},
+    model::{GltfExtras, MeshPart, Model, ModelNode, ModelSkin, NodeTransform},
     uri,
 };
 use kanim::{AnimationClip, Channel, Curve, Interpolation, Track};
@@ -44,7 +44,35 @@ pub(crate) async fn import(
 
     Ok(Model::new(meshes, materials, nodes, roots)
         .with_skins(skins)
-        .with_animations(animations))
+        .with_animations(animations)
+        .with_extras(import_extras(&gltf)))
+}
+
+/// 把文件里挂着的 `extras` 原样收起来。
+///
+/// 不解析：规范只说它是一段任意 JSON，里面有什么全看导出它的工具
+/// （Blender 的自定义属性、关卡编辑器的标记……）。引擎替谁猜结构都是错的，
+/// 原文交给游戏自己解释。
+fn import_extras(gltf: &gltf::Gltf) -> GltfExtras {
+    /// `gltf` crate 把 extras 存成 `Option<Box<RawValue>>`，取原文即可。
+    fn text(extras: &gltf::json::Extras) -> Option<String> {
+        extras.as_ref().map(|raw| raw.get().to_string())
+    }
+
+    GltfExtras {
+        // 默认场景的 extras。没有默认场景时退回第一个——glTF 允许不指定，
+        // 而查看器一律显示第一个，这里跟着它走。
+        scene: gltf
+            .default_scene()
+            .or_else(|| gltf.scenes().next())
+            .and_then(|scene| text(scene.extras())),
+        nodes: gltf.nodes().map(|node| text(node.extras())).collect(),
+        meshes: gltf.meshes().map(|mesh| text(mesh.extras())).collect(),
+        materials: gltf
+            .materials()
+            .map(|material| text(material.extras()))
+            .collect(),
+    }
 }
 
 /// 从 `mesh.extras` 里读形变目标的名字。
@@ -347,6 +375,12 @@ fn import_materials(gltf: &gltf::Gltf, textures: &[Option<Resource<Texture>>]) -
                 if let Some(Some(texture)) = textures.get(index) {
                     material = material.with_base_color_texture(texture.clone());
                 }
+            }
+
+            // 名字留着：游戏侧要按「LeatherPartsMat」这种美术起的名字找到
+            // 具体某一块去改颜色。用序号找的话，美术重新导出一次就全错位了。
+            if let Some(name) = source.name() {
+                material.set_name(name);
             }
 
             material

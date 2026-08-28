@@ -231,6 +231,15 @@ impl Node {
         self.mesh.as_ref()
     }
 
+    /// 网格的可写引用。顶点动画、运行时改形状走它。
+    ///
+    /// 改完顶点位置记得 [`Mesh::recompute_bounds`]——包围盒不会自己跟着变，
+    /// 而剔除拿它当真相：不重算的话，物体会在还该看得见的时候被剔掉，
+    /// 或者反过来，包围盒大得离谱拖慢剔除。
+    pub fn mesh_mut(&mut self) -> Option<&mut Mesh> {
+        self.mesh.as_mut()
+    }
+
     /// 材质的只读引用。
     pub fn material(&self) -> Option<&Material> {
         self.material.as_ref()

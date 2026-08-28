@@ -370,9 +370,10 @@ impl App {
         let stats = runtime.renderer.stats();
 
         let mut exit_requested = false;
-        // 后处理设置从渲染器取出来交给插件改，跑完再写回去。
+        // 后处理与阴影级联从渲染器取出来交给插件改，跑完再写回去。
         // 直接借渲染器的话会和 `runtime.scene` 的可变借用打架。
         let mut post = runtime.renderer.post_settings();
+        let mut shadow = runtime.renderer.shadow_cascades();
 
         for (system_stage, system) in &mut self.systems {
             if *system_stage != stage {
@@ -392,12 +393,16 @@ impl App {
                 ui: &mut runtime.ui,
                 ui_input: &runtime.ui_input,
                 post: &mut post,
+                shadow: &mut shadow,
                 exit_requested: &mut exit_requested,
             };
             system(&mut context);
         }
         if post != runtime.renderer.post_settings() {
             runtime.renderer.set_post_settings(post);
+        }
+        if shadow != runtime.renderer.shadow_cascades() {
+            runtime.renderer.set_shadow_cascades(shadow);
         }
 
         exit_requested
@@ -424,9 +429,10 @@ impl App {
         let elapsed = now.duration_since(runtime.start_time).as_secs_f32();
         let stats = runtime.renderer.stats();
 
-        // 后处理设置交给插件改，跑完写回。直接借渲染器会和
+        // 后处理与阴影级联交给插件改，跑完写回。直接借渲染器会和
         // `runtime.scene` 的可变借用打架。
         let mut post = runtime.renderer.post_settings();
+        let mut shadow = runtime.renderer.shadow_cascades();
 
         let mut exit_requested = false;
         for plugin in &mut self.plugins {
@@ -444,12 +450,16 @@ impl App {
                 ui: &mut runtime.ui,
                 ui_input: &runtime.ui_input,
                 post: &mut post,
+                shadow: &mut shadow,
                 exit_requested: &mut exit_requested,
             };
             callback(plugin, &mut context);
         }
         if post != runtime.renderer.post_settings() {
             runtime.renderer.set_post_settings(post);
+        }
+        if shadow != runtime.renderer.shadow_cascades() {
+            runtime.renderer.set_shadow_cascades(shadow);
         }
 
         exit_requested

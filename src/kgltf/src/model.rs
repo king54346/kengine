@@ -95,6 +95,63 @@ pub struct ModelNode {
     pub skin: Option<usize>,
 }
 
+/// glTF 文件里挂着的 `extras`，按原文保留。
+///
+/// `extras` 是 glTF 规范留给各家自己塞东西的口袋：Blender 的自定义属性、
+/// 关卡编辑器导出的标记（「这是出生点」「这扇门锁着」）都走它。规范只说它是
+/// 一段任意 JSON，**没有约定任何结构**，所以引擎能做的最多也就是原样留下来，
+/// 由游戏自己解释。
+///
+/// 因此这里存的是**未解析的 JSON 文本**。引擎不替谁选 JSON 库，也不猜里面
+/// 该有什么字段——那是游戏的事。
+///
+/// 各个 `Vec` 按对应资源的序号对齐（节点序号、材质序号……），没有 extras 的
+/// 那一项是 [`None`]。
+///
+/// 这套东西**只住在 kgltf**：`extras` 是 glTF 特有的概念，把它塞进
+/// [`Mesh`] 或 [`Material`] 会让那两个通用类型背上一个只有一种格式才有的字段。
+/// （材质的**名字**是另一回事——任何格式的材质都可以有名字，所以那个字段
+/// 在 `kmaterial` 里。）
+#[derive(Debug, Clone, Default)]
+pub struct GltfExtras {
+    /// 场景级：`scenes[i].extras`。
+    pub scene: Option<String>,
+    /// 按节点序号：`nodes[i].extras`。
+    pub nodes: Vec<Option<String>>,
+    /// 按 glTF 的 mesh 序号：`meshes[i].extras`。
+    ///
+    /// 注意是 **glTF 的 mesh 序号**，不是 [`Model::meshes`] 的下标：
+    /// 一个 glTF mesh 含多个 primitive 时会展开成好几张 [`Mesh`]。
+    pub meshes: Vec<Option<String>>,
+    /// 按材质序号：`materials[i].extras`。
+    pub materials: Vec<Option<String>>,
+}
+
+impl GltfExtras {
+    /// 一个节点的 extras。
+    pub fn node(&self, index: usize) -> Option<&str> {
+        self.nodes.get(index)?.as_deref()
+    }
+
+    /// 一个材质的 extras。
+    pub fn material(&self, index: usize) -> Option<&str> {
+        self.materials.get(index)?.as_deref()
+    }
+
+    /// 一个 glTF mesh 的 extras。
+    pub fn mesh(&self, index: usize) -> Option<&str> {
+        self.meshes.get(index)?.as_deref()
+    }
+
+    /// 这个文件里一条 extras 都没有。
+    pub fn is_empty(&self) -> bool {
+        self.scene.is_none()
+            && self.nodes.iter().all(Option::is_none)
+            && self.meshes.iter().all(Option::is_none)
+            && self.materials.iter().all(Option::is_none)
+    }
+}
+
 /// 一个导入完成的模型。
 #[derive(Debug, Clone)]
 pub struct Model {
@@ -106,6 +163,7 @@ pub struct Model {
     pub(crate) skins: Vec<ModelSkin>,
     /// 动画剪辑。用 [`Arc`] 是为了让同一个模型的多个实例共享关键帧数据。
     pub(crate) animations: Arc<Vec<AnimationClip>>,
+    pub(crate) extras: GltfExtras,
 }
 
 impl Model {
@@ -126,7 +184,22 @@ impl Model {
             roots,
             skins: Vec::new(),
             animations: Arc::new(Vec::new()),
+            extras: GltfExtras::default(),
         }
+    }
+
+    /// 附上 glTF 的 `extras`。
+    pub fn with_extras(mut self, extras: GltfExtras) -> Self {
+        self.extras = extras;
+        self
+    }
+
+    /// 文件里挂着的 `extras`，原文保留。
+    ///
+    /// 配合 [`Scene::instantiate_model_mapped`](../kscene/struct.Scene.html#method.instantiate_model_mapped)
+    /// 就能把「第几个节点上写着什么标记」对应到实例出来的场景节点上。
+    pub fn extras(&self) -> &GltfExtras {
+        &self.extras
     }
 
     /// 附上骨架。

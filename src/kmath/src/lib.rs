@@ -10,10 +10,12 @@
 //! assert!((t - 5.0).abs() < 1e-6);
 //! ```
 
+mod bounding;
 mod bvh;
 mod geometry;
 mod visit;
 
+pub use bounding::{Aabb2d, BoundingCircle, Ray2d};
 pub use bvh::Bvh;
 pub use geometry::{Aabb, Intersection, Plane};
 
@@ -35,6 +37,9 @@ pub use glam::{
     DVec2,
     DVec3,
     DVec4,
+    // 欧拉角的轴序。`Quat::from_euler` / `to_euler` 的第一个参数，
+    // 少了它那两个函数在外面就没法调。
+    EulerRot,
     IVec2,
     IVec3,
     IVec4,
@@ -234,6 +239,7 @@ pub mod prelude {
         DVec2,
         DVec3,
         DVec4,
+        EulerRot,
         FRAC_PI_2,
         FRAC_PI_4,
         IVec2,

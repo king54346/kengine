@@ -335,6 +335,20 @@ impl Visit for MeshData {
 pub struct Mesh {
     id: Uuid,
     data: Arc<MeshData>,
+    /// 内容版本号。**独占**这份几何时每改一次 +1，id 保持不变。
+    ///
+    /// 存在的理由是**顶点动画**：水面、旗帜、每帧变形的软体，都要每帧改一遍
+    /// 顶点。如果每改一次就换个新 `id`，渲染器那边等于每帧看见一张全新的
+    /// 网格——重新分配一整个顶点缓冲、重新上传，而旧的那些还留在缓存里
+    /// （那张表只进不出）。跑上一分钟就是几千个缓冲，显存直接吃光。
+    ///
+    /// 换成 `(id, version)` 之后，同一个 id 的缓冲可以原地 `write_buffer`
+    /// 覆写，一次分配用到底。
+    ///
+    /// 共享（`Arc` 计数 > 1）时不能这么干：那份几何还有别人在用，改它得先
+    /// 复制一份，而复制出来的确实是另一份几何，所以那条路径仍然换新 `id`。
+    /// 于是 `(id, version)` 相同 ⟺ 内容相同这条不变量始终成立。
+    version: u64,
     /// 几何的出处；程序化生成的网格没有出处。
     source: Option<MeshSource>,
 }
@@ -359,20 +373,44 @@ impl Mesh {
                 morph_weights: Vec::new(),
                 aabb,
             }),
+            version: 0,
             source: None,
         }
     }
 
-    /// 取得可写的几何，并换一个新 `id`。
+    /// 取得可写的几何，顺带更新这份网格的身份。
     ///
-    /// 换 id 是必须的：几何被 [`Arc`] 共享着，改完之后这份 `Mesh` 的内容
-    /// 已经和其它副本不同了，再共用一个显存缓存键就会画出别人的顶点。
+    /// 身份分两种走法，取决于这块几何是不是**只有自己在用**：
+    ///
+    /// - 独占：原地改，`id` 不变、`version` +1。顶点动画走这条，
+    ///   显存里那个缓冲可以原地覆写。
+    /// - 共享：`Arc` 会先复制一份，那确实是另一份几何了，于是换新 `id`。
+    ///   不换的话，两份内容不同的网格共用一个缓存键，会画出别人的顶点。
     fn data_mut(&mut self) -> &mut MeshData {
-        self.id = Uuid::new_v4();
-        // 出处也一并作废：几何一改，这就不再是「那个资源的第 i 个网格」了。
+        // 出处一并作废：几何一改，这就不再是「那个资源的第 i 个网格」了。
         // 留着的话，场景序列化会写一行引用，读回来却是未经修改的原始几何。
         self.source = None;
+
+        if Arc::get_mut(&mut self.data).is_some() {
+            // 独占：原地改，id 不变，只 bump 版本。顶点动画走的是这条——
+            // 每帧换新 id 会让渲染器每帧新建一整个顶点缓冲，而它的缓存
+            // 只进不出。
+            self.version = self.version.wrapping_add(1);
+        } else {
+            // 有别人共享着这份几何，改它必须先复制。复制出来的是另一份
+            // 几何，所以换新 id、版本从头起算。
+            self.id = Uuid::new_v4();
+            self.version = 0;
+        }
+
         Arc::make_mut(&mut self.data)
+    }
+
+    /// 内容版本号。和 [`id`](Self::id) 合起来才是这份几何的完整身份。
+    ///
+    /// 渲染器拿 `(id, version)` 判断显存里那份还新不新鲜。
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     /// 标记这份几何的出处。由模型导入器调用。
@@ -1150,6 +1188,44 @@ mod test {
 
         assert_ne!(mesh.vertices()[0].color, copy.vertices()[0].color);
         assert!(!mesh.shares_data_with(&copy), "写时复制没有分家");
+    }
+
+    #[test]
+    fn editing_an_exclusive_mesh_keeps_its_id_and_bumps_the_version() {
+        // 顶点动画（水面、旗帜）每帧都要改一遍顶点。每改一次换个新 id 的话，
+        // 渲染器每帧看见的都是一张全新的网格——重新分配一整个顶点缓冲，
+        // 而它的显存缓存只进不出，跑一分钟就吃掉几个 G。
+        let mut mesh = Mesh::cube();
+        let id = mesh.id();
+        // 不假设出厂版本是 0：构造器自己就会改一次几何（`cube()` 末尾
+        // 要算切线），版本那时已经走过一格。测相对变化才不会被这种
+        // 内部细节绊倒。
+        let before = mesh.version();
+
+        mesh.vertices_mut()[0].position[1] = 5.0;
+
+        assert_eq!(mesh.id(), id, "独占的网格改顶点不该换 id");
+        assert_eq!(mesh.version(), before + 1, "版本该往前走一格");
+
+        mesh.vertices_mut()[1].position[1] = 6.0;
+        assert_eq!(mesh.version(), before + 2, "每改一次涨一格");
+        assert_eq!(mesh.id(), id);
+    }
+
+    #[test]
+    fn editing_a_shared_mesh_still_forks_it() {
+        // 独占才原地改。有别人共享着这份几何时，改它必须复制——
+        // 复制出来的确实是另一份几何，不换 id 的话两份内容不同的网格
+        // 会共用一个显存缓存键。
+        let original = Mesh::cube();
+        let before = original.version();
+        let mut copy = original.clone();
+
+        copy.vertices_mut()[0].position[1] = 5.0;
+
+        assert_ne!(copy.id(), original.id(), "共享时必须换 id");
+        assert_eq!(copy.version(), 0, "分家出来的是新身份，版本重新起算");
+        assert_eq!(original.version(), before, "原网格不该被牵连");
     }
 
     #[test]

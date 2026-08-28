@@ -85,6 +85,11 @@ pub struct Context<'a> {
     /// 改了立刻生效，下一帧就是新的。移植别的引擎的场景时经常要动它——
     /// 那些例子多半没开辉光，而这边默认开着。
     pub post: &'a mut krender::PostSettings,
+    /// 阴影级联的划分参数。改了下一帧生效。
+    ///
+    /// 场景尺度和默认那套差得远时一定要调：默认按几十米的户外场景配，
+    /// 照一个 60 厘米高的模型时，影子会因为精度全撒在空地上而糊成一团。
+    pub shadow: &'a mut krender::CascadeSettings,
     pub(crate) exit_requested: &'a mut bool,
 }
 

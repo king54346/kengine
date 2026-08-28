@@ -21,6 +21,9 @@ mod ui;
 
 pub use post::PostSettings;
 pub use tonemap::ToneMapping;
+// 级联参数本身属于 `klight`，但调它的人是冲着「渲染器怎么画阴影」来的，
+// 和 `PostSettings` 一样从这里导出，省得调用方为一个结构体多认一个 crate。
+pub use klight::cascade::CascadeSettings;
 
 use gizmo::GizmoResources;
 use kcamera::{Camera, Frustum};
@@ -196,6 +199,12 @@ struct GpuMesh {
     skin_buffer: Option<wgpu::Buffer>,
     index_buffer: wgpu::Buffer,
     index_count: u32,
+    /// 这份显存对应的几何版本，见 [`kmesh::Mesh::version`]。
+    ///
+    /// 顶点动画（水面、旗帜）会每帧改同一张网格的顶点，那时 `id` 不变、
+    /// 版本递增。有这个字段才能判断「显存里那份还新不新鲜」，
+    /// 也才能原地覆写而不是每帧新建一个缓冲。
+    version: u64,
     /// 本网格的形变增量在全局形变缓冲中的起点。
     morph_offset: u32,
     /// 形变目标数量，0 表示没有形变。
@@ -1381,6 +1390,51 @@ impl Renderer {
         self.post.set_settings(settings);
     }
 
+    /// 顶点被改过的网格：把新数据送进已有的显存。
+    ///
+    /// 快路径是原地 `write_buffer`——顶点动画每帧都要走一遍，重新分配一个
+    /// 几十万顶点的缓冲太贵。只有顶点数或索引数变了（缓冲装不下）才重建，
+    /// 那种改动罕见得多。
+    ///
+    /// 无论走哪条，都是**覆盖同一个 key**：早先这里是「认不出就插一条新的」，
+    /// 而那张表只进不出——每帧改一次顶点就每帧漏一个缓冲，跑一分钟吃掉几个 G。
+    fn refresh_mesh(&mut self, mesh: &kmesh::Mesh) {
+        let vertices: &[u8] = bytemuck::cast_slice(mesh.vertices());
+        let indices: &[u8] = bytemuck::cast_slice(mesh.indices());
+
+        if let Some(gpu) = self.meshes.get_mut(&mesh.id())
+            && gpu.vertex_buffer.size() as usize == vertices.len()
+            && gpu.index_buffer.size() as usize == indices.len()
+        {
+            self.queue.write_buffer(&gpu.vertex_buffer, 0, vertices);
+            self.queue.write_buffer(&gpu.index_buffer, 0, indices);
+            gpu.index_count = mesh.index_count();
+            gpu.version = mesh.version();
+            return;
+        }
+
+        // 尺寸变了，缓冲装不下。丢掉这条，下面的常规路径会按新尺寸建一个
+        // 并覆盖同一个 key。
+        self.meshes.remove(&mesh.id());
+    }
+
+    /// 阴影级联的划分参数。
+    pub fn shadow_cascades(&self) -> klight::cascade::CascadeSettings {
+        self.shadow.cascades
+    }
+
+    /// 修改阴影级联的划分参数，下一帧生效。
+    ///
+    /// 场景尺度和默认那套差得远时一定要调。默认是按几十米的户外场景配的，
+    /// 拿去照一个 60 厘米高的模型，整张阴影图里只有几个纹素落在它身上，
+    /// 影子糊成一团——这不是分辨率不够，是级联把精度全撒在空地上了。
+    /// 反过来，大世界里不调大 `max_distance` 则是远处直接没有影子。
+    ///
+    /// 只改数值，不重建任何 GPU 资源（那是 `resolution` 才需要的事）。
+    pub fn set_shadow_cascades(&mut self, settings: klight::cascade::CascadeSettings) {
+        self.shadow.cascades = settings;
+    }
+
     /// 上一帧的渲染统计。
     pub fn stats(&self) -> RenderStats {
         self.stats
@@ -1592,6 +1646,16 @@ impl Renderer {
             stats.triangles += item.mesh.triangle_count() as u32;
 
             let mesh = item.mesh;
+            // 显存里那份是不是这一版。版本对不上说明顶点被改过
+            // （顶点动画每帧都会），要么原地覆写、要么重建。
+            let stale = self
+                .meshes
+                .get(&mesh.id())
+                .is_some_and(|gpu| gpu.version != mesh.version());
+            if stale {
+                self.refresh_mesh(mesh);
+            }
+
             if !self.meshes.contains_key(&mesh.id()) {
                 // 形变增量是随网格一次性上传的静态数据，追加到全局缓冲末尾。
                 let (morph_offset, morph_count) = self.upload_morph_targets(mesh);
@@ -1600,7 +1664,11 @@ impl Renderer {
                         &wgpu::util::BufferInitDescriptor {
                             label: Some("kengine vertex buffer"),
                             contents: bytemuck::cast_slice(mesh.vertices()),
-                            usage: wgpu::BufferUsages::VERTEX,
+                            // COPY_DST 是给顶点动画留的：几何改了之后
+                            // `refresh_mesh` 要原地覆写这块缓冲，而不是
+                            // 每帧重新分配一个。不带这个标志 wgpu 会拒绝
+                            // `write_buffer`。
+                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                         },
                     ),
                     // 蒙皮属性单独一路顶点缓冲，静态网格没有这一路。
@@ -1616,10 +1684,11 @@ impl Renderer {
                         &wgpu::util::BufferInitDescriptor {
                             label: Some("kengine index buffer"),
                             contents: bytemuck::cast_slice(mesh.indices()),
-                            usage: wgpu::BufferUsages::INDEX,
+                            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
                         },
                     ),
                     index_count: mesh.index_count(),
+                    version: mesh.version(),
                     morph_offset,
                     morph_count,
                 };

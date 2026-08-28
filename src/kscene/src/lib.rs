@@ -415,6 +415,24 @@ impl Scene {
     /// 模型有多个根节点时，会额外建一个容器节点把它们收拢，
     /// 这样调用方拿到的永远是单个句柄。
     pub fn instantiate_model(&mut self, model: &Model, parent: Handle<Node>) -> Handle<Node> {
+        self.instantiate_model_mapped(model, parent).0
+    }
+
+    /// 同 [`instantiate_model`](Self::instantiate_model)，另外交出
+    /// 「模型节点序号 → 场景句柄」的对照表。
+    ///
+    /// 这张表实例化时本来就要建（骨架的关节、动画的目标都按序号引用），
+    /// 只是原先用完就丢了。想按 **glTF 里的节点序号**找到实例出来的那个节点时
+    /// 要它——典型场景是读 glTF 的 `extras`（见
+    /// [`Model::extras`](kgltf::Model::extras)）：那些标记是按节点序号挂的，
+    /// 拿不到对照表就只能靠名字猜，而 glTF 不保证节点名唯一。
+    ///
+    /// 没被实例化的序号是 [`Handle::NONE`]。
+    pub fn instantiate_model_mapped(
+        &mut self,
+        model: &Model,
+        parent: Handle<Node>,
+    ) -> (Handle<Node>, Vec<Handle<Node>>) {
         let roots = model.roots();
 
         // 模型里的节点序号到场景句柄的映射。骨架的关节、动画的目标都是按序号引用的，
@@ -433,8 +451,8 @@ impl Scene {
         };
 
         self.attach_skins(model, &mapping);
-        self.attach_animator(model, root, mapping);
-        root
+        self.attach_animator(model, root, mapping.clone());
+        (root, mapping)
     }
 
     /// 给实例化出来的蒙皮网格节点挂上骨架。
@@ -550,6 +568,30 @@ impl Scene {
         }
 
         handle
+    }
+
+    /// 一个节点的整棵子树，**不含它自己**，深度优先。
+    ///
+    /// 实例化一个模型之后想「把这一整棵都怎么样」时用它：模型进来是一棵树，
+    /// 而调用方手里只有根句柄。自己写栈遍历也就七八行，但每个用到的地方
+    /// 都写一遍，就会有人漏掉「边遍历边改」的借用问题——所以先收集成
+    /// [`Vec`] 再返回，遍历期间随便改场景。
+    ///
+    /// 句柄无效时返回空。
+    pub fn descendants(&self, handle: Handle<Node>) -> Vec<Handle<Node>> {
+        let mut out = Vec::new();
+        let mut stack: Vec<Handle<Node>> = match self.try_get(handle) {
+            Some(node) => node.children.clone(),
+            None => return out,
+        };
+
+        while let Some(current) = stack.pop() {
+            out.push(current);
+            if let Some(node) = self.try_get(current) {
+                stack.extend_from_slice(&node.children);
+            }
+        }
+        out
     }
 
     /// 按名称查找第一个匹配的节点。
