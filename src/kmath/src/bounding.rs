@@ -23,7 +23,7 @@
 //! 问题就退化成「一条射线打一个膨胀后的静态形状」——两个盒子的扫掠因此
 //! 不必真的沿路径采样。
 
-use crate::Vec2;
+use crate::{Aabb, Plane, Vec2, Vec3};
 
 /// 二维轴对齐包围盒。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -336,6 +336,75 @@ impl Ray2d {
     }
 }
 
+/// 三维射线：一个起点加一个**归一化**的方向。
+///
+/// 和 [`Ray2d`] 是一对。三维这边最常见的来路是[相机的屏幕射线]，
+/// 拾取、点选、拖拽都从那里开始。
+///
+/// [相机的屏幕射线]: ../kcamera/struct.Camera.html#method.screen_ray
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ray3d {
+    /// 起点。
+    pub origin: Vec3,
+    /// 方向，构造时已归一化。
+    pub direction: Vec3,
+}
+
+impl Ray3d {
+    /// 构造一条射线，方向会被归一化。零向量兜底成 `-Z`（本引擎的「前方」）。
+    pub fn new(origin: Vec3, direction: Vec3) -> Self {
+        Self {
+            origin,
+            direction: direction.try_normalize().unwrap_or(Vec3::NEG_Z),
+        }
+    }
+
+    /// 射线上距起点 `distance` 处的点。
+    pub fn at(&self, distance: f32) -> Vec3 {
+        self.origin + self.direction * distance
+    }
+
+    /// 打一个轴对齐盒子，返回命中距离。起点在盒内时是 `0.0`。
+    ///
+    /// 和二维那版同一套板块法，只是多了一个轴。
+    pub fn hit_aabb(&self, aabb: &Aabb, max: f32) -> Option<f32> {
+        let inverse = Vec3::new(
+            1.0 / self.direction.x,
+            1.0 / self.direction.y,
+            1.0 / self.direction.z,
+        );
+        let t1 = (aabb.min - self.origin) * inverse;
+        let t2 = (aabb.max - self.origin) * inverse;
+
+        let near = t1.min(t2);
+        let far = t1.max(t2);
+
+        let enter = near.x.max(near.y).max(near.z).max(0.0);
+        let exit = far.x.min(far.y).min(far.z);
+
+        if enter > exit || exit < 0.0 || enter > max {
+            return None;
+        }
+        Some(enter)
+    }
+
+    /// 打一个无限大的平面，返回命中距离。
+    ///
+    /// 平行于平面（或背对着它）时返回 [`None`]。
+    ///
+    /// 二维编辑器最常用的一条：把鼠标的屏幕射线打到 `z = 0` 平面上，
+    /// 就得到了鼠标在世界里的位置。
+    pub fn hit_plane(&self, plane: &Plane, max: f32) -> Option<f32> {
+        let facing = plane.normal.dot(self.direction);
+        // 几乎平行：交点要么不存在，要么远在天边且数值上完全不可信。
+        if facing.abs() < 1e-6 {
+            return None;
+        }
+        let distance = -(plane.normal.dot(self.origin) + plane.d) / facing;
+        (distance >= 0.0 && distance <= max).then_some(distance)
+    }
+}
+
 impl Aabb2d {
     /// 这个盒子沿 `direction` 移动，最多走 `max`，撞上 `target` 的距离。
     ///
@@ -537,5 +606,57 @@ mod tests {
         let wall = aabb(0.0, 0.0, 1.0, 5.0);
 
         assert_eq!(bullet.sweep_to(Vec2::X, 5.0, &wall), None);
+    }
+
+    // ── 三维 ──
+
+    #[test]
+    fn a_3d_ray_hits_a_box() {
+        let ray = Ray3d::new(Vec3::new(0.0, 0.0, 10.0), Vec3::NEG_Z);
+        let target = Aabb::from_center_half_extents(Vec3::ZERO, Vec3::ONE);
+
+        assert_eq!(ray.hit_aabb(&target, 100.0), Some(9.0));
+        assert_eq!(ray.hit_aabb(&target, 5.0), None, "超出最大距离");
+    }
+
+    #[test]
+    fn a_3d_ray_meets_a_plane() {
+        // 二维编辑器最常走的一条：屏幕射线打到 z = 0 平面上取世界坐标。
+        let ray = Ray3d::new(Vec3::new(1.0, 2.0, 5.0), Vec3::NEG_Z);
+        let plane = Plane {
+            normal: Vec3::Z,
+            d: 0.0,
+        };
+
+        let distance = ray.hit_plane(&plane, 100.0).expect("该打中");
+        let point = ray.at(distance);
+
+        assert!((distance - 5.0).abs() < 1e-5);
+        assert!(point.z.abs() < 1e-5, "交点不在平面上：{point}");
+        assert!((point.x - 1.0).abs() < 1e-5 && (point.y - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_ray_parallel_to_a_plane_misses_instead_of_returning_infinity() {
+        // 平行时那个除法会得到 ±inf，交点「在无穷远处」——当成没打中，
+        // 否则调用方会拿着一个坐标是 inf 的点接着算，一路污染下去。
+        let ray = Ray3d::new(Vec3::new(0.0, 0.0, 5.0), Vec3::X);
+        let plane = Plane {
+            normal: Vec3::Z,
+            d: 0.0,
+        };
+
+        assert_eq!(ray.hit_plane(&plane, 1000.0), None);
+    }
+
+    #[test]
+    fn a_plane_behind_the_ray_is_not_hit() {
+        let ray = Ray3d::new(Vec3::new(0.0, 0.0, 5.0), Vec3::Z);
+        let plane = Plane {
+            normal: Vec3::Z,
+            d: 0.0,
+        };
+
+        assert_eq!(ray.hit_plane(&plane, 1000.0), None, "平面在身后");
     }
 }

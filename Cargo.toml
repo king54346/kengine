@@ -140,5 +140,9 @@ name = "bounding_2d"
 path = "examples/kengine/math/bounding_2d.rs"
 
 [[example]]
+name = "cubic_splines"
+path = "examples/kengine/math/cubic_splines.rs"
+
+[[example]]
 name = "skinning_blending"
 path = "examples/kengine/skinning_blending.rs"

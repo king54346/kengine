@@ -12,11 +12,18 @@
 
 mod bounding;
 mod bvh;
+mod curve;
 mod geometry;
 mod visit;
 
-pub use bounding::{Aabb2d, BoundingCircle, Ray2d};
+pub use bounding::{Aabb2d, BoundingCircle, Ray2d, Ray3d};
 pub use bvh::Bvh;
+// 曲线类型一律带 `Cubic` 前缀：`kanim` 里已经有一个 `Curve`（动画通道的
+// 关键帧序列），两者在 `kengine::prelude` 里会碰面。
+pub use curve::{
+    CubicBSpline, CubicBezier, CubicCardinalSpline, CubicCurve, CubicHermite, CubicSegment,
+    NotEnoughPoints, Point as CurvePoint,
+};
 pub use geometry::{Aabb, Intersection, Plane};
 
 // ── Re-exports ────────────────────────────────────────────────────────────────

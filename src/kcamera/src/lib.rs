@@ -204,6 +204,56 @@ impl Camera {
             Projection::Orthographic { .. } => None,
         }
     }
+
+    /// 从屏幕上一个像素射出去的世界空间射线。
+    ///
+    /// 这是**拾取**的起点：鼠标点选、悬停高亮、拖拽，全都是先拿到这条射线，
+    /// 再拿它去和场景里的东西求交（物理体走
+    /// [`Scene::cast_ray`](../kscene/struct.Scene.html#method.cast_ray)，
+    /// 纯几何的走 [`Ray3d`](kmath::Ray3d) 自己的那几个方法）。
+    ///
+    /// - `screen`：像素坐标，**原点在左上角**，和窗口事件给的一致；
+    /// - `viewport`：视口尺寸（像素）；
+    /// - `camera_to_world`：相机节点的世界变换，也就是
+    ///   [`Scene::world_matrix`](../kscene/struct.Scene.html#method.world_matrix)
+    ///   给的那个矩阵。
+    ///
+    /// 两种投影都支持：透视相机的射线从眼睛发散出去，正交相机的则是一束
+    /// 平行线里的一条。
+    ///
+    /// # 为什么要连近远两点
+    ///
+    /// 直接拿「相机位置 → 反投影出来的点」当射线，对透视相机成立，对正交
+    /// 相机是错的——正交投影下所有射线平行，起点根本不在相机原点。
+    /// 反投影近平面与远平面上的两个点再连起来，两种投影都对。
+    pub fn screen_ray(
+        &self,
+        screen: kmath::Vec2,
+        viewport: kmath::Vec2,
+        camera_to_world: Mat4,
+    ) -> kmath::Ray3d {
+        // 视口退化时给一条朝前的射线，别让 0 除法把结果污染成 NaN。
+        if !(viewport.x > 0.0 && viewport.y > 0.0) {
+            let origin = camera_to_world.w_axis.truncate();
+            return kmath::Ray3d::new(origin, -camera_to_world.z_axis.truncate());
+        }
+
+        // 像素 → NDC。y 要翻过来：屏幕原点在左上、y 向下，NDC 原点在中心、
+        // y 向上。漏掉这一步的表现是「点上面选中下面」，上下颠倒。
+        let ndc = kmath::Vec2::new(
+            screen.x / viewport.x * 2.0 - 1.0,
+            1.0 - screen.y / viewport.y * 2.0,
+        );
+
+        let aspect = viewport.x / viewport.y;
+        let clip_to_world = camera_to_world * self.projection_matrix(aspect).inverse();
+
+        // wgpu 的 NDC 深度是 [0, 1]：0 是近平面，1 是远平面。
+        let near = clip_to_world.project_point3(Vec3::new(ndc.x, ndc.y, 0.0));
+        let far = clip_to_world.project_point3(Vec3::new(ndc.x, ndc.y, 1.0));
+
+        kmath::Ray3d::new(near, far - near)
+    }
 }
 
 /// 视锥的六个面。法线一律指向视锥内部，因此「在所有面的正侧」即为可见。
@@ -464,5 +514,108 @@ mod test {
     fn fov_only_applies_to_perspective() {
         assert_eq!(Camera::perspective(75.0).fov_y_degrees(), Some(75.0));
         assert_eq!(Camera::orthographic(5.0).fov_y_degrees(), None);
+    }
+
+    // ── 屏幕射线 ──
+
+    /// 相机摆在 +Z 上往回看（-Z 方向），也就是最常见的「正对着 XY 平面」。
+    fn looking_at_origin(distance: f32) -> Mat4 {
+        Mat4::from_translation(Vec3::new(0.0, 0.0, distance))
+    }
+
+    #[test]
+    fn the_screen_centre_looks_straight_ahead() {
+        let camera = Camera::perspective(60.0);
+        let viewport = kmath::Vec2::new(800.0, 600.0);
+
+        let ray = camera.screen_ray(viewport * 0.5, viewport, looking_at_origin(10.0));
+
+        assert!(
+            (ray.direction - Vec3::NEG_Z).length() < 1e-4,
+            "屏幕正中该正对前方，得到 {}",
+            ray.direction
+        );
+    }
+
+    #[test]
+    fn screen_y_points_down_but_world_y_points_up() {
+        // 漏掉这一次翻转的表现是「点上面选中下面」，整个上下颠倒。
+        let camera = Camera::perspective(60.0);
+        let viewport = kmath::Vec2::new(800.0, 600.0);
+
+        // 屏幕上方（y 小）应当对应世界的 +Y。
+        let upper = camera.screen_ray(
+            kmath::Vec2::new(400.0, 100.0),
+            viewport,
+            looking_at_origin(10.0),
+        );
+        assert!(upper.direction.y > 0.0, "屏幕上方没指向世界上方");
+
+        let lower = camera.screen_ray(
+            kmath::Vec2::new(400.0, 500.0),
+            viewport,
+            looking_at_origin(10.0),
+        );
+        assert!(lower.direction.y < 0.0);
+    }
+
+    #[test]
+    fn an_orthographic_ray_starts_where_the_pixel_is_not_at_the_eye() {
+        // 正交投影下所有射线平行，起点铺满整个视口——拿相机原点当起点
+        // 是错的，那样每条射线都从同一个点发散出去，成了透视。
+        let camera = Camera::orthographic(10.0);
+        let viewport = kmath::Vec2::new(800.0, 400.0);
+
+        let ray = camera.screen_ray(
+            kmath::Vec2::new(600.0, 100.0),
+            viewport,
+            looking_at_origin(20.0),
+        );
+
+        assert!(
+            (ray.direction - Vec3::NEG_Z).length() < 1e-4,
+            "正交射线都该朝同一个方向"
+        );
+        assert!(
+            ray.origin.x > 0.1 && ray.origin.y > 0.1,
+            "起点该落在那个像素对应的位置上，而不是相机原点：{}",
+            ray.origin
+        );
+    }
+
+    #[test]
+    fn an_orthographic_ray_lands_on_the_pixel_it_came_from() {
+        // 视口高 10 世界单位、宽 20（宽高比 2）。右上角那个像素打到 z=0
+        // 平面上，应该落在 (10, 5) 附近。
+        let camera = Camera::orthographic(10.0);
+        let viewport = kmath::Vec2::new(800.0, 400.0);
+
+        let ray = camera.screen_ray(
+            kmath::Vec2::new(800.0, 0.0),
+            viewport,
+            looking_at_origin(20.0),
+        );
+        let plane = Plane {
+            normal: Vec3::Z,
+            d: 0.0,
+        };
+        let point = ray.at(ray.hit_plane(&plane, 1000.0).expect("该打中 z=0"));
+
+        assert!((point.x - 10.0).abs() < 1e-3, "x 落在 {}", point.x);
+        assert!((point.y - 5.0).abs() < 1e-3, "y 落在 {}", point.y);
+    }
+
+    #[test]
+    fn a_degenerate_viewport_does_not_produce_nan() {
+        // 窗口最小化时视口会变成 0。返回一条朝前的射线，总比让 NaN
+        // 顺着拾取一路传下去强。
+        let camera = Camera::perspective(60.0);
+        let ray = camera.screen_ray(
+            kmath::Vec2::ZERO,
+            kmath::Vec2::ZERO,
+            looking_at_origin(10.0),
+        );
+
+        assert!(ray.origin.is_finite() && ray.direction.is_finite());
     }
 }
