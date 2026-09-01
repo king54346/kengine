@@ -78,7 +78,11 @@ pub fn preprocess(source: &str, defs: &[&str]) -> Result<String, ShaderError> {
                     };
                     let defined = defs.contains(&name);
                     stack.push(Frame {
-                        taken: if directive == "ifdef" { defined } else { !defined },
+                        taken: if directive == "ifdef" {
+                            defined
+                        } else {
+                            !defined
+                        },
                         in_else: false,
                         line: number,
                     });

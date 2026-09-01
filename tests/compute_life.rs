@@ -121,7 +121,11 @@ fn a_block_sits_still() {
         life.step();
         let mut expected = block.to_vec();
         expected.sort_unstable();
-        assert_eq!(alive_cells(&life.read()), expected, "第 {generation} 代动了");
+        assert_eq!(
+            alive_cells(&life.read()),
+            expected,
+            "第 {generation} 代动了"
+        );
     }
 }
 

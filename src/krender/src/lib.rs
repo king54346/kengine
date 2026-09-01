@@ -2671,6 +2671,10 @@ impl Renderer {
 ///
 /// `constants` 是 WGSL `override` 声明的取值，由驱动在编译这条管线时替换。
 /// 内置的四条管线不用它（源码里没有 `override`），只有自定义材质会传。
+//
+// 八个参数都是管线状态的一部分，凑成结构体只会多一层没人复用的类型：
+// 这个函数只有一处定义、八处调用，全在同一个文件里。
+#[allow(clippy::too_many_arguments)]
 fn create_standard_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
@@ -3759,10 +3763,7 @@ mod test {
         let mut material = kmaterial::Material::standard();
         material.set(
             kmaterial::standard::PARAMS[0],
-            kasset::Resource::<ktexture::Texture>::new_ok(
-                "x.png",
-                ktexture::Texture::white(),
-            ),
+            kasset::Resource::<ktexture::Texture>::new_ok("x.png", ktexture::Texture::white()),
         );
 
         assert_eq!(custom_params_of(&material)[0], [0.0; 4]);
@@ -3784,7 +3785,10 @@ mod test {
             );
         }
         assert!(
-            !source.contains(&format!("@group(2) @binding({})", ARRAY_TEXTURE_BINDING + 1)),
+            !source.contains(&format!(
+                "@group(2) @binding({})",
+                ARRAY_TEXTURE_BINDING + 1
+            )),
             "shader.wgsl 的 group(2) 声明多于布局里登记的数量"
         );
     }
