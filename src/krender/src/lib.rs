@@ -2830,6 +2830,35 @@ fn create_morph_weight_storage(device: &wgpu::Device, capacity: u64) -> wgpu::Bu
 const DEFAULT_SURFACE_HOOK: &str =
     "fn material_surface(surface: Surface) -> Surface {\n    return surface;\n}";
 
+/// 检查一段材质钩子能不能和引擎的标准着色器拼起来。
+///
+/// 钩子本身单独解析不了——它引用引擎定义的 `Surface`、`globals`、
+/// 各张贴图。真正的校验只能发生在拼装之后，而那**默认要等到第一次
+/// 用上这份材质**：写错的钩子在跑起来之前一声不吭，跑起来之后
+/// 只在日志里留一行「退回标准管线」。
+///
+/// 这个函数把那一刻提前到任何你想要的地方——测试、资源打包、
+/// 编辑器里的「编译」按钮。
+///
+/// ```
+/// let ok = krender::validate_material_hook(
+///     "fn material_surface(s: Surface) -> Surface { return s; }",
+/// );
+/// assert!(ok.is_ok());
+///
+/// // 少了返回值：拼起来之后 naga 会发现签名不对。
+/// assert!(krender::validate_material_hook("fn material_surface(s: Surface) { }").is_err());
+/// ```
+///
+/// # Errors
+///
+/// 拼出来的源码过不了 naga 的解析或校验时返回错误。错误信息里的行号是
+/// **拼接之后**的，和钩子源文件对不上——这是钩子这条路固有的代价，
+/// 见 [`Shader::snippet`](kshader::Shader::snippet)。
+pub fn validate_material_hook(hook: &str) -> Result<(), kshader::ShaderError> {
+    Shader::from_wgsl(material_shader_source(hook)).map(|_| ())
+}
+
 /// 标准着色器的完整源码。
 fn standard_shader_source() -> String {
     material_shader_source(DEFAULT_SURFACE_HOOK)

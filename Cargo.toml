@@ -193,6 +193,10 @@ path = "examples/kengine/camera/2d_top_down_camera.rs"
 name = "world_serialization"
 path = "examples/kengine/scene/world_serialization.rs"
 
+[[example]]
+name = "scene_composition"
+path = "examples/kengine/scene/scene_composition.rs"
+
 # ── bevy 的 examples/shader 移植 ──
 [[example]]
 name = "extended_material"
@@ -201,6 +205,38 @@ path = "examples/kengine/shader/extended_material.rs"
 [[example]]
 name = "animate_shader"
 path = "examples/kengine/shader/animate_shader.rs"
+
+[[example]]
+name = "shader_material"
+path = "examples/kengine/shader/shader_material.rs"
+
+[[example]]
+name = "screenspace_texture"
+path = "examples/kengine/shader/screenspace_texture.rs"
+
+[[example]]
+name = "automatic_instancing"
+path = "examples/kengine/shader/automatic_instancing.rs"
+
+[[example]]
+name = "shader_defs"
+path = "examples/kengine/shader/shader_defs.rs"
+
+[[example]]
+name = "pipeline_constants"
+path = "examples/kengine/shader/pipeline_constants.rs"
+
+[[example]]
+name = "array_texture"
+path = "examples/kengine/shader/array_texture.rs"
+
+[[example]]
+name = "gpu_readback"
+path = "examples/kengine/shader/gpu_readback.rs"
+
+[[example]]
+name = "shader_prepass"
+path = "examples/kengine/shader/shader_prepass.rs"
 
 [[example]]
 name = "skinning_blending"
