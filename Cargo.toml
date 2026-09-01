@@ -148,6 +148,10 @@ name = "random_sampling"
 path = "examples/kengine/math/random_sampling.rs"
 
 [[example]]
+name = "compute_game_of_life"
+path = "examples/kengine/shader/compute_game_of_life.rs"
+
+[[example]]
 name = "render_primitives"
 path = "examples/kengine/math/render_primitives.rs"
 
@@ -179,6 +183,24 @@ path = "examples/kengine/camera/projection_zoom.rs"
 [[example]]
 name = "custom_projection"
 path = "examples/kengine/camera/custom_projection.rs"
+
+[[example]]
+name = "top_down_camera_2d"
+path = "examples/kengine/camera/2d_top_down_camera.rs"
+
+# ── bevy 的 examples/scene 移植 ──
+[[example]]
+name = "world_serialization"
+path = "examples/kengine/scene/world_serialization.rs"
+
+# ── bevy 的 examples/shader 移植 ──
+[[example]]
+name = "extended_material"
+path = "examples/kengine/shader/extended_material.rs"
+
+[[example]]
+name = "animate_shader"
+path = "examples/kengine/shader/animate_shader.rs"
 
 [[example]]
 name = "skinning_blending"

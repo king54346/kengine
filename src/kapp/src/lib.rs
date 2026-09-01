@@ -393,6 +393,7 @@ impl App {
                 ui: &mut runtime.ui,
                 ui_input: &runtime.ui_input,
                 post: &mut post,
+                compute: krender::ComputeContext::from_renderer(&runtime.renderer),
                 shadow: &mut shadow,
                 exit_requested: &mut exit_requested,
             };
@@ -450,6 +451,7 @@ impl App {
                 ui: &mut runtime.ui,
                 ui_input: &runtime.ui_input,
                 post: &mut post,
+                compute: krender::ComputeContext::from_renderer(&runtime.renderer),
                 shadow: &mut shadow,
                 exit_requested: &mut exit_requested,
             };

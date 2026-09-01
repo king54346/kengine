@@ -207,3 +207,123 @@ fn the_hook_is_spliced_before_the_shader_body() {
     assert!(surface_definition < hook, "Surface 的定义排在钩子后面了");
     assert!(hook < call, "钩子排在调用点后面了");
 }
+
+#[test]
+fn a_hook_can_read_the_custom_params() {
+    // 四个槽位逐个读一遍。数组长度对不上（Rust 侧改了
+    // `PARAM_SLOTS` 而 WGSL 那边没跟着改）时这条会报越界。
+    compile(
+        r#"
+        fn material_surface(surface: Surface) -> Surface {
+            var out = surface;
+            out.base_color = surface.params[0]
+                + surface.params[1]
+                + surface.params[2]
+                + surface.params[3];
+            return out;
+        }
+        "#,
+    )
+    .expect("读自定义参数的钩子应当通过校验");
+}
+
+#[test]
+fn the_params_reach_the_surface_from_the_object_buffer() {
+    // 上一条只证明「`Surface` 里有这个字段」。字段在、但没人往里填的话
+    // 那些测试照样全绿，画面上是「参数怎么设都是零」——这正是这类
+    // 「装了但没生效」的错误最常见的形状。
+    let source = standard_shader_source();
+    assert!(
+        source.contains("surface.params = object.params"),
+        "自定义参数没有从对象缓冲接到 Surface 上"
+    );
+}
+
+#[test]
+fn a_hook_can_sample_the_custom_textures() {
+    // 自定义贴图复用基础色的采样器，钩子里直接采即可。
+    compile(
+        r#"
+        fn material_surface(surface: Surface) -> Surface {
+            var out = surface;
+            out.base_color = textureSample(custom_texture0, base_color_sampler, surface.uv)
+                * textureSample(custom_texture1, base_color_sampler, surface.uv);
+            return out;
+        }
+        "#,
+    )
+    .expect("采样自定义贴图的钩子应当通过校验");
+}
+
+#[test]
+fn the_custom_texture_names_match_the_material_slots() {
+    // Rust 侧按 `CUSTOM_TEXTURES` 里的名字去材质表里取值，WGSL 侧按
+    // 变量名去用。两边对不上的症状是「贴图设了但采不到」，
+    // 而且两边各自都编译得过。
+    let source = standard_shader_source();
+    for name in kmaterial::standard::CUSTOM_TEXTURES {
+        assert!(
+            source.contains(&format!("var {name}: texture_2d<f32>")),
+            "shader.wgsl 里没有声明 {name}"
+        );
+    }
+}
+
+// ── 条件编译与管线常量 ──
+
+#[test]
+fn a_hook_with_shader_defs_compiles_both_ways() {
+    // 钩子按开关出两个变体，两边都得能和标准着色器拼起来。
+    let hook = r#"
+        fn material_surface(surface: Surface) -> Surface {
+            var out = surface;
+            #ifdef GLOW
+            out.emissive = vec3<f32>(2.0, 0.5, 0.1);
+            #else
+            out.base_color = vec4<f32>(0.2, 0.2, 0.2, 1.0);
+            #endif
+            return out;
+        }
+    "#;
+
+    let glowing = Shader::snippet_with_defs(hook, &["GLOW"]).unwrap();
+    let plain = Shader::snippet_with_defs(hook, &[]).unwrap();
+
+    compile(glowing.source()).expect("开着 GLOW 的变体应当通过校验");
+    compile(plain.source()).expect("关着 GLOW 的变体应当通过校验");
+
+    assert!(glowing.source().contains("emissive"));
+    assert!(!plain.source().contains("emissive"));
+    assert_ne!(glowing.id(), plain.id(), "两个变体得是两条管线");
+}
+
+#[test]
+fn a_hook_can_declare_an_override_constant() {
+    // `override` 是模块级声明，必须能出现在钩子里而不破坏拼装。
+    // 值由 `create_standard_pipeline` 在建管线时交给驱动替换。
+    compile(
+        r#"
+        override LEVELS: f32 = 4.0;
+
+        fn material_surface(surface: Surface) -> Surface {
+            var out = surface;
+            out.base_color = vec4<f32>(floor(surface.base_color.rgb * LEVELS) / LEVELS, 1.0);
+            return out;
+        }
+        "#,
+    )
+    .expect("带 override 的钩子应当通过校验");
+}
+
+#[test]
+fn override_constants_travel_with_the_shader_resource() {
+    // 管线是按着色器 id 缓存的，所以「换个常量」必须换出一个新 id，
+    // 否则第二个变体会拿到第一个变体的管线，画面上完全看不出来。
+    let hook = Shader::snippet("fn material_surface(s: Surface) -> Surface { return s; }");
+    let two = hook.clone().with_constant("LEVELS", 2.0);
+    let eight = hook.clone().with_constant("LEVELS", 8.0);
+
+    assert_ne!(two.id(), eight.id());
+    assert_eq!(two.constant_overrides(), vec![("LEVELS", 2.0)]);
+    assert_eq!(eight.constant_overrides(), vec![("LEVELS", 8.0)]);
+}

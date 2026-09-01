@@ -16,9 +16,16 @@
 //!
 //! # 与渲染器的关系
 //!
-//! 参数表本身是通用的——可以放任意名字的值。但渲染器目前只消费
-//! [`standard`] 里列出的那几个标准参数；自定义着色器配自定义参数需要
-//! 按 naga 反射出的绑定布局动态建管线，那部分尚未实现。
+//! 参数表本身是通用的——可以放任意名字的值。渲染器消费的是
+//! [`standard`] 里列出的那些名字：几个标准 PBR 参数，外加
+//! [`PARAMS`](standard::PARAMS)（4 个 `vec4` 槽位）与
+//! [`CUSTOM_TEXTURES`](standard::CUSTOM_TEXTURES)（2 张贴图），
+//! 后两组是给自定义着色器钩子用的。
+//!
+//! **不认识的名字会被静默忽略**。让每个材质按 naga 反射出的绑定布局
+//! 各建一套管线是另一条路，代价是每个自定义材质一条管线、一个绑定组，
+//! 而且合批只能按材质而不是按贴图——固定槽位换来的是「自定义材质仍然
+//! 走同一条管线、仍然能合批」。
 
 #![warn(missing_docs)]
 
@@ -50,6 +57,29 @@ pub mod standard {
     pub const METALLIC: &str = "metallic";
     /// 粗糙度，`Float`，取值 `[0, 1]`。
     pub const ROUGHNESS: &str = "roughness";
+
+    /// 自定义材质参数的槽位名：`param0` … `param3`。
+    ///
+    /// 着色器钩子里读 `surface.params[i]`，i 就是这里的下标。
+    ///
+    /// 用**固定槽位**而不是任意名字，是因为渲染器必须在不解析着色器的
+    /// 前提下知道该把哪个值放到哪个偏移上。按名字排序去分配槽位看着更
+    /// 自由，但加一个参数就会把已有参数全部挪位——着色器那边不会报错，
+    /// 只是颜色突然变成了速度。
+    pub const PARAMS: [&str; PARAM_SLOTS] = ["param0", "param1", "param2", "param3"];
+
+    /// 参数槽位的数量。
+    pub const PARAM_SLOTS: usize = 4;
+
+    /// 自定义材质贴图的槽位名：`custom_texture0` / `custom_texture1`。
+    ///
+    /// 着色器钩子里的变量名与这里同名，采样器复用 `base_color_sampler`
+    /// ——一个材质的各张贴图共享同一套 UV，过滤与平铺方式理应一致。
+    pub const CUSTOM_TEXTURES: [&str; CUSTOM_TEXTURE_SLOTS] =
+        ["custom_texture0", "custom_texture1"];
+
+    /// 自定义贴图槽位的数量。
+    pub const CUSTOM_TEXTURE_SLOTS: usize = 2;
 }
 
 /// 一个材质参数值。
@@ -279,6 +309,18 @@ impl Material {
         self
     }
 
+    /// 摘掉着色器，退回引擎的标准材质。
+    ///
+    /// 材质钩子是**可插拔**的——装得上就该摘得下：切换渲染风格、
+    /// 关掉某个效果做对比、材质编辑器里点掉一个节点，都要它。
+    /// 其余参数（颜色、粗糙度、贴图）一个都不动。
+    pub fn clear_shader(&mut self) {
+        if self.shader.is_some() {
+            self.shader = None;
+            self.touch();
+        }
+    }
+
     /// 这份材质的混合方式。
     pub fn blend_mode(&self) -> BlendMode {
         self.blend_mode
@@ -311,6 +353,60 @@ impl Material {
     /// 读取一个参数。
     pub fn get(&self, name: &str) -> Option<&MaterialValue> {
         self.values.get(name)
+    }
+
+    /// 设置一个自定义材质参数（着色器钩子里的 `surface.params[slot]`）。
+    ///
+    /// # Panics
+    ///
+    /// `slot >= `[`standard::PARAM_SLOTS`] 时 panic。这是代码里写死的下标，
+    /// 越界属于编程错误——静默忽略的话表现为「那个参数怎么设都不起作用」，
+    /// 而着色器一句话都不会说。
+    pub fn set_param(&mut self, slot: usize, value: impl Into<MaterialValue>) {
+        assert!(
+            slot < standard::PARAM_SLOTS,
+            "材质参数槽位越界：{slot}，一共只有 {} 个",
+            standard::PARAM_SLOTS
+        );
+        self.set(standard::PARAMS[slot], value);
+    }
+
+    /// 链式设置自定义材质参数。
+    pub fn with_param(mut self, slot: usize, value: impl Into<MaterialValue>) -> Self {
+        self.set_param(slot, value);
+        self
+    }
+
+    /// 读取一个自定义材质参数。
+    pub fn param(&self, slot: usize) -> Option<&MaterialValue> {
+        self.get(standard::PARAMS.get(slot)?)
+    }
+
+    /// 设置一张自定义材质贴图（着色器钩子里的 `custom_texture0` / `1`）。
+    ///
+    /// # Panics
+    ///
+    /// `slot >= `[`standard::CUSTOM_TEXTURE_SLOTS`] 时 panic，理由同
+    /// [`set_param`](Self::set_param)。
+    pub fn set_custom_texture(&mut self, slot: usize, texture: Resource<Texture>) {
+        assert!(
+            slot < standard::CUSTOM_TEXTURE_SLOTS,
+            "自定义贴图槽位越界：{slot}，一共只有 {} 个",
+            standard::CUSTOM_TEXTURE_SLOTS
+        );
+        self.set(standard::CUSTOM_TEXTURES[slot], texture);
+    }
+
+    /// 链式设置自定义材质贴图。
+    pub fn with_custom_texture(mut self, slot: usize, texture: Resource<Texture>) -> Self {
+        self.set_custom_texture(slot, texture);
+        self
+    }
+
+    /// 读取一张自定义材质贴图。
+    pub fn custom_texture(&self, slot: usize) -> Option<&Resource<Texture>> {
+        self.get(standard::CUSTOM_TEXTURES.get(slot)?)
+            .and_then(MaterialValue::as_texture)
     }
 
     /// 移除一个参数。

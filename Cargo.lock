@@ -1968,6 +1968,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "fxhash",
+ "kasset",
  "kcamera",
  "kcore",
  "kgizmo",
@@ -1984,6 +1985,7 @@ dependencies = [
  "ktexture",
  "kui",
  "naga",
+ "pollster",
  "wgpu",
  "winit",
 ]

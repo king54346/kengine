@@ -25,9 +25,14 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 # 每帧要按网格/贴图查几万次缓存，标准库默认的 SipHash 在这里太重。
 fxhash = "0.2"
 wgpu = "30.0.0"
+# 无头计算设备要在同步接口里等异步的 adapter/device 请求。
+pollster = "1.0.1"
 # 只用到窗口句柄，用于创建 surface。
 winit = "0.30.13"
 
 [dev-dependencies]
 # 测试里解析 WGSL，核对着色器入口与顶点布局。
 naga = { version = "30", features = ["wgsl-in"] }
+# 测试里要现造一个 `Resource<Texture>`，验「贴图放错到参数槽位」的处理。
+# 只在测试里用得上：渲染器自己从材质里取到的句柄都是别人建好的。
+kasset = { path = "../kasset" }

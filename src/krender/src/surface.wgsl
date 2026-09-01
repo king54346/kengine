@@ -46,6 +46,16 @@ struct Surface {
     /// 和 `scene_depth(uv)` 是同一个尺度，相减就是「我和背后的东西
     /// 隔多远」——水的分层、玻璃的厚度、软边缘全靠这个差值。
     view_depth: f32,
+    /// 自定义材质参数，四个 `vec4` 槽位。
+    ///
+    /// Rust 侧是 `material.set_param(i, ...)`，标量与 `vec2`/`vec3`
+    /// 补零升到 `vec4`。**逐对象**，所以同一批实例可以各带各的值而
+    /// 不打断合批。
+    ///
+    /// 自定义贴图不在这里——那是两个全局变量 `custom_texture0` /
+    /// `custom_texture1`，钩子里直接
+    /// `textureSample(custom_texture0, base_color_sampler, surface.uv)`。
+    params: array<vec4<f32>, 4>,
 
     // ── 可写：表面属性 ──
 

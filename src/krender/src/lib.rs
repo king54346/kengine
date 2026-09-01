@@ -10,6 +10,7 @@
 
 #[cfg(test)]
 mod cascade_batch_tests;
+mod compute;
 mod gizmo;
 #[cfg(test)]
 mod material_shader_tests;
@@ -19,6 +20,7 @@ mod sprite2d;
 mod tonemap;
 mod ui;
 
+pub use compute::{ComputeContext, ComputeError, ComputePipeline, StorageBuffer};
 pub use post::PostSettings;
 pub use tonemap::ToneMapping;
 // 级联参数本身属于 `klight`，但调它的人是冲着「渲染器怎么画阴影」来的，
@@ -172,7 +174,40 @@ struct ObjectUniforms {
     probe_min: [f32; 4],
     /// xyz = 视差盒最大角，w = 反射强度。
     probe_max: [f32; 4],
+    /// 自定义材质参数，着色器钩子里是 `surface.params[i]`。
+    ///
+    /// 跟着**对象**走而不是单开一条材质绑定：那样同一个网格的多个实例
+    /// 各带各的参数仍然合成一次绘制。代价是每个对象固定多占 64 字节，
+    /// 不管它用不用得上。
+    params: [[f32; 4]; kmaterial::standard::PARAM_SLOTS],
 }
+
+/// 从材质里取出四个自定义参数槽位。
+///
+/// 没设过的槽位是全零。标量与 `Vec2`/`Vec3` 补零升到 `vec4`——
+/// 让着色器那边永远只面对一种类型，省掉「这个槽位到底是什么类型」
+/// 这个每次读都要回去查的问题。贴图不走这里（见
+/// [`kmaterial::standard::CUSTOM_TEXTURES`]），设在参数槽位上会被忽略。
+fn custom_params_of(material: &kmaterial::Material) -> [[f32; 4]; PARAM_SLOTS] {
+    let mut params = [[0.0; 4]; PARAM_SLOTS];
+    for (slot, out) in params.iter_mut().enumerate() {
+        *out = match material.param(slot) {
+            Some(kmaterial::MaterialValue::Float(v)) => [*v, 0.0, 0.0, 0.0],
+            Some(kmaterial::MaterialValue::Vec2(v)) => [v.x, v.y, 0.0, 0.0],
+            Some(kmaterial::MaterialValue::Vec3(v)) => [v.x, v.y, v.z, 0.0],
+            Some(kmaterial::MaterialValue::Vec4(v)) => v.to_array(),
+            // 贴图或没设过：全零。
+            _ => [0.0; 4],
+        };
+    }
+    params
+}
+
+/// 自定义参数槽位数，和 WGSL 里 `params` 数组的长度必须一致。
+const PARAM_SLOTS: usize = kmaterial::standard::PARAM_SLOTS;
+
+/// 材质贴图槽位数：5 个标准的 + 2 个自定义的。
+const TEXTURE_SLOTS: usize = 5 + kmaterial::standard::CUSTOM_TEXTURE_SLOTS;
 
 /// 从材质里取出纹理坐标变换：`[缩放x, 缩放y, 偏移x, 偏移y]`。
 ///
@@ -220,7 +255,7 @@ struct DrawCall {
     /// 后一个会被前一个的着色器画出来。
     shader_id: Uuid,
     /// 材质贴图绑定组的缓存键（五张贴图 id 的组合）。
-    texture_key: [Uuid; 5],
+    texture_key: [Uuid; TEXTURE_SLOTS],
     /// 是否走蒙皮管线。蒙皮与静态的顶点布局不同，不能混在一批里。
     skinned: bool,
     /// 到相机的距离平方，半透明物体按它从远到近排序。
@@ -241,7 +276,7 @@ struct Batch {
     mesh_id: Uuid,
     /// 自定义材质钩子的 id；[`Uuid::nil`] 表示标准着色器。
     shader_id: Uuid,
-    texture_key: [Uuid; 5],
+    texture_key: [Uuid; TEXTURE_SLOTS],
     /// 是否走蒙皮管线。
     skinned: bool,
     /// 本批第一个实例在存储缓冲中的下标。
@@ -596,7 +631,7 @@ pub struct Renderer {
     ///
     /// 用组合而非材质 id 作键，是为了让异步加载中的贴图就绪后自动换上——
     /// 贴图 id 一变，键就变，会重新建一个绑定组。
-    material_bind_groups: FxHashMap<[Uuid; 5], wgpu::BindGroup>,
+    material_bind_groups: FxHashMap<[Uuid; TEXTURE_SLOTS], wgpu::BindGroup>,
     /// 材质缺某张贴图时顶上的中性贴图。
     default_textures: DefaultTextures,
     meshes: FxHashMap<Uuid, GpuMesh>,
@@ -852,7 +887,10 @@ impl Renderer {
                 count: None,
             },
         ];
-        for binding in 2..=5 {
+        // binding 2..5 是法线 / 金属度粗糙度 / 遮蔽 / 自发光，
+        // 6 与 7 是留给自定义材质的两张贴图。全都是同一种类型，
+        // 缺的那些绑白图（法线绑中性法线），所以布局是定长的。
+        for binding in 2..=TEXTURE_SLOTS as u32 {
             texture_entries.push(wgpu::BindGroupLayoutEntry {
                 binding,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -975,6 +1013,7 @@ impl Renderer {
             &[Option::from(vertex_layout())],
             "kengine render pipeline",
             kmaterial::BlendMode::Opaque,
+            &[],
         );
         let skinned_pipeline = create_standard_pipeline(
             &device,
@@ -984,6 +1023,7 @@ impl Renderer {
             &[Option::from(vertex_layout()), Option::from(skin_layout())],
             "kengine skinned pipeline",
             kmaterial::BlendMode::Opaque,
+            &[],
         );
         // 半透明版本：只有混合方式和深度写入不同，着色器完全一样。
         let transparent_pipeline = create_standard_pipeline(
@@ -994,6 +1034,7 @@ impl Renderer {
             &[Option::from(vertex_layout())],
             "kengine transparent pipeline",
             kmaterial::BlendMode::Alpha,
+            &[],
         );
         let skinned_transparent_pipeline = create_standard_pipeline(
             &device,
@@ -1003,6 +1044,7 @@ impl Renderer {
             &[Option::from(vertex_layout()), Option::from(skin_layout())],
             "kengine skinned transparent pipeline",
             kmaterial::BlendMode::Alpha,
+            &[],
         );
 
         // ── 阴影 pass ──
@@ -1290,6 +1332,10 @@ impl Renderer {
                 source: wgpu::ShaderSource::Wgsl(source.into()),
             });
 
+        // 钩子上设的 `override` 取值。四条变体管线用同一份——它们只差
+        // 入口函数和混合方式，常量属于材质而不属于某条变体。
+        let constants = data.constant_overrides();
+
         let pipelines = MaterialPipelines {
             opaque: create_standard_pipeline(
                 &self.device,
@@ -1299,6 +1345,7 @@ impl Renderer {
                 &[Option::from(vertex_layout())],
                 "kengine material pipeline",
                 kmaterial::BlendMode::Opaque,
+                &constants,
             ),
             skinned: create_standard_pipeline(
                 &self.device,
@@ -1308,6 +1355,7 @@ impl Renderer {
                 &[Option::from(vertex_layout()), Option::from(skin_layout())],
                 "kengine material skinned pipeline",
                 kmaterial::BlendMode::Opaque,
+                &constants,
             ),
             transparent: create_standard_pipeline(
                 &self.device,
@@ -1317,6 +1365,7 @@ impl Renderer {
                 &[Option::from(vertex_layout())],
                 "kengine material transparent pipeline",
                 kmaterial::BlendMode::Alpha,
+                &constants,
             ),
             skinned_transparent: create_standard_pipeline(
                 &self.device,
@@ -1326,6 +1375,7 @@ impl Renderer {
                 &[Option::from(vertex_layout()), Option::from(skin_layout())],
                 "kengine material skinned transparent pipeline",
                 kmaterial::BlendMode::Alpha,
+                &constants,
             ),
         };
 
@@ -1789,6 +1839,7 @@ impl Renderer {
                     probe_position,
                     probe_min,
                     probe_max,
+                    params: custom_params_of(material),
                 },
             });
         }
@@ -2447,16 +2498,19 @@ impl Renderer {
     ///
     /// 贴图仍在异步加载时先用中性贴图顶上；加载完成后 id 变化会让键变化，
     /// 下一帧自然换成真正的贴图。
-    fn ensure_material_textures(&mut self, material: &Material) -> [Uuid; 5] {
-        const SLOTS: [&str; 5] = [
+    fn ensure_material_textures(&mut self, material: &Material) -> [Uuid; TEXTURE_SLOTS] {
+        // 顺序即 group(2) 的 binding 顺序，改这里就得改 `shader.wgsl`。
+        const SLOTS: [&str; TEXTURE_SLOTS] = [
             kmaterial::standard::BASE_COLOR_TEXTURE,
             kpbr::standard::NORMAL_TEXTURE,
             kpbr::standard::METALLIC_ROUGHNESS_TEXTURE,
             kpbr::standard::OCCLUSION_TEXTURE,
             kpbr::standard::EMISSIVE_TEXTURE,
+            kmaterial::standard::CUSTOM_TEXTURES[0],
+            kmaterial::standard::CUSTOM_TEXTURES[1],
         ];
 
-        let mut key = [Uuid::nil(); 5];
+        let mut key = [Uuid::nil(); TEXTURE_SLOTS];
         for (slot, name) in SLOTS.iter().enumerate() {
             let Some(handle) = material
                 .get(name)
@@ -2484,7 +2538,7 @@ impl Renderer {
         key
     }
 
-    fn create_material_bind_group(&self, key: &[Uuid; 5]) -> wgpu::BindGroup {
+    fn create_material_bind_group(&self, key: &[Uuid; TEXTURE_SLOTS]) -> wgpu::BindGroup {
         // 第二个槽位是法线贴图，缺失时要用「不扰动」的中性法线而非白色。
         let texture_for = |slot: usize| -> &GpuTexture {
             self.gpu_textures.get(&key[slot]).unwrap_or({
@@ -2508,7 +2562,7 @@ impl Renderer {
                 resource: wgpu::BindingResource::Sampler(&texture_for(0).sampler),
             },
         ];
-        for slot in 1..5 {
+        for slot in 1..TEXTURE_SLOTS {
             entries.push(wgpu::BindGroupEntry {
                 binding: slot as u32 + 1,
                 resource: wgpu::BindingResource::TextureView(&texture_for(slot).view),
@@ -2567,6 +2621,9 @@ impl Renderer {
 }
 
 /// 建一条标准着色管线。静态与蒙皮只差入口函数与顶点布局。
+///
+/// `constants` 是 WGSL `override` 声明的取值，由驱动在编译这条管线时替换。
+/// 内置的四条管线不用它（源码里没有 `override`），只有自定义材质会传。
 fn create_standard_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
@@ -2575,21 +2632,28 @@ fn create_standard_pipeline(
     buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
     label: &str,
     blend_mode: kmaterial::BlendMode,
+    constants: &[(&str, f64)],
 ) -> wgpu::RenderPipeline {
     let transparent = blend_mode == kmaterial::BlendMode::Alpha;
+    // 顶点和片元两个阶段都要给：`override` 是模块级的声明，
+    // 只给一个阶段的话另一个阶段引用它时会报「常量没有值」。
+    let compilation_options = wgpu::PipelineCompilationOptions {
+        constants,
+        ..Default::default()
+    };
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
             entry_point: Some(entry_point),
-            compilation_options: Default::default(),
+            compilation_options: compilation_options.clone(),
             buffers,
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
             entry_point: Some("fs_main"),
-            compilation_options: Default::default(),
+            compilation_options,
             targets: &[Some(wgpu::ColorTargetState {
                 // 主 pass 画到 HDR 离屏目标，不是直接画到屏幕。
                 format: post::HDR_FORMAT,
@@ -2729,19 +2793,28 @@ fn standard_shader_source() -> String {
 /// 顺序有讲究：
 /// - klight 定义 `Light`、kpbr 的 IBL 定义 `Environment`，两者都被
 ///   `Globals` 引用，必须排在标准着色器之前；
+/// - `geometry.wgsl` 定义 `Globals` 与 `ObjectUniforms`，顶点着色器要用；
 /// - `surface.wgsl` 定义 `Surface`，钩子要用它；
 /// - `shader.wgsl` 调用钩子，所以钩子必须排在它之前。
 fn material_shader_source(hook: &str) -> String {
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         klight::LIGHT_WGSL,
         kpbr::PBR_WGSL,
         kpbr::IBL_WGSL,
         shadow_sampling_source(),
+        geometry_source(),
         include_str!("surface.wgsl"),
         hook,
         include_str!("shader.wgsl")
     )
+}
+
+/// 几何声明：`Globals`、`ObjectUniforms`、顶点属性、蒙皮与形变。
+///
+/// 标准着色器和 prepass 共用这一份——见 `geometry.wgsl` 开头的说明。
+fn geometry_source() -> &'static str {
+    include_str!("geometry.wgsl")
 }
 
 /// 阴影深度 pass 的着色器（含自己的绑定声明）。
@@ -3539,13 +3612,88 @@ mod test {
         assert_eq!(size_of::<Globals>() % 16, 0);
         // ObjectUniforms：mat4x4(64) × 2 + base_color(16) + f32 × 4 + emissive(16)
         //                 + 骨骼偏移(16) + UV 变换(16)
-        //                 + 探针 vec4 × 3(48) = 256。
+        //                 + 探针 vec4 × 3(48) + 自定义参数 vec4 × 4(64) = 320。
         // 四个 f32 恰好凑满 16 字节，emissive 才能落在 vec4 要求的对齐边界上。
         assert_eq!(
             size_of::<ObjectUniforms>(),
-            64 * 2 + 16 * 3 + 16 * 2 + 16 * 3
+            64 * 2 + 16 * 3 + 16 * 2 + 16 * 3 + 16 * PARAM_SLOTS
         );
         assert_eq!(size_of::<ObjectUniforms>() % 16, 0);
+    }
+
+    #[test]
+    fn a_material_without_custom_params_gets_all_zeros() {
+        // 绝大多数材质走这条路：不设参数就是全零，钩子读到的是
+        // 一个确定的值而不是上一个对象留下的垃圾。
+        assert_eq!(
+            custom_params_of(&kmaterial::Material::standard()),
+            [[0.0; 4]; PARAM_SLOTS]
+        );
+    }
+
+    #[test]
+    fn custom_params_land_in_their_own_slots() {
+        let material = kmaterial::Material::standard()
+            .with_param(0, kmath::Vec4::new(1.0, 2.0, 3.0, 4.0))
+            .with_param(2, 7.0_f32);
+
+        let params = custom_params_of(&material);
+
+        assert_eq!(params[0], [1.0, 2.0, 3.0, 4.0]);
+        // 中间没设过的槽位不受影响——槽位是固定的，不会因为
+        // 「只设了两个」就把第 2 个挪到第 1 个上去。
+        assert_eq!(params[1], [0.0; 4]);
+        // 标量补零升到 vec4，着色器那边永远只面对一种类型。
+        assert_eq!(params[2], [7.0, 0.0, 0.0, 0.0]);
+        assert_eq!(params[3], [0.0; 4]);
+    }
+
+    #[test]
+    fn shorter_vectors_are_padded_with_zeros() {
+        let material = kmaterial::Material::standard()
+            .with_param(0, kmath::Vec2::new(1.0, 2.0))
+            .with_param(1, kmath::Vec3::new(1.0, 2.0, 3.0));
+
+        let params = custom_params_of(&material);
+
+        assert_eq!(params[0], [1.0, 2.0, 0.0, 0.0]);
+        assert_eq!(params[1], [1.0, 2.0, 3.0, 0.0]);
+    }
+
+    #[test]
+    fn a_texture_set_on_a_param_slot_is_ignored_rather_than_garbage() {
+        // 贴图走的是另一套槽位。放错地方时该读到零，而不是把句柄的
+        // 字节当成浮点数——那会让物体的颜色变成一个随机的巨大值，
+        // 顺着 Bloom 糊满半个屏幕。
+        let mut material = kmaterial::Material::standard();
+        material.set(
+            kmaterial::standard::PARAMS[0],
+            kasset::Resource::<ktexture::Texture>::new_ok(
+                "x.png",
+                ktexture::Texture::white(),
+            ),
+        );
+
+        assert_eq!(custom_params_of(&material)[0], [0.0; 4]);
+    }
+
+    #[test]
+    fn every_texture_slot_has_a_binding() {
+        // 贴图槽位数、WGSL 里的绑定声明、以及建绑定组时的循环上界
+        // 是三处必须一致的地方。对不上的症状是 wgpu 在建绑定组时
+        // 报「绑定数量不匹配」——那还算好的；少声明一个则是静默
+        // 采样到别人的贴图。
+        let source = include_str!("shader.wgsl");
+        for binding in 0..TEXTURE_SLOTS + 1 {
+            assert!(
+                source.contains(&format!("@group(2) @binding({binding})")),
+                "shader.wgsl 缺少 group(2) 的 binding {binding}"
+            );
+        }
+        assert!(
+            !source.contains(&format!("@group(2) @binding({})", TEXTURE_SLOTS + 1)),
+            "shader.wgsl 的 group(2) 声明多于布局里登记的数量"
+        );
     }
 
     #[test]
@@ -3608,7 +3756,7 @@ mod test {
         DrawCall {
             mesh_id: Uuid::from_u128(mesh),
             shader_id: Uuid::nil(),
-            texture_key: [Uuid::from_u128(texture); 5],
+            texture_key: [Uuid::from_u128(texture); TEXTURE_SLOTS],
             skinned: false,
             depth: 0.0,
             aabb: kmath::Aabb::new(kmath::Vec3::ZERO, kmath::Vec3::ONE),

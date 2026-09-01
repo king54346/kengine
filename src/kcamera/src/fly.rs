@@ -187,7 +187,10 @@ mod tests {
         assert!(fly.pitch <= fly.max_pitch);
         assert!(fly.pitch < std::f32::consts::FRAC_PI_2);
         assert!(fly.rotation().is_finite());
-        assert!((fly.rotation().length() - 1.0).abs() < 1e-4, "四元数没归一化");
+        assert!(
+            (fly.rotation().length() - 1.0).abs() < 1e-4,
+            "四元数没归一化"
+        );
     }
 
     #[test]

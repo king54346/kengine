@@ -24,18 +24,18 @@
 
 use kmath::{Aabb, Intersection, Mat4, Plane, Vec3};
 
-/// 轨道相机：绕着一个目标点转。
-pub mod orbit;
 /// 自由飞行相机：走到哪算哪。
 pub mod fly;
+/// 轨道相机：绕着一个目标点转。
+pub mod orbit;
 /// 平移相机：在一个平面上拖着看。
 pub mod pan;
 /// 屏幕震动。
 pub mod shake;
 
 pub use fly::FlyCamera;
-pub use pan::PanCamera;
 pub use orbit::OrbitCamera;
+pub use pan::PanCamera;
 pub use shake::ScreenShake;
 
 /// 常用类型的集中导出。
@@ -556,7 +556,10 @@ mod test {
     fn fov_only_applies_to_perspective() {
         assert_eq!(Camera::perspective(75.0).fov_y_degrees(), Some(75.0));
         assert_eq!(Camera::orthographic(5.0).fov_y_degrees(), None);
-        assert_eq!(Camera::custom_projection(Mat4::IDENTITY).fov_y_degrees(), None);
+        assert_eq!(
+            Camera::custom_projection(Mat4::IDENTITY).fov_y_degrees(),
+            None
+        );
     }
 
     #[test]
@@ -591,7 +594,12 @@ mod test {
         let mut restored = Camera::default();
         restored.visit("Root", &mut reader).expect("读");
 
-        assert_eq!(restored.projection, Projection::Custom { clip_from_view: matrix });
+        assert_eq!(
+            restored.projection,
+            Projection::Custom {
+                clip_from_view: matrix
+            }
+        );
     }
 
     // ── 屏幕射线 ──

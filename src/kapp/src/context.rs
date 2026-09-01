@@ -90,6 +90,14 @@ pub struct Context<'a> {
     /// 改了立刻生效，下一帧就是新的。移植别的引擎的场景时经常要动它——
     /// 那些例子多半没开辉光，而这边默认开着。
     pub post: &'a mut krender::PostSettings,
+    /// 计算着色器的入口，和渲染器**共用**同一台 GPU 设备。
+    ///
+    /// 共用是要紧的：算出来的缓冲能直接被渲染管线拿去用。
+    /// 自己开一台（[`ComputeContext::headless`](krender::ComputeContext::headless)）
+    /// 得到的缓冲和渲染那边互不相通。
+    ///
+    /// 克隆很便宜（内部是 `Arc`），可以自行保存副本。
+    pub compute: krender::ComputeContext,
     /// 阴影级联的划分参数。改了下一帧生效。
     ///
     /// 场景尺度和默认那套差得远时一定要调：默认按几十米的户外场景配，
