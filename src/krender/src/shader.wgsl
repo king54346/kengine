@@ -14,6 +14,12 @@
 // 这正是 bevy 那边 `FallbackImage` 在做的事。
 @group(2) @binding(6) var custom_texture0: texture_2d<f32>;
 @group(2) @binding(7) var custom_texture1: texture_2d<f32>;
+// 自定义纹理数组：一个槽位装很多张同尺寸的图，用整数层号选。
+// 没设的时候绑的是那张 1×1 白图的一层数组视图。
+//
+// 采样时**层号是第四个参数**，不是 UV 的第三个分量：
+// `textureSample(custom_texture_array, base_color_sampler, uv, layer)`。
+@group(2) @binding(8) var custom_texture_array: texture_2d_array<f32>;
 // 环境 BRDF 查找表：u = n·v，v = 粗糙度。
 @group(3) @binding(0) var brdf_lut: texture_2d<f32>;
 @group(3) @binding(1) var brdf_sampler: sampler;

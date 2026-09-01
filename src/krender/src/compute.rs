@@ -3,12 +3,13 @@
 //! 粒子模拟、图像处理、剔除、物理求解——这些都是「同一段代码跑几万遍、
 //! 每遍处理一小块数据」，正是 GPU 擅长而 CPU 吃力的形状。
 //!
-//! # 三样东西
+//! # 四样东西
 //!
 //! | | 是什么 |
 //! |---|---|
 //! | [`ComputePipeline`] | 一段编译好的计算着色器 |
-//! | [`StorageBuffer`] | GPU 上一块可读写的数据 |
+//! | [`StorageBuffer`] | GPU 上一块可读写的数据，按一维下标寻址 |
+//! | [`StorageTexture`] | GPU 上一张可写的纹理，按二维坐标寻址 |
 //! | [`ComputeContext::dispatch`] | 派 GPU 跑一遍 |
 //!
 //! ```ignore
@@ -34,8 +35,9 @@
 //!
 //! # 绑定的约定
 //!
-//! 所有缓冲绑在 **`@group(0)`**，`@binding` 按传进 [`dispatch`](ComputeContext::dispatch)
-//! 的**顺序**取 0、1、2……
+//! 所有资源绑在 **`@group(0)`**，`@binding` 按传进 [`dispatch`](ComputeContext::dispatch)
+//! 的**顺序**取 0、1、2……缓冲与纹理混着用时走
+//! [`dispatch_with`](ComputeContext::dispatch_with)。
 //!
 //! ```wgsl
 //! @group(0) @binding(0) var<storage, read_write> data: array<f32>;
@@ -114,6 +116,108 @@ impl StorageBuffer {
     /// 字节数。
     pub fn size(&self) -> u64 {
         self.size
+    }
+}
+
+/// 存储纹理的像素格式。
+///
+/// 只列了三种，因为**能当存储纹理写的格式是有限的**：不是所有格式都
+/// 支持 `textureStore`，而这三种在所有后端上都保证可用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageFormat {
+    /// 每像素一个 `u32`。计数、标号、生命游戏的格子这类整数数据用它。
+    R32Uint,
+    /// 每像素 4 个 `f32`。要精度就用它，代价是 16 字节一像素。
+    Rgba32Float,
+    /// 每像素 4 个字节，归一化到 `[0, 1]`。就是普通的 RGBA 图。
+    ///
+    /// 注意是**线性**而非 sRGB：sRGB 格式不能当存储纹理写。
+    Rgba8Unorm,
+}
+
+impl StorageFormat {
+    /// 对应的 wgpu 格式。
+    fn to_wgpu(self) -> wgpu::TextureFormat {
+        match self {
+            Self::R32Uint => wgpu::TextureFormat::R32Uint,
+            Self::Rgba32Float => wgpu::TextureFormat::Rgba32Float,
+            Self::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
+        }
+    }
+
+    /// 一个像素占几个字节。
+    pub fn bytes_per_pixel(self) -> u32 {
+        match self {
+            Self::R32Uint => 4,
+            Self::Rgba32Float => 16,
+            Self::Rgba8Unorm => 4,
+        }
+    }
+
+    /// WGSL 里写这个格式时用的名字。
+    ///
+    /// 着色器侧要写成 `texture_storage_2d<r32uint, write>`，名字必须一致。
+    pub fn wgsl_name(self) -> &'static str {
+        match self {
+            Self::R32Uint => "r32uint",
+            Self::Rgba32Float => "rgba32float",
+            Self::Rgba8Unorm => "rgba8unorm",
+        }
+    }
+}
+
+/// GPU 上一张可写的纹理。
+///
+/// 和 [`StorageBuffer`] 的区别是**寻址方式**：缓冲按一维下标，纹理按
+/// 二维坐标。图像处理、格子模拟这类天然是二维的活儿用纹理，代码里
+/// 不必反复算 `y * width + x`，而且硬件的缓存局部性也按二维来。
+#[derive(Debug)]
+pub struct StorageTexture {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+    format: StorageFormat,
+}
+
+impl StorageTexture {
+    /// 宽度（像素）。
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// 高度（像素）。
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// 像素格式。
+    pub fn format(&self) -> StorageFormat {
+        self.format
+    }
+}
+
+/// 一条 dispatch 要绑的一样东西。
+///
+/// 缓冲和纹理混着绑时用它；全是缓冲的话
+/// [`dispatch`](ComputeContext::dispatch) 更省事。
+#[derive(Debug, Clone, Copy)]
+pub enum Binding<'a> {
+    /// 一块 storage buffer。
+    Buffer(&'a StorageBuffer),
+    /// 一张 storage texture。
+    Texture(&'a StorageTexture),
+}
+
+impl<'a> From<&'a StorageBuffer> for Binding<'a> {
+    fn from(buffer: &'a StorageBuffer) -> Self {
+        Self::Buffer(buffer)
+    }
+}
+
+impl<'a> From<&'a StorageTexture> for Binding<'a> {
+    fn from(texture: &'a StorageTexture) -> Self {
+        Self::Texture(texture)
     }
 }
 
@@ -237,6 +341,124 @@ impl ComputeContext {
         StorageBuffer { buffer, size }
     }
 
+    /// 建一张清零的 storage texture。
+    ///
+    /// 着色器侧的声明必须和 `format` 对得上：
+    ///
+    /// ```wgsl
+    /// @group(0) @binding(0) var image: texture_storage_2d<rgba8unorm, write>;
+    /// ```
+    ///
+    /// 名字见 [`StorageFormat::wgsl_name`]。写错的话 wgpu 会在建绑定组时
+    /// 报「格式不匹配」。
+    ///
+    /// # 为什么只能写不能读
+    ///
+    /// 同一张纹理既读又写（`read_write`）在 WebGPU 里是要单独开特性的，
+    /// 而且不是所有后端都支持。真要「读上一代、写下一代」，就像
+    /// `compute_game_of_life` 那样开两张轮换——那本来也是更正确的做法，
+    /// 同一张纹理边读边写会让结果取决于线程调度顺序。
+    ///
+    /// 宽高会被夹到至少 1：零尺寸的纹理建不出来。
+    pub fn create_storage_texture(
+        &self,
+        label: &str,
+        width: u32,
+        height: u32,
+        format: StorageFormat,
+    ) -> StorageTexture {
+        let (width, height) = (width.max(1), height.max(1));
+
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: format.to_wgpu(),
+            // STORAGE_BINDING 给着色器写，COPY_SRC 给读回，
+            // COPY_DST 让它能被清零和被上传。
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        StorageTexture {
+            view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            texture,
+            width,
+            height,
+            format,
+        }
+    }
+
+    /// 把一张 storage texture 读回内存，逐行紧密排列（每行 `width * 像素字节`）。
+    ///
+    /// 和 [`read`](Self::read) 一样**会等 GPU 干完**，同样别放在热路径上。
+    ///
+    /// # 行对齐这件事
+    ///
+    /// GPU 拷纹理到缓冲时，每行的起始偏移必须是 256 字节的倍数。所以这里
+    /// 先按对齐后的行宽拷进 staging，再把每行的有效部分抠出来紧密排好。
+    /// 不做这一步的话，宽度不是 64 像素倍数的图读回来会**逐行错位**——
+    /// 画面上看着像斜切，很容易误判成着色器写错了坐标。
+    pub fn read_texture(&self, texture: &StorageTexture) -> Option<Vec<u8>> {
+        let bytes_per_pixel = texture.format.bytes_per_pixel();
+        let unpadded_row = texture.width * bytes_per_pixel;
+        const ALIGN: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_row = unpadded_row.div_ceil(ALIGN) * ALIGN;
+
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kengine texture readback staging"),
+            size: (padded_row * texture.height) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("kengine texture readback encoder"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(texture.height),
+                },
+            },
+            wgpu::Extent3d {
+                width: texture.width,
+                height: texture.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        let padded = self.map_and_read(&staging)?;
+
+        // 把每行的有效部分抠出来，丢掉行尾的填充。
+        let mut data = Vec::with_capacity((unpadded_row * texture.height) as usize);
+        for row in 0..texture.height {
+            let start = (row * padded_row) as usize;
+            data.extend_from_slice(&padded[start..start + unpadded_row as usize]);
+        }
+        Some(data)
+    }
+
     /// 覆写一块 storage buffer 的内容。
     ///
     /// 数据比缓冲大时什么都不做——截断着写会得到一份半新半旧的数据，
@@ -271,6 +493,27 @@ impl ComputeContext {
         bindings: &[&StorageBuffer],
         workgroups: [u32; 3],
     ) {
+        let bindings: Vec<Binding<'_>> = bindings.iter().map(|b| Binding::Buffer(b)).collect();
+        self.dispatch_with(pipeline, &bindings, workgroups);
+    }
+
+    /// 派 GPU 跑一遍，绑定可以是缓冲也可以是纹理。
+    ///
+    /// 除了绑定的种类，和 [`dispatch`](Self::dispatch) 完全一样。
+    ///
+    /// ```ignore
+    /// gpu.dispatch_with(
+    ///     &pipeline,
+    ///     &[Binding::Buffer(&counts), Binding::Texture(&image)],
+    ///     [width.div_ceil(8), height.div_ceil(8), 1],
+    /// );
+    /// ```
+    pub fn dispatch_with(
+        &self,
+        pipeline: &ComputePipeline,
+        bindings: &[Binding<'_>],
+        workgroups: [u32; 3],
+    ) {
         // 三个维度里有 0 的话一个线程都不会跑。这多半是「元素个数除以
         // 工作组大小」时忘了向上取整，静默什么都不做最难查。
         if workgroups.iter().any(|&n| n == 0) {
@@ -281,9 +524,14 @@ impl ComputeContext {
         let entries: Vec<wgpu::BindGroupEntry> = bindings
             .iter()
             .enumerate()
-            .map(|(index, buffer)| wgpu::BindGroupEntry {
+            .map(|(index, binding)| wgpu::BindGroupEntry {
                 binding: index as u32,
-                resource: buffer.buffer.as_entire_binding(),
+                resource: match binding {
+                    Binding::Buffer(buffer) => buffer.buffer.as_entire_binding(),
+                    Binding::Texture(texture) => {
+                        wgpu::BindingResource::TextureView(&texture.view)
+                    }
+                },
             })
             .collect();
 
@@ -337,6 +585,13 @@ impl ComputeContext {
         encoder.copy_buffer_to_buffer(&buffer.buffer, 0, &staging, 0, buffer.size);
         self.queue.submit(Some(encoder.finish()));
 
+        self.map_and_read(&staging)
+    }
+
+    /// 等 GPU 干完，把一块可映射的缓冲整个搬进内存。
+    ///
+    /// [`read`](Self::read) 和 [`read_texture`](Self::read_texture) 的公共尾巴。
+    fn map_and_read(&self, staging: &wgpu::Buffer) -> Option<Vec<u8>> {
         let (sender, receiver) = std::sync::mpsc::channel();
         staging
             .slice(..)
@@ -570,5 +825,155 @@ mod tests {
 
         let output = as_floats(&renderer.read(&buffer).unwrap());
         assert!(output.iter().all(|&v| v == 1.0), "不该有任何元素被改动");
+    }
+
+    // ── 存储纹理 ──
+
+    #[test]
+    fn a_compute_shader_can_write_a_storage_texture() {
+        // 纹理这条路和缓冲那条是两套绑定类型，得单独验一遍真的算对了。
+        let Some(gpu) = headless() else {
+            return;
+        };
+
+        let shader = Shader::from_wgsl(
+            r#"
+            @group(0) @binding(0) var image: texture_storage_2d<rgba8unorm, write>;
+
+            @compute @workgroup_size(8, 8)
+            fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+                let size = textureDimensions(image);
+                if (id.x >= size.x || id.y >= size.y) { return; }
+                // 横向红、纵向绿，读回来一眼能看出有没有转置或错行。
+                textureStore(image, vec2<i32>(id.xy), vec4<f32>(
+                    f32(id.x) / f32(size.x - 1u),
+                    f32(id.y) / f32(size.y - 1u),
+                    0.0,
+                    1.0,
+                ));
+            }
+            "#,
+        )
+        .unwrap();
+        let pipeline = gpu.create_pipeline(&shader).unwrap();
+
+        let image = gpu.create_storage_texture("image", 16, 16, StorageFormat::Rgba8Unorm);
+        gpu.dispatch_with(&pipeline, &[Binding::Texture(&image)], [2, 2, 1]);
+
+        let pixels = gpu.read_texture(&image).expect("该读得回来");
+
+        assert_eq!(pixels.len(), 16 * 16 * 4);
+        let at = |x: usize, y: usize| &pixels[(y * 16 + x) * 4..(y * 16 + x) * 4 + 4];
+        assert_eq!(at(0, 0), [0, 0, 0, 255]);
+        assert_eq!(at(15, 0), [255, 0, 0, 255]);
+        assert_eq!(at(0, 15), [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn rows_come_back_tightly_packed_even_when_the_width_needs_padding() {
+        // 一行 5 像素 × 4 字节 = 20 字节，而 GPU 要求每行按 256 字节对齐。
+        // 不把填充抠掉的话，读回来的图会逐行错位——看着像斜切，
+        // 很容易误判成着色器写错了坐标。
+        let Some(gpu) = headless() else {
+            return;
+        };
+
+        let shader = Shader::from_wgsl(
+            r#"
+            @group(0) @binding(0) var image: texture_storage_2d<r32uint, write>;
+
+            @compute @workgroup_size(8, 8)
+            fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+                let size = textureDimensions(image);
+                if (id.x >= size.x || id.y >= size.y) { return; }
+                textureStore(image, vec2<i32>(id.xy), vec4<u32>(id.y * size.x + id.x, 0u, 0u, 0u));
+            }
+            "#,
+        )
+        .unwrap();
+        let pipeline = gpu.create_pipeline(&shader).unwrap();
+
+        let image = gpu.create_storage_texture("counter", 5, 3, StorageFormat::R32Uint);
+        gpu.dispatch_with(&pipeline, &[Binding::Texture(&image)], [1, 1, 1]);
+
+        let bytes = gpu.read_texture(&image).unwrap();
+        assert_eq!(bytes.len(), 5 * 3 * 4, "行填充没有被抠掉");
+
+        let values: Vec<u32> = bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(values, (0..15).collect::<Vec<u32>>());
+    }
+
+    #[test]
+    fn buffers_and_textures_can_be_bound_side_by_side() {
+        // 顺序就是 @binding 的号，混着绑时尤其要钉死。
+        let Some(gpu) = headless() else {
+            return;
+        };
+
+        let shader = Shader::from_wgsl(
+            r#"
+            @group(0) @binding(0) var<storage, read> palette: array<f32>;
+            @group(0) @binding(1) var image: texture_storage_2d<rgba8unorm, write>;
+
+            @compute @workgroup_size(4, 4)
+            fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+                let size = textureDimensions(image);
+                if (id.x >= size.x || id.y >= size.y) { return; }
+                textureStore(image, vec2<i32>(id.xy), vec4<f32>(palette[id.x], 0.0, 0.0, 1.0));
+            }
+            "#,
+        )
+        .unwrap();
+        let pipeline = gpu.create_pipeline(&shader).unwrap();
+
+        let palette = gpu.create_buffer("palette", bytemuck::cast_slice(&[0.0f32, 1.0, 0.0, 1.0]));
+        let image = gpu.create_storage_texture("image", 4, 4, StorageFormat::Rgba8Unorm);
+
+        gpu.dispatch_with(
+            &pipeline,
+            &[Binding::Buffer(&palette), Binding::Texture(&image)],
+            [1, 1, 1],
+        );
+
+        let pixels = gpu.read_texture(&image).unwrap();
+        assert_eq!(&pixels[0..4], [0, 0, 0, 255]);
+        assert_eq!(&pixels[4..8], [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_fresh_storage_texture_starts_black() {
+        let Some(gpu) = headless() else {
+            return;
+        };
+
+        let image = gpu.create_storage_texture("blank", 4, 4, StorageFormat::Rgba8Unorm);
+        assert!(gpu.read_texture(&image).unwrap().iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn a_zero_sized_texture_is_clamped_instead_of_failing() {
+        // 尺寸从窗口大小算出来时，最小化的那一帧会是 0。
+        let Some(gpu) = headless() else {
+            return;
+        };
+
+        let image = gpu.create_storage_texture("tiny", 0, 0, StorageFormat::R32Uint);
+        assert_eq!((image.width(), image.height()), (1, 1));
+    }
+
+    #[test]
+    fn the_wgsl_format_names_match_what_the_shader_must_write() {
+        // Rust 侧建纹理、WGSL 侧声明格式，两边对不上时 wgpu 报的是
+        // 「绑定格式不匹配」，指不回这两个名字里的哪一个错了。
+        for (format, name) in [
+            (StorageFormat::R32Uint, "r32uint"),
+            (StorageFormat::Rgba32Float, "rgba32float"),
+            (StorageFormat::Rgba8Unorm, "rgba8unorm"),
+        ] {
+            assert_eq!(format.wgsl_name(), name);
+        }
     }
 }

@@ -103,14 +103,25 @@ impl Sampler {
 /// 一张纹理。
 ///
 /// 克隆会共享同一个 `id`，渲染器据此避免重复上传显存。
+///
+/// # 也可以是一叠
+///
+/// [`layers`](Self::layers) 大于 1 时这就是一个**纹理数组**：同样尺寸、
+/// 同样格式的若干张图叠在一起，着色器用一个整数下标去选。
+///
+/// 这和「把几张图拼进一张大图」（图集）是两回事，区别在**边界**：
+/// 图集里相邻两块会在放大或取 mip 时互相渗色，得手工留边距；
+/// 数组的每一层是独立的图，`Repeat` 平铺也只在自己这一层里绕。
 #[derive(Clone)]
 pub struct Texture {
     id: Uuid,
     width: u32,
     height: u32,
+    /// 层数。普通贴图恒为 1。
+    layers: u32,
     format: TextureFormat,
     sampler: Sampler,
-    /// RGBA8 像素，长度恒为 `width * height * 4`。
+    /// RGBA8 像素，长度恒为 `width * height * 4 * layers`，逐层排列。
     data: Vec<u8>,
 }
 
@@ -133,8 +144,77 @@ impl Texture {
             id: Uuid::new_v4(),
             width,
             height,
+            layers: 1,
             format: TextureFormat::default(),
             sampler: Sampler::default(),
+            data,
+        }
+    }
+
+    /// 用逐层排列的 RGBA8 数据创建一个纹理数组。
+    ///
+    /// # Panics
+    ///
+    /// `layers` 为 0，或 `data` 长度不等于 `width * height * 4 * layers` 时 panic。
+    /// 长度对不上不是能兜底的事——多出来的字节会被静默丢掉，
+    /// 少了则会让某一层是别人的像素，而两种情况都不报错。
+    pub fn array(width: u32, height: u32, layers: u32, data: Vec<u8>) -> Self {
+        assert!(layers > 0, "纹理数组至少要有一层");
+        let expected = width as usize * height as usize * 4 * layers as usize;
+        assert_eq!(
+            data.len(),
+            expected,
+            "{layers} 层 {width}×{height} 需要 {expected} 字节，实际 {}",
+            data.len()
+        );
+
+        Self {
+            id: Uuid::new_v4(),
+            width,
+            height,
+            layers,
+            format: TextureFormat::default(),
+            sampler: Sampler::default(),
+            data,
+        }
+    }
+
+    /// 把几张同尺寸的贴图叠成一个纹理数组。
+    ///
+    /// 层的顺序就是传进来的顺序——着色器里的下标即这里的下标。
+    ///
+    /// 格式与采样设置取**第一张**的：一个数组只有一份格式和一个采样器，
+    /// 混着放本来就不成立。
+    ///
+    /// # Panics
+    ///
+    /// 传空切片，或各层尺寸不一致时 panic。尺寸不一致在 GPU 上没有
+    /// 任何合理解释，早崩比画出错位的图好查。
+    pub fn from_layers(layers: &[Texture]) -> Self {
+        let Some(first) = layers.first() else {
+            panic!("纹理数组至少要有一层");
+        };
+
+        let (width, height) = (first.width, first.height);
+        let mut data = Vec::with_capacity(width as usize * height as usize * 4 * layers.len());
+        for (index, layer) in layers.iter().enumerate() {
+            assert!(
+                layer.width == width && layer.height == height,
+                "第 {index} 层是 {}×{}，和第 0 层的 {width}×{height} 不一致",
+                layer.width,
+                layer.height
+            );
+            assert_eq!(layer.layers, 1, "第 {index} 层自己就是个数组，不能再叠");
+            data.extend_from_slice(&layer.data);
+        }
+
+        Self {
+            id: Uuid::new_v4(),
+            width,
+            height,
+            layers: layers.len() as u32,
+            format: first.format,
+            sampler: first.sampler,
             data,
         }
     }
@@ -254,6 +334,26 @@ impl Texture {
         self.height
     }
 
+    /// 层数。普通贴图是 1，纹理数组大于 1。
+    pub fn layers(&self) -> u32 {
+        self.layers
+    }
+
+    /// 是不是纹理数组（层数大于 1）。
+    pub fn is_array(&self) -> bool {
+        self.layers > 1
+    }
+
+    /// 取某一层的像素。下标越界时返回 [`None`]。
+    pub fn layer(&self, index: u32) -> Option<&[u8]> {
+        if index >= self.layers {
+            return None;
+        }
+        let stride = self.width as usize * self.height as usize * 4;
+        let start = index as usize * stride;
+        Some(&self.data[start..start + stride])
+    }
+
     /// 像素格式。
     pub fn format(&self) -> TextureFormat {
         self.format
@@ -277,6 +377,7 @@ impl fmt::Debug for Texture {
             .field("id", &self.id)
             .field("width", &self.width)
             .field("height", &self.height)
+            .field("layers", &self.layers)
             .field("format", &self.format)
             .field("bytes", &self.data.len())
             .finish()
@@ -404,5 +505,74 @@ mod test {
     fn zero_cell_size_does_not_divide_by_zero() {
         let texture = Texture::checkerboard(2, 0, [1, 1, 1, 1], [2, 2, 2, 2]);
         assert_eq!(texture.data().len(), 2 * 2 * 4);
+    }
+
+    // ── 纹理数组 ──
+
+    #[test]
+    fn a_plain_texture_has_exactly_one_layer() {
+        let texture = Texture::white();
+        assert_eq!(texture.layers(), 1);
+        assert!(!texture.is_array());
+    }
+
+    #[test]
+    fn stacking_layers_concatenates_their_pixels() {
+        let red = Texture::solid(2, 2, [255, 0, 0, 255]);
+        let blue = Texture::solid(2, 2, [0, 0, 255, 255]);
+
+        let array = Texture::from_layers(&[red, blue]);
+
+        assert_eq!(array.layers(), 2);
+        assert!(array.is_array());
+        assert_eq!(array.width(), 2);
+        assert_eq!(array.data().len(), 2 * 2 * 4 * 2);
+        assert_eq!(&array.layer(0).unwrap()[..4], &[255, 0, 0, 255]);
+        assert_eq!(&array.layer(1).unwrap()[..4], &[0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn the_first_layer_decides_format_and_sampler() {
+        // 一个数组只有一份格式和一个采样器，混着放本来就不成立。
+        let first = Texture::solid(1, 1, [0; 4])
+            .with_format(TextureFormat::Linear)
+            .with_sampler(Sampler::pixelated());
+        let second = Texture::solid(1, 1, [0; 4]);
+
+        let array = Texture::from_layers(&[first, second]);
+
+        assert_eq!(array.format(), TextureFormat::Linear);
+        assert_eq!(array.sampler().mag_filter, FilterMode::Nearest);
+    }
+
+    #[test]
+    fn layer_indexes_past_the_end_return_none() {
+        let array = Texture::from_layers(&[Texture::white(), Texture::white()]);
+        assert!(array.layer(1).is_some());
+        assert!(array.layer(2).is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "不一致")]
+    fn mismatched_layer_sizes_panic_instead_of_rendering_garbage() {
+        Texture::from_layers(&[Texture::solid(2, 2, [0; 4]), Texture::solid(4, 4, [0; 4])]);
+    }
+
+    #[test]
+    #[should_panic(expected = "至少要有一层")]
+    fn an_empty_stack_panics() {
+        Texture::from_layers(&[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "字节")]
+    fn array_data_of_the_wrong_length_panics() {
+        // 少了会让某一层是别人的像素，多了会被静默丢掉，两种都不报错。
+        Texture::array(2, 2, 3, vec![0; 2 * 2 * 4 * 2]);
+    }
+
+    #[test]
+    fn a_one_layer_array_is_not_an_array() {
+        assert!(!Texture::array(1, 1, 1, vec![0; 4]).is_array());
     }
 }

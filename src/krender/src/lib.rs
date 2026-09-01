@@ -20,7 +20,10 @@ mod sprite2d;
 mod tonemap;
 mod ui;
 
-pub use compute::{ComputeContext, ComputeError, ComputePipeline, StorageBuffer};
+pub use compute::{
+    Binding as ComputeBinding, ComputeContext, ComputeError, ComputePipeline, StorageBuffer,
+    StorageFormat, StorageTexture,
+};
 pub use post::PostSettings;
 pub use tonemap::ToneMapping;
 // 级联参数本身属于 `klight`，但调它的人是冲着「渲染器怎么画阴影」来的，
@@ -206,8 +209,20 @@ fn custom_params_of(material: &kmaterial::Material) -> [[f32; 4]; PARAM_SLOTS] {
 /// 自定义参数槽位数，和 WGSL 里 `params` 数组的长度必须一致。
 const PARAM_SLOTS: usize = kmaterial::standard::PARAM_SLOTS;
 
-/// 材质贴图槽位数：5 个标准的 + 2 个自定义的。
+/// 材质贴图槽位数：5 个标准的 + 2 个自定义的。全部是 `texture_2d`。
 const TEXTURE_SLOTS: usize = 5 + kmaterial::standard::CUSTOM_TEXTURE_SLOTS;
+
+/// 自定义纹理数组在 group(2) 里的绑定号。
+///
+/// 排在那些 `texture_2d` 之后。sampler 占了 binding 1，所以第 n 张
+/// 二维贴图的绑定号是 n + 1，数组接在最后一张后面。
+const ARRAY_TEXTURE_BINDING: u32 = TEXTURE_SLOTS as u32 + 1;
+
+/// 绑定组缓存键的长度：那些 `texture_2d` 各占一格，末尾再加一格给纹理数组。
+///
+/// 数组不能挤进 `TEXTURE_SLOTS` 里边：那个数组的每一格都会被当成
+/// `texture_2d` 去建绑定，而纹理数组要的是另一种视图。
+const TEXTURE_KEY_SLOTS: usize = TEXTURE_SLOTS + 1;
 
 /// 从材质里取出纹理坐标变换：`[缩放x, 缩放y, 偏移x, 偏移y]`。
 ///
@@ -255,7 +270,7 @@ struct DrawCall {
     /// 后一个会被前一个的着色器画出来。
     shader_id: Uuid,
     /// 材质贴图绑定组的缓存键（五张贴图 id 的组合）。
-    texture_key: [Uuid; TEXTURE_SLOTS],
+    texture_key: [Uuid; TEXTURE_KEY_SLOTS],
     /// 是否走蒙皮管线。蒙皮与静态的顶点布局不同，不能混在一批里。
     skinned: bool,
     /// 到相机的距离平方，半透明物体按它从远到近排序。
@@ -276,7 +291,7 @@ struct Batch {
     mesh_id: Uuid,
     /// 自定义材质钩子的 id；[`Uuid::nil`] 表示标准着色器。
     shader_id: Uuid,
-    texture_key: [Uuid; TEXTURE_SLOTS],
+    texture_key: [Uuid; TEXTURE_KEY_SLOTS],
     /// 是否走蒙皮管线。
     skinned: bool,
     /// 本批第一个实例在存储缓冲中的下标。
@@ -631,7 +646,7 @@ pub struct Renderer {
     ///
     /// 用组合而非材质 id 作键，是为了让异步加载中的贴图就绪后自动换上——
     /// 贴图 id 一变，键就变，会重新建一个绑定组。
-    material_bind_groups: FxHashMap<[Uuid; TEXTURE_SLOTS], wgpu::BindGroup>,
+    material_bind_groups: FxHashMap<[Uuid; TEXTURE_KEY_SLOTS], wgpu::BindGroup>,
     /// 材质缺某张贴图时顶上的中性贴图。
     default_textures: DefaultTextures,
     meshes: FxHashMap<Uuid, GpuMesh>,
@@ -644,6 +659,12 @@ pub struct Renderer {
 /// 用一个共用采样器会让这些设置全部失效。
 pub(crate) struct GpuTexture {
     view: wgpu::TextureView,
+    /// 同一张纹理的 `D2Array` 视图。
+    ///
+    /// 一张纹理只能被绑到**维度对得上**的绑定上，而两种维度是两个绑定，
+    /// 所以两份视图都得留着。普通贴图的这一份是「一层的数组」，
+    /// 用不上也不占什么——视图只是个描述符，像素还是那一份。
+    array_view: wgpu::TextureView,
     sampler: wgpu::Sampler,
 }
 
@@ -902,6 +923,22 @@ impl Renderer {
                 count: None,
             });
         }
+        // 自定义材质的纹理数组。维度和上面那些不同（`D2Array`），所以只能
+        // 单独列一条——同一个绑定不可能既是 `texture_2d` 又是
+        // `texture_2d_array`，那是两种类型。
+        //
+        // 没设的时候绑的是那张 1×1 白图的数组视图（一层）：着色器照样
+        // 采得到，采出来是 1，和别的槽位一个道理。
+        texture_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: ARRAY_TEXTURE_BINDING,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        });
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("kengine texture layout"),
             entries: &texture_entries,
@@ -2498,9 +2535,10 @@ impl Renderer {
     ///
     /// 贴图仍在异步加载时先用中性贴图顶上；加载完成后 id 变化会让键变化，
     /// 下一帧自然换成真正的贴图。
-    fn ensure_material_textures(&mut self, material: &Material) -> [Uuid; TEXTURE_SLOTS] {
+    fn ensure_material_textures(&mut self, material: &Material) -> [Uuid; TEXTURE_KEY_SLOTS] {
         // 顺序即 group(2) 的 binding 顺序，改这里就得改 `shader.wgsl`。
-        const SLOTS: [&str; TEXTURE_SLOTS] = [
+        // 末尾多的那一个是纹理数组，绑到 `ARRAY_TEXTURE_BINDING`。
+        const SLOTS: [&str; TEXTURE_KEY_SLOTS] = [
             kmaterial::standard::BASE_COLOR_TEXTURE,
             kpbr::standard::NORMAL_TEXTURE,
             kpbr::standard::METALLIC_ROUGHNESS_TEXTURE,
@@ -2508,9 +2546,10 @@ impl Renderer {
             kpbr::standard::EMISSIVE_TEXTURE,
             kmaterial::standard::CUSTOM_TEXTURES[0],
             kmaterial::standard::CUSTOM_TEXTURES[1],
+            kmaterial::standard::CUSTOM_TEXTURE_ARRAY,
         ];
 
-        let mut key = [Uuid::nil(); TEXTURE_SLOTS];
+        let mut key = [Uuid::nil(); TEXTURE_KEY_SLOTS];
         for (slot, name) in SLOTS.iter().enumerate() {
             let Some(handle) = material
                 .get(name)
@@ -2538,7 +2577,7 @@ impl Renderer {
         key
     }
 
-    fn create_material_bind_group(&self, key: &[Uuid; TEXTURE_SLOTS]) -> wgpu::BindGroup {
+    fn create_material_bind_group(&self, key: &[Uuid; TEXTURE_KEY_SLOTS]) -> wgpu::BindGroup {
         // 第二个槽位是法线贴图，缺失时要用「不扰动」的中性法线而非白色。
         let texture_for = |slot: usize| -> &GpuTexture {
             self.gpu_textures.get(&key[slot]).unwrap_or({
@@ -2568,6 +2607,14 @@ impl Renderer {
                 resource: wgpu::BindingResource::TextureView(&texture_for(slot).view),
             });
         }
+        // 纹理数组走另一份视图。没设的时候落到白图的数组视图——
+        // 它只有一层，采任何层号都得到白色，钩子不必为缺图写分支。
+        entries.push(wgpu::BindGroupEntry {
+            binding: ARRAY_TEXTURE_BINDING,
+            resource: wgpu::BindingResource::TextureView(
+                &texture_for(TEXTURE_KEY_SLOTS - 1).array_view,
+            ),
+        });
 
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("kengine material bind group"),
@@ -3467,10 +3514,11 @@ pub(crate) fn upload_texture(
     queue: &wgpu::Queue,
     texture: &Texture,
 ) -> GpuTexture {
+    let layers = texture.layers().max(1);
     let size = wgpu::Extent3d {
         width: texture.width().max(1),
         height: texture.height().max(1),
-        depth_or_array_layers: 1,
+        depth_or_array_layers: layers,
     };
 
     let format = match texture.format() {
@@ -3517,8 +3565,22 @@ pub(crate) fn upload_texture(
         ..Default::default()
     });
 
+    // 两份视图，见 `GpuTexture::array_view`。
+    //
+    // 二维那份必须显式限定成「第 0 层，共 1 层」：不写的话 wgpu 会按
+    // 层数自己挑维度，多层纹理拿到的是 `D2Array`，绑到 `texture_2d` 的
+    // 槽位上直接被打回。
     GpuTexture {
-        view: gpu_texture.create_view(&wgpu::TextureViewDescriptor::default()),
+        view: gpu_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+            ..Default::default()
+        }),
+        array_view: gpu_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        }),
         sampler,
     }
 }
@@ -3684,15 +3746,30 @@ mod test {
         // 报「绑定数量不匹配」——那还算好的；少声明一个则是静默
         // 采样到别人的贴图。
         let source = include_str!("shader.wgsl");
-        for binding in 0..TEXTURE_SLOTS + 1 {
+        // 0 是基础色，1 是采样器，2..=TEXTURE_SLOTS 是其余二维贴图，
+        // 最后 ARRAY_TEXTURE_BINDING 是纹理数组。
+        for binding in 0..=ARRAY_TEXTURE_BINDING {
             assert!(
                 source.contains(&format!("@group(2) @binding({binding})")),
                 "shader.wgsl 缺少 group(2) 的 binding {binding}"
             );
         }
         assert!(
-            !source.contains(&format!("@group(2) @binding({})", TEXTURE_SLOTS + 1)),
+            !source.contains(&format!("@group(2) @binding({})", ARRAY_TEXTURE_BINDING + 1)),
             "shader.wgsl 的 group(2) 声明多于布局里登记的数量"
+        );
+    }
+
+    #[test]
+    fn the_texture_array_binding_is_declared_as_an_array() {
+        // 维度写错的话 wgpu 会在建管线时报「绑定类型不匹配」，
+        // 但报的是绑定号，对应回哪个变量要自己数。
+        assert!(
+            include_str!("shader.wgsl").contains(&format!(
+                "@group(2) @binding({ARRAY_TEXTURE_BINDING}) var {}: texture_2d_array<f32>",
+                kmaterial::standard::CUSTOM_TEXTURE_ARRAY
+            )),
+            "纹理数组的声明和 Rust 侧的槽位名或绑定号对不上"
         );
     }
 
@@ -3756,7 +3833,7 @@ mod test {
         DrawCall {
             mesh_id: Uuid::from_u128(mesh),
             shader_id: Uuid::nil(),
-            texture_key: [Uuid::from_u128(texture); TEXTURE_SLOTS],
+            texture_key: [Uuid::from_u128(texture); TEXTURE_KEY_SLOTS],
             skinned: false,
             depth: 0.0,
             aabb: kmath::Aabb::new(kmath::Vec3::ZERO, kmath::Vec3::ONE),

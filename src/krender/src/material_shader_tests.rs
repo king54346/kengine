@@ -327,3 +327,39 @@ fn override_constants_travel_with_the_shader_resource() {
     assert_eq!(two.constant_overrides(), vec![("LEVELS", 2.0)]);
     assert_eq!(eight.constant_overrides(), vec![("LEVELS", 8.0)]);
 }
+
+#[test]
+fn a_hook_can_sample_the_custom_texture_array() {
+    // 层号是第四个参数，不是 UV 的第三个分量——写错的话 naga 会说
+    // 「参数个数不对」，但很容易先怀疑到别处去。
+    compile(
+        r#"
+        fn material_surface(surface: Surface) -> Surface {
+            var out = surface;
+            let layer = i32(surface.params[0].x);
+            out.base_color = textureSample(
+                custom_texture_array,
+                base_color_sampler,
+                surface.uv,
+                layer,
+            );
+            return out;
+        }
+        "#,
+    )
+    .expect("采样纹理数组的钩子应当通过校验");
+}
+
+#[test]
+fn the_texture_array_name_matches_the_material_slot() {
+    // Rust 侧按 `CUSTOM_TEXTURE_ARRAY` 去材质表里取值，WGSL 侧按变量名去用。
+    // 对不上的症状是「数组设了但采不到」，而且两边各自都编译得过。
+    assert!(
+        standard_shader_source().contains(&format!(
+            "var {}: texture_2d_array<f32>",
+            kmaterial::standard::CUSTOM_TEXTURE_ARRAY
+        )),
+        "shader.wgsl 里没有声明 {}",
+        kmaterial::standard::CUSTOM_TEXTURE_ARRAY
+    );
+}

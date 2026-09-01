@@ -80,6 +80,15 @@ pub mod standard {
 
     /// 自定义贴图槽位的数量。
     pub const CUSTOM_TEXTURE_SLOTS: usize = 2;
+
+    /// 自定义**纹理数组**的槽位名。
+    ///
+    /// 着色器钩子里的变量名与这里同名：
+    /// `textureSample(custom_texture_array, base_color_sampler, uv, layer)`。
+    ///
+    /// 只有一个槽位而上面的二维贴图有两个，是因为纹理数组本身就是
+    /// 「一个槽位装很多张图」——真需要更多张就多加几层，不必多开槽位。
+    pub const CUSTOM_TEXTURE_ARRAY: &str = "custom_texture_array";
 }
 
 /// 一个材质参数值。
@@ -406,6 +415,30 @@ impl Material {
     /// 读取一张自定义材质贴图。
     pub fn custom_texture(&self, slot: usize) -> Option<&Resource<Texture>> {
         self.get(standard::CUSTOM_TEXTURES.get(slot)?)
+            .and_then(MaterialValue::as_texture)
+    }
+
+    /// 设置自定义纹理数组（着色器钩子里的 `custom_texture_array`）。
+    ///
+    /// 传的应当是一张 [`Texture::layers`] 大于 1 的纹理
+    /// （[`Texture::from_layers`] 造出来的那种）。传普通贴图也能工作，
+    /// 只是那个数组只有一层。
+    ///
+    /// [`Texture::layers`]: ktexture::Texture::layers
+    /// [`Texture::from_layers`]: ktexture::Texture::from_layers
+    pub fn set_texture_array(&mut self, texture: Resource<Texture>) {
+        self.set(standard::CUSTOM_TEXTURE_ARRAY, texture);
+    }
+
+    /// 链式设置自定义纹理数组。
+    pub fn with_texture_array(mut self, texture: Resource<Texture>) -> Self {
+        self.set_texture_array(texture);
+        self
+    }
+
+    /// 读取自定义纹理数组。
+    pub fn texture_array(&self) -> Option<&Resource<Texture>> {
+        self.get(standard::CUSTOM_TEXTURE_ARRAY)
             .and_then(MaterialValue::as_texture)
     }
 
