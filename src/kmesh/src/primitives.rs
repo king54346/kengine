@@ -7,48 +7,64 @@ impl Mesh {
     /// 边长为 1 的立方体，六个面各有独立法线与完整 UV。
     pub fn cube() -> Self {
         // 每个面 4 个顶点，法线沿面朝外；UV 按左上→左下→右下→右上铺满。
+        //
+        // # 四个角的顺序不能随便写
+        //
+        // 渲染器开着背面剔除（`front_face: Ccw` + `cull_mode: Back`），
+        // 绕序反了的面**从外面就是看不见的**，而且不报任何错——
+        // 立方体会变成只剩几个面的空壳。曾经 ±X 和 ±Y 四个面就是反的。
+        //
+        // 定角的规矩：给这个面挑一组「向右」`r` 和「向上」`u`，
+        // 使 `r × u == 法线`（右手系）。然后按
+        // 左上 `-r+u`、左下 `-r-u`、右下 `+r-u`、右上 `+r+u` 排。
+        // 这样出来的绕序必然是对的——展开算一下就是
+        // `(v1-v0) × (v2-v0) = 4(r × u) = 4n`。
+        //
+        // 同一组 `r`/`u` 也决定了贴图怎么贴：`r` 是 u 增大的方向，
+        // `u` 是 v **减小**的方向（v 向下）。所以下面每个面都标出了
+        // 自己那组 r/u。
         const FACES: [([f32; 3], [[f32; 3]; 4]); 6] = [
-            // +X
+            // +X：r = -Z，u = +Y
             (
                 [1.0, 0.0, 0.0],
                 [
-                    [0.5, 0.5, -0.5],
-                    [0.5, -0.5, -0.5],
-                    [0.5, -0.5, 0.5],
                     [0.5, 0.5, 0.5],
+                    [0.5, -0.5, 0.5],
+                    [0.5, -0.5, -0.5],
+                    [0.5, 0.5, -0.5],
                 ],
             ),
-            // -X
+            // -X：r = +Z，u = +Y
             (
                 [-1.0, 0.0, 0.0],
                 [
-                    [-0.5, 0.5, 0.5],
-                    [-0.5, -0.5, 0.5],
-                    [-0.5, -0.5, -0.5],
                     [-0.5, 0.5, -0.5],
+                    [-0.5, -0.5, -0.5],
+                    [-0.5, -0.5, 0.5],
+                    [-0.5, 0.5, 0.5],
                 ],
             ),
-            // +Y
+            // +Y：r = +X，u = -Z（顶面的「上」朝 -Z，即贴图的上方朝北）
             (
                 [0.0, 1.0, 0.0],
                 [
-                    [-0.5, 0.5, 0.5],
                     [-0.5, 0.5, -0.5],
-                    [0.5, 0.5, -0.5],
+                    [-0.5, 0.5, 0.5],
                     [0.5, 0.5, 0.5],
+                    [0.5, 0.5, -0.5],
                 ],
             ),
-            // -Y
+            // -Y：r = +X，u = +Z
             (
                 [0.0, -1.0, 0.0],
                 [
-                    [-0.5, -0.5, -0.5],
                     [-0.5, -0.5, 0.5],
-                    [0.5, -0.5, 0.5],
+                    [-0.5, -0.5, -0.5],
                     [0.5, -0.5, -0.5],
+                    [0.5, -0.5, 0.5],
                 ],
             ),
-            // +Z
+            // +Z：r = +X，u = +Y
             (
                 [0.0, 0.0, 1.0],
                 [
@@ -58,7 +74,7 @@ impl Mesh {
                     [0.5, 0.5, 0.5],
                 ],
             ),
-            // -Z
+            // -Z：r = -X，u = +Y
             (
                 [0.0, 0.0, -1.0],
                 [
@@ -159,8 +175,16 @@ impl Mesh {
                 let a = ring * stride + segment;
                 let b = a + stride;
 
+                // 绕序：从球**外面**看必须是逆时针，否则整个球会被背面剔除
+                // 剔掉，看到的变成远侧半球的内壁——轮廓一模一样，
+                // 但法线全背对相机，光照和深度都是错的。
+                //
+                // `a` 同环右邻是 `a + 1`，下一环正下方是 `b`。
+                // 沿 `a → a+1 → b` 走出来的法线朝外（`recompute_tangents`
+                // 也靠这个方向）。
+                //
                 // 两极处会退化成三角形，多出的那个三角形面积为零，无需特判。
-                indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
+                indices.extend_from_slice(&[a, a + 1, b, a + 1, b + 1, b]);
             }
         }
 
@@ -395,6 +419,113 @@ mod test {
             assert!(
                 face.dot(center) > -1e-4,
                 "三角形朝里了：面法线 {face:?}，中心 {center:?}"
+            );
+        }
+    }
+
+    // ── 绕序 ──
+    //
+    // 真正决定「看不看得见」的是 GPU 的剔除规则，那条在
+    // `krender/tests/culling_convention.rs` 里真的渲一遍验。
+    // 这里验的是**便宜的那一半**：三角形绕序和它自己的顶点法线一致。
+    // 两者等价（渲染器的约定就是「几何法线朝相机 = 正面」），
+    // 但这一条不需要显卡，CI 上也跑得动。
+
+    /// 一个三角形的几何法线（右手系叉积）。
+    fn geometric_normal(mesh: &Mesh, tri: &[u32]) -> Vec3 {
+        let p = |i: u32| Vec3::from(mesh.vertices()[i as usize].position);
+        (p(tri[1]) - p(tri[0])).cross(p(tri[2]) - p(tri[0]))
+    }
+
+    /// 每个三角形的绕序都要和顶点法线一致。
+    ///
+    /// 面积为零的三角形（球的两极）跳过——它没有朝向可言。
+    fn assert_winding_matches_normals(name: &str, mesh: &Mesh) {
+        let mut checked = 0;
+        for (index, tri) in mesh.indices().chunks_exact(3).enumerate() {
+            let geometric = geometric_normal(mesh, tri);
+            if geometric.length() < 1e-6 {
+                continue;
+            }
+            let vertex = tri
+                .iter()
+                .map(|&i| Vec3::from(mesh.vertices()[i as usize].normal))
+                .fold(Vec3::ZERO, |a, b| a + b);
+
+            assert!(
+                geometric.dot(vertex) > 0.0,
+                "{name} 的三角形 #{index} 绕序反了：                 几何法线 {geometric:?}，顶点法线 {vertex:?}。                 这种面从外面看不见，而且不报任何错。"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "{name} 一个有效三角形都没有");
+    }
+
+    #[test]
+    fn every_cube_face_is_wound_outwards() {
+        // 这一条曾经挂过：±X 和 ±Y 四个面反着绕，立方体在画面上
+        // 只剩两个面看得见。
+        assert_winding_matches_normals("立方体", &Mesh::cube());
+    }
+
+    #[test]
+    fn the_sphere_is_wound_outwards() {
+        // 这一条也曾经挂过，而且更隐蔽：球翻面之后轮廓一模一样，
+        // 只是看到的变成了远侧半球的内壁。
+        assert_winding_matches_normals("球", &Mesh::sphere(12, 18));
+    }
+
+    #[test]
+    fn the_plane_is_wound_upwards() {
+        assert_winding_matches_normals("平面", &Mesh::plane(1.0));
+    }
+
+    #[test]
+    fn the_cylinder_is_wound_outwards() {
+        assert_winding_matches_normals("圆柱", &Mesh::cylinder(16));
+    }
+
+    #[test]
+    fn the_cube_has_one_quad_per_axis_direction() {
+        // 六个面的法线必须各占一个轴向。修绕序时把某个面的顶点抄错位置
+        // 的话，这一条会先响。
+        let mut normals: Vec<[i32; 3]> = Mesh::cube()
+            .vertices()
+            .chunks_exact(4)
+            .map(|face| {
+                let n = face[0].normal;
+                [n[0] as i32, n[1] as i32, n[2] as i32]
+            })
+            .collect();
+        normals.sort();
+
+        assert_eq!(
+            normals,
+            vec![
+                [-1, 0, 0],
+                [0, -1, 0],
+                [0, 0, -1],
+                [0, 0, 1],
+                [0, 1, 0],
+                [1, 0, 0],
+            ]
+        );
+    }
+
+    #[test]
+    fn every_cube_face_covers_the_whole_uv_square() {
+        // 定角的规矩改动之后 UV 很容易跟着错位。每个面的四个角
+        // 应当正好是 (0,0)、(0,1)、(1,1)、(1,0) 各一个。
+        for (index, face) in Mesh::cube().vertices().chunks_exact(4).enumerate() {
+            let mut uvs: Vec<[i32; 2]> = face
+                .iter()
+                .map(|v| [v.uv[0] as i32, v.uv[1] as i32])
+                .collect();
+            uvs.sort();
+            assert_eq!(
+                uvs,
+                vec![[0, 0], [0, 1], [1, 0], [1, 1]],
+                "第 {index} 个面的 UV 没铺满"
             );
         }
     }

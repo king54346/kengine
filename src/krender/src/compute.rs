@@ -516,7 +516,7 @@ impl ComputeContext {
     ) {
         // 三个维度里有 0 的话一个线程都不会跑。这多半是「元素个数除以
         // 工作组大小」时忘了向上取整，静默什么都不做最难查。
-        if workgroups.iter().any(|&n| n == 0) {
+        if workgroups.contains(&0) {
             klog::warn!("dispatch 的工作组数含 0：{workgroups:?}，什么都不会执行");
             return;
         }
@@ -528,9 +528,7 @@ impl ComputeContext {
                 binding: index as u32,
                 resource: match binding {
                     Binding::Buffer(buffer) => buffer.buffer.as_entire_binding(),
-                    Binding::Texture(texture) => {
-                        wgpu::BindingResource::TextureView(&texture.view)
-                    }
+                    Binding::Texture(texture) => wgpu::BindingResource::TextureView(&texture.view),
                 },
             })
             .collect();
@@ -601,7 +599,11 @@ impl ComputeContext {
             });
 
         // 必须 poll 到底：映射的回调是在 poll 里跑的，不 poll 就永远等不到。
-        if self.device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
+        if self
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .is_err()
+        {
             klog::error!("等待 GPU 时设备出错");
             return None;
         }
@@ -975,5 +977,74 @@ mod tests {
         ] {
             assert_eq!(format.wgsl_name(), name);
         }
+    }
+
+    #[test]
+    fn an_override_constant_actually_reaches_the_driver() {
+        // 管线常量这条路唯一能自动验证的地方：算出来的数不一样。
+        // 渲染管线走的是同一份 `PipelineCompilationOptions`，
+        // 但那边只能靠肉眼看画面。
+        let Some(gpu) = headless() else {
+            return;
+        };
+
+        const SOURCE: &str = r#"
+            override FACTOR: f32 = 1.0;
+
+            @group(0) @binding(0) var<storage, read_write> data: array<f32>;
+
+            @compute @workgroup_size(64)
+            fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+                if (id.x >= arrayLength(&data)) { return; }
+                data[id.x] = data[id.x] * FACTOR;
+            }
+        "#;
+
+        let run = |factor: Option<f64>| -> Vec<f32> {
+            let mut shader = Shader::from_wgsl(SOURCE).unwrap();
+            if let Some(factor) = factor {
+                shader = shader.with_constant("FACTOR", factor);
+            }
+            let pipeline = gpu.create_pipeline(&shader).unwrap();
+            let buffer = gpu.create_buffer("data", bytemuck::cast_slice(&[1.0f32; 64]));
+            gpu.dispatch(&pipeline, &[&buffer], [1, 1, 1]);
+            as_floats(&gpu.read(&buffer).unwrap())
+        };
+
+        assert_eq!(run(None)[0], 1.0, "没设常量时该用声明处的默认值");
+        assert_eq!(run(Some(7.0))[0], 7.0, "设了常量却没生效");
+        assert_eq!(run(Some(0.25))[0], 0.25);
+    }
+
+    #[test]
+    fn a_constant_can_be_derived_from_another_constant() {
+        // `override B = 1.0 / A;` 只覆盖 A，B 要在建管线时跟着算出来。
+        // 这是 `override` 比 uniform 多出来的那点东西——编译期就定下了值。
+        let Some(gpu) = headless() else {
+            return;
+        };
+
+        let shader = Shader::from_wgsl(
+            r#"
+            override LEVELS: f32 = 4.0;
+            override STEP: f32 = 1.0 / LEVELS;
+
+            @group(0) @binding(0) var<storage, read_write> data: array<f32>;
+
+            @compute @workgroup_size(64)
+            fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+                if (id.x >= arrayLength(&data)) { return; }
+                data[id.x] = STEP;
+            }
+            "#,
+        )
+        .unwrap()
+        .with_constant("LEVELS", 8.0);
+
+        let pipeline = gpu.create_pipeline(&shader).unwrap();
+        let buffer = gpu.create_buffer_zeroed("data", 64 * 4);
+        gpu.dispatch(&pipeline, &[&buffer], [1, 1, 1]);
+
+        assert_eq!(as_floats(&gpu.read(&buffer).unwrap())[0], 0.125);
     }
 }
