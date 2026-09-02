@@ -1781,6 +1781,7 @@ dependencies = [
 name = "kengine"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "criterion",
  "kanim",
  "kapp",

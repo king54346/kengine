@@ -38,6 +38,11 @@
 // 不透明几何的深度。半透明 pass 用只读深度附件，所以同一张纹理
 // 既当深度测试的对象又当采样源。
 @group(3) @binding(7) var scene_depth_texture: texture_depth_2d;
+// 屏幕空间环境光遮蔽。1 = 完全不遮，0 = 全黑。
+//
+// 关掉 SSAO 时这里绑的是一张 1×1 的白图——「没有 SSAO」于是等价于
+// 「乘 1」，着色器不必为它写分支。和缺贴图时绑白图是同一个套路。
+@group(3) @binding(8) var ssao_texture: texture_2d<f32>;
 
 
 struct VertexOutput {
@@ -246,7 +251,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let n = normalize_or_fallback(surface.normal, geometric_normal);
     let roughness = clamp(surface.roughness, 0.02, 1.0);
     let metallic = clamp(surface.metallic, 0.0, 1.0);
-    let occlusion = clamp(surface.occlusion, 0.0, 1.0);
+    // SSAO 乘进 `occlusion` 而不是乘在最终颜色上。
+    //
+    // 这一条很要紧：`occlusion` 只削弱**环境光**（`pbr_ambient`、
+    // `ibl_diffuse`、`ibl_specular` 都乘了它），直射光不受影响。
+    // 把 AO 直接乘在最终颜色上——很多引擎图省事的做法——会把太阳照亮
+    // 的地方也一起压暗，看着像整个画面蒙了一层灰。
+    //
+    // 按屏幕坐标取：`position.xy` 就是像素坐标，AO 图和帧缓冲同分辨率，
+    // 所以直接 `textureLoad`，不必采样也不必算 UV。
+    let ssao = textureLoad(ssao_texture, vec2<i32>(in.clip_position.xy), 0).r;
+    let occlusion = clamp(surface.occlusion * ssao, 0.0, 1.0);
     let v = surface.view_direction;
 
     // 逐光源累加。光源数量由 CPU 侧截断到数组容量，这里再夹一次以防越界。

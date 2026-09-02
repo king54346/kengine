@@ -380,6 +380,7 @@ impl App {
         // 直接借渲染器的话会和 `runtime.scene` 的可变借用打架。
         let mut post = runtime.renderer.post_settings();
         let mut shadow = runtime.renderer.shadow_cascades();
+        let mut ssao = runtime.renderer.ssao();
 
         for (system_stage, system) in &mut self.systems {
             if *system_stage != stage {
@@ -402,6 +403,7 @@ impl App {
                 compute: krender::ComputeContext::from_renderer(&runtime.renderer),
                 gpu_particles: &mut runtime.gpu_particles,
                 shadow: &mut shadow,
+                ssao: &mut ssao,
                 exit_requested: &mut exit_requested,
             };
             system(&mut context);
@@ -411,6 +413,9 @@ impl App {
         }
         if shadow != runtime.renderer.shadow_cascades() {
             runtime.renderer.set_shadow_cascades(shadow);
+        }
+        if ssao != runtime.renderer.ssao() {
+            runtime.renderer.set_ssao(ssao);
         }
 
         exit_requested
@@ -441,6 +446,7 @@ impl App {
         // `runtime.scene` 的可变借用打架。
         let mut post = runtime.renderer.post_settings();
         let mut shadow = runtime.renderer.shadow_cascades();
+        let mut ssao = runtime.renderer.ssao();
 
         let mut exit_requested = false;
         for plugin in &mut self.plugins {
@@ -461,6 +467,7 @@ impl App {
                 compute: krender::ComputeContext::from_renderer(&runtime.renderer),
                 gpu_particles: &mut runtime.gpu_particles,
                 shadow: &mut shadow,
+                ssao: &mut ssao,
                 exit_requested: &mut exit_requested,
             };
             callback(plugin, &mut context);
@@ -470,6 +477,9 @@ impl App {
         }
         if shadow != runtime.renderer.shadow_cascades() {
             runtime.renderer.set_shadow_cascades(shadow);
+        }
+        if ssao != runtime.renderer.ssao() {
+            runtime.renderer.set_ssao(ssao);
         }
 
         exit_requested

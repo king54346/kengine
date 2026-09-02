@@ -17,6 +17,7 @@ mod material_shader_tests;
 mod particle;
 mod post;
 mod sprite2d;
+mod ssao;
 mod tonemap;
 mod ui;
 
@@ -26,6 +27,7 @@ pub use compute::{
 };
 pub use particle::GpuParticles;
 pub use post::PostSettings;
+pub use ssao::SsaoSettings;
 pub use tonemap::ToneMapping;
 // 级联参数本身属于 `klight`，但调它的人是冲着「渲染器怎么画阴影」来的，
 // 和 `PostSettings` 一样从这里导出，省得调用方为一个结构体多认一个 crate。
@@ -533,6 +535,8 @@ pub struct Renderer {
     size: winit::dpi::PhysicalSize<u32>,
     pipeline: wgpu::RenderPipeline,
     depth_view: wgpu::TextureView,
+    /// 深度／法线预通道 + SSAO。默认关着，关着时两个 pass 都不跑。
+    ssao: ssao::Ssao,
 
     globals_buffer: wgpu::Buffer,
     globals_bind_group: wgpu::BindGroup,
@@ -1026,6 +1030,22 @@ impl Renderer {
                     },
                     count: None,
                 },
+                // 屏幕空间环境光遮蔽。关着的时候绑一张 1×1 白图。
+                //
+                // `R16Float` 不可过滤，所以采样类型必须写
+                // `Float { filterable: false }`——写成可过滤的话
+                // wgpu 会在建绑定组时拒绝，而报错只说「类型不匹配」。
+                // 着色器那边用的是 `textureLoad`，本来也不需要过滤。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         // 阴影贴图与 BRDF LUT 同属 group(3)，需要等阴影资源建好后一起绑定。
@@ -1200,6 +1220,18 @@ impl Renderer {
         let (scene_color, scene_color_view) =
             create_scene_color(&device, config.width, config.height);
 
+        // 预通道 + SSAO。默认关着，所以这里只是把资源备好——
+        // 不开的时候两个 pass 都不跑，主 pass 绑的是那张 1×1 白图。
+        let ssao = ssao::Ssao::new(
+            &device,
+            &queue,
+            &globals_layout,
+            &object_layout,
+            &geometry_prelude(),
+            config.width,
+            config.height,
+        );
+
         let placeholder_depth = particle::create_placeholder_depth(&device);
         let brdf_bind_group = create_brdf_lut(
             &device,
@@ -1209,6 +1241,7 @@ impl Renderer {
             &placeholder_environment,
             &scene_color_view,
             &placeholder_depth,
+            ssao.occlusion_view(),
         );
         let brdf_bind_group_transparent = create_brdf_lut(
             &device,
@@ -1218,6 +1251,7 @@ impl Renderer {
             &placeholder_environment,
             &scene_color_view,
             &depth_view,
+            ssao.occlusion_view(),
         );
         let post = PostProcess::new(&device, config.width, config.height, config.format);
         // 粒子画在主 pass 里，因此目标格式与深度格式都要与主 pass 一致。
@@ -1266,6 +1300,7 @@ impl Renderer {
             shadow,
             post,
             particles,
+            ssao,
             particle_scratch: Vec::new(),
             gizmos,
             sprites: sprite_resources,
@@ -1316,6 +1351,7 @@ impl Renderer {
             &self.environment_view,
             &self.scene_color_view,
             &self.placeholder_depth,
+            self.ssao.occlusion_view(),
         );
         self.brdf_bind_group_transparent = create_brdf_lut(
             &self.device,
@@ -1325,6 +1361,7 @@ impl Renderer {
             &self.environment_view,
             &self.scene_color_view,
             &self.depth_view,
+            self.ssao.occlusion_view(),
         );
     }
 
@@ -1444,6 +1481,24 @@ impl Renderer {
         self.ui.upload_image(&self.device, &self.queue, texture);
     }
 
+    /// SSAO 的调节项。
+    pub fn ssao(&self) -> SsaoSettings {
+        self.ssao.settings
+    }
+
+    /// 改 SSAO 的调节项。
+    ///
+    /// 开关一变就要重建 group(3)：主 pass 绑的那张遮蔽图会在
+    /// 「真的那张」和「1×1 白图」之间换。不重建的话开了没效果、
+    /// 关了还留着上一帧的遮蔽——两种都不报错。
+    pub fn set_ssao(&mut self, settings: SsaoSettings) {
+        let toggled = settings.enabled != self.ssao.settings.enabled;
+        self.ssao.settings = settings;
+        if toggled {
+            self.rebuild_scene_bind_groups();
+        }
+    }
+
     /// 当前渲染目标尺寸。
     pub fn size(&self) -> winit::dpi::PhysicalSize<u32> {
         self.size
@@ -1547,8 +1602,12 @@ impl Renderer {
         // 粒子会按旧尺寸的深度去淡出——表现为淡出边界整体错位。
         self.particles
             .set_depth_view(&self.device, &self.depth_view);
-        // group(3) 里绑着场景颜色和深度，两者都刚换过。不重建的话
-        // 自定义材质会按旧尺寸采样，折射整体错位。
+        // 预通道那三张图和帧缓冲是 1:1 的，尺寸一变就得重建——
+        // 不换的话 SSAO 会按旧尺寸的坐标去采，遮蔽整体错位。
+        self.ssao
+            .resize(&self.device, self.config.width, self.config.height);
+        // group(3) 里绑着场景颜色、深度和遮蔽图，三者都刚换过。
+        // 不重建的话自定义材质会按旧尺寸采样，折射整体错位。
         self.rebuild_scene_bind_groups();
         self.post
             .resize(&self.device, new_size.width, new_size.height);
@@ -1996,8 +2055,7 @@ impl Renderer {
         );
         // GPU 粒子的数量是游戏报的：它们在 CPU 上不存在，
         // `scratch` 里一个都没有。
-        stats.particles =
-            scratch.len() as u32 + gpu_particles.iter().map(|s| s.count).sum::<u32>();
+        stats.particles = scratch.len() as u32 + gpu_particles.iter().map(|s| s.count).sum::<u32>();
         stats.draw_calls += particle_batches.len() as u32;
         self.particle_scratch = scratch;
 
@@ -2266,6 +2324,54 @@ impl Renderer {
                     );
                 }
             }
+        }
+
+        // ── 深度／法线预通道 + SSAO ──
+        //
+        // 必须排在主 pass **之前**：主 pass 要采那张遮蔽图。
+        // 关着 SSAO 时这一整段不跑，主 pass 绑的是 1×1 白图（乘 1）。
+        if self.ssao.settings.enabled {
+            {
+                let mut pass = self.ssao.begin_prepass(&mut encoder);
+                pass.set_bind_group(0, &self.globals_bind_group, &[]);
+                pass.set_bind_group(1, &self.object_bind_group, &[]);
+
+                let mut current_skinned: Option<bool> = None;
+                for batch in &batches {
+                    let Some(gpu_mesh) = self.meshes.get(&batch.mesh_id) else {
+                        continue;
+                    };
+                    // 预通道只关心几何，不关心材质——所以换管线的判据
+                    // 只有「蒙皮与否」，比主 pass 少一半的切换。
+                    if current_skinned != Some(batch.skinned) {
+                        pass.set_pipeline(self.ssao.prepass_pipeline(batch.skinned));
+                        current_skinned = Some(batch.skinned);
+                    }
+
+                    pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
+                    if batch.skinned {
+                        let Some(skin) = gpu_mesh.skin_buffer.as_ref() else {
+                            continue;
+                        };
+                        pass.set_vertex_buffer(1, skin.slice(..));
+                    }
+                    pass.set_index_buffer(
+                        gpu_mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(
+                        0..gpu_mesh.index_count,
+                        0,
+                        batch.first..batch.first + batch.count,
+                    );
+                }
+            }
+            self.ssao
+                .run(&self.queue, &mut encoder, view_proj, camera_position);
+            // 走 `self.stats`：本地那份在取交换链纹理之前就已经定格了
+            // （见上面 `self.stats = stats`），这里再改它没人看得到。
+            // 阴影 pass 也是这么记的。
+            self.stats.draw_calls += batches.len() as u32 + 1;
         }
 
         {
@@ -2904,6 +3010,27 @@ fn material_shader_source(hook: &str) -> String {
     )
 }
 
+/// 几何声明能编译所需要的完整前缀。
+///
+/// `geometry.wgsl` 里的 `Globals` 引用了 `Environment`（kpbr 的 IBL）和
+/// `Light`（klight），所以光有 `geometry_source()` 是编不过的——
+/// 那两段必须排在它前面。
+///
+/// 主着色器走 `material_shader_source`，那里已经拼全了；
+/// 预通道只要几何这一半，于是需要这个单独的前缀。
+fn geometry_prelude() -> String {
+    format!(
+        "{}
+{}
+{}
+{}",
+        klight::LIGHT_WGSL,
+        kpbr::PBR_WGSL,
+        kpbr::IBL_WGSL,
+        geometry_source(),
+    )
+}
+
 /// 几何声明：`Globals`、`ObjectUniforms`、顶点属性、蒙皮与形变。
 ///
 /// 标准着色器和 prepass 共用这一份——见 `geometry.wgsl` 开头的说明。
@@ -3213,6 +3340,7 @@ fn create_brdf_lut(
     environment_view: &wgpu::TextureView,
     scene_color_view: &wgpu::TextureView,
     scene_depth_view: &wgpu::TextureView,
+    ssao_view: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     const SIZE: u32 = 64;
 
@@ -3333,6 +3461,10 @@ fn create_brdf_lut(
             wgpu::BindGroupEntry {
                 binding: 7,
                 resource: wgpu::BindingResource::TextureView(scene_depth_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::TextureView(ssao_view),
             },
         ],
     })

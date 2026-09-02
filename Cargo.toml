@@ -73,6 +73,8 @@ winit = "0.30.13"
 # benches 用。criterion 做的两件事是手工掐表做不到的：跑到置信区间收窄，
 # 以及把上一次的结果存下来做对比。
 criterion = { version = "0.5", features = ["html_reports"] }
+# GPU 粒子的例子要把每帧参数按 WGSL 的布局打成字节。
+bytemuck = { version = "1.25.2", features = ["derive"] }
 
 # ── benches ──
 # `harness = false` 是 criterion 的要求：它自带 main，不走 libtest。
@@ -258,6 +260,10 @@ path = "examples/kengine/shader/array_texture.rs"
 [[example]]
 name = "gpu_readback"
 path = "examples/kengine/shader/gpu_readback.rs"
+
+[[example]]
+name = "gpu_particles"
+path = "examples/kengine/shader/gpu_particles.rs"
 
 [[example]]
 name = "shader_prepass"

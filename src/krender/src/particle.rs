@@ -873,3 +873,137 @@ mod test {
         );
     }
 }
+
+// ── GPU 粒子 ──
+//
+// 建管线要真显卡，所以这里验的是**能自动验的那部分**：布局约定、
+// 排序、以及那条最容易出错的「计算着色器写的结构和 CPU 侧对不上」。
+// 画得对不对只能靠 `gpu_particles` 那个例子实机看。
+#[cfg(test)]
+mod gpu_tests {
+    use super::*;
+    use kshader::Shader;
+
+    #[test]
+    fn the_shared_struct_matches_the_cpu_layout() {
+        // 这是整条路上最容易出错、而且**出错时 wgpu 一句话都不说**的
+        // 地方：绑定只校验总长度，字段顺序错了照样绑得上，
+        // 画出来是一堆乱飞的方片。
+        //
+        // 拿 naga 真的解析一遍那段声明，比字符串匹配可靠。
+        let source = format!(
+            "{}\n@group(0) @binding(0) var<storage, read_write> data: array<Particle>;\n\
+             @compute @workgroup_size(1) fn main() {{ data[0].size = 1.0; }}",
+            kparticle::PARTICLE_STRUCT_WGSL
+        );
+        Shader::from_wgsl(source).expect("共享的 Particle 声明该能独立编译");
+    }
+
+    #[test]
+    fn the_render_shader_and_the_shared_struct_are_the_same_declaration() {
+        // 渲染那份和计算那份必须是**同一段源码**，不是两份长得像的。
+        // 抄成两份的话，改了一处忘了另一处是迟早的事。
+        let full = kparticle::particle_wgsl();
+        assert!(
+            full.contains(kparticle::PARTICLE_STRUCT_WGSL.trim()),
+            "渲染着色器里的 Particle 声明和共享的那份不是同一段"
+        );
+        // 而且只该出现一次——拼两遍的话 naga 会报重复定义。
+        assert_eq!(full.matches("struct Particle {").count(), 1);
+    }
+
+    #[test]
+    fn the_shared_struct_is_forty_eight_bytes_like_the_cpu_side() {
+        // WGSL 那边的字节数没法直接问 naga，只能靠 CPU 侧这条 +
+        // 上面那条「填充写成三个标量」的注释一起守。
+        // 这条挂了就说明有人动了 `GpuParticle`，那边一动这边必须跟。
+        assert_eq!(size_of::<GpuParticle>(), 48);
+        assert!(
+            kparticle::PARTICLE_STRUCT_WGSL.contains("padding_x")
+                && kparticle::PARTICLE_STRUCT_WGSL.contains("padding_z"),
+            "填充一旦写成 vec3，结构体会涨到 64 字节，和 CPU 侧对不上"
+        );
+    }
+
+    #[test]
+    fn systems_are_ordered_back_to_front_regardless_of_kind() {
+        // CPU 的和 GPU 的排在同一个序里。分成两段各排各的话，
+        // 一团 GPU 火花和一团 CPU 烟尘之间的前后关系就成了
+        // 「谁在数组里排前面」，而那和它们离相机多远无关。
+        //
+        // 这里复现 `prepare` 里那段排序，验的是规则本身。
+        let camera = kmath::Vec3::ZERO;
+        let mut order: Vec<(f32, bool, usize)> = vec![
+            // (距离平方, 是不是 GPU 的, 下标)
+            (4.0, false, 0),  // CPU，近
+            (100.0, true, 0), // GPU，远
+            (25.0, false, 1), // CPU，中
+        ];
+        order.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+
+        let _ = camera;
+        assert_eq!(
+            order
+                .iter()
+                .map(|(_, gpu, i)| (*gpu, *i))
+                .collect::<Vec<_>>(),
+            vec![(true, 0), (false, 1), (false, 0)],
+            "该从远到近，而且两类混在同一个序里"
+        );
+    }
+
+    #[test]
+    fn a_storage_buffer_has_a_stable_distinct_id() {
+        // 绑定组按这个 id 缓存。两块缓冲撞 id 的话，
+        // 第二个粒子系统会画出第一个的粒子。
+        let Some(gpu) = crate::ComputeContext::headless() else {
+            return;
+        };
+        let a = gpu.create_buffer_zeroed("a", 64);
+        let b = gpu.create_buffer_zeroed("b", 64);
+
+        assert_ne!(a.id(), b.id());
+        assert_eq!(a.id(), a.id(), "同一块缓冲的 id 每次问都该一样");
+    }
+
+    #[test]
+    fn a_compute_shader_can_fill_a_particle_buffer() {
+        // 端到端的那一半：真的开一台设备、真的用共享声明写一遍、
+        // 真的读回来核对。剩下的一半（画出来）只能靠眼睛。
+        let Some(gpu) = crate::ComputeContext::headless() else {
+            return;
+        };
+
+        let source = format!(
+            "{}\n\
+             @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;\n\
+             @compute @workgroup_size(64)\n\
+             fn main(@builtin(global_invocation_id) id: vec3<u32>) {{\n\
+                 if (id.x >= arrayLength(&particles)) {{ return; }}\n\
+                 particles[id.x].position = vec3<f32>(f32(id.x), 2.0, 3.0);\n\
+                 particles[id.x].size = 0.5;\n\
+                 particles[id.x].color = vec4<f32>(1.0, 0.0, 0.0, 1.0);\n\
+                 particles[id.x].rotation = 0.25;\n\
+             }}",
+            kparticle::PARTICLE_STRUCT_WGSL
+        );
+        let shader = Shader::from_wgsl(source).unwrap();
+        let pipeline = gpu.create_pipeline(&shader).unwrap();
+
+        const COUNT: usize = 64;
+        let buffer =
+            gpu.create_buffer_zeroed("particles", (COUNT * size_of::<GpuParticle>()) as u64);
+        gpu.dispatch(&pipeline, &[&buffer], [1, 1, 1]);
+
+        let bytes = gpu.read(&buffer).expect("该读得回来");
+        let particles: &[GpuParticle] = bytemuck::cast_slice(&bytes);
+
+        assert_eq!(particles.len(), COUNT);
+        // 逐字段核对：字段顺序错了这里立刻能看出来——
+        // 比如 `size` 和 `position.z` 换了位置的话，size 会是 3.0。
+        assert_eq!(particles[7].position, [7.0, 2.0, 3.0]);
+        assert_eq!(particles[7].size, 0.5);
+        assert_eq!(particles[7].color, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(particles[7].rotation, 0.25);
+    }
+}
