@@ -47,6 +47,62 @@ impl std::fmt::Display for HdrError {
 impl std::error::Error for HdrError {}
 
 impl HdrImage {
+    /// 用现成的像素造一张。等距柱状投影，行主序，每像素三个 `f32`。
+    ///
+    /// 有这个口子是因为环境图不一定来自文件：程序化天空、由立方体
+    /// 相机在场景里当场采到的环境（three.js 的 `lightprobe_cubecamera`
+    /// 就是这么做的）、离线烘焙出来的探针——这些都拿不到一段 `.hdr`
+    /// 字节流，而 [`decode`](Self::decode) 是之前唯一的入口。
+    ///
+    /// # 会 panic
+    ///
+    /// `width` 或 `height` 为 0，或者 `pixels` 的长度不等于
+    /// `width * height * 3` 时 panic。长度对不上就是**行错位**，
+    /// 而错位的环境图不会报错，只会让光照方向整个歪掉。
+    pub fn from_pixels(width: usize, height: usize, pixels: Vec<f32>) -> Self {
+        assert!(width > 0 && height > 0, "HDR 图不能是空的");
+        assert_eq!(
+            pixels.len(),
+            width * height * 3,
+            "{width}×{height} 需要 {} 个浮点数，实际 {}",
+            width * height * 3,
+            pixels.len()
+        );
+        Self {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    /// 按方向生成一张等距柱状 HDR。
+    ///
+    /// `radiance` 收到的是**单位方向**，返回那个方向上的辐射亮度。
+    /// 用来把「一个房间长什么样」直接写成函数，省掉造字节流那一步。
+    pub fn from_fn(width: usize, height: usize, mut radiance: impl FnMut(Vec3) -> Vec3) -> Self {
+        let mut pixels = Vec::with_capacity(width * height * 3);
+        for y in 0..height {
+            // 取像素中心而不是边角：取边角的话最上一行的方向恰好是极点，
+            // 那里经度没有定义，整行会塌成同一个值。
+            let theta = (y as f32 + 0.5) / height as f32 * std::f32::consts::PI;
+            for x in 0..width {
+                let phi = (x as f32 + 0.5) / width as f32 * std::f32::consts::TAU;
+                // `sample_direction` 的逆：那边是
+                // `u = (atan2(z, x) + π) / τ`、`v = acos(y) / π`。
+                // 反过来算错的话生成的图会整个转一个角度——而画面上
+                // 只是「环境光方向不太对」，没人能一眼断言。
+                let direction = Vec3::new(
+                    -theta.sin() * phi.cos(),
+                    theta.cos(),
+                    -theta.sin() * phi.sin(),
+                );
+                let value = radiance(direction);
+                pixels.extend_from_slice(&[value.x, value.y, value.z]);
+            }
+        }
+        Self::from_pixels(width, height, pixels)
+    }
+
     /// 宽。
     pub fn width(&self) -> usize {
         self.width
@@ -313,6 +369,43 @@ fn read_scanline(bytes: &[u8], cursor: &mut usize, out: &mut [[u8; 4]]) -> Resul
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod construction_tests {
+    use super::*;
+
+    #[test]
+    fn from_fn_is_the_inverse_of_sample_direction() {
+        // 造图用的方向公式必须和采样用的那一个互为逆。反了的话
+        // 生成的环境图会整体转一个角度，画面上只表现为「光好像
+        // 来自另一边」——而程序化环境本来就没有参照物可对。
+        let image = HdrImage::from_fn(64, 32, |d| d * 0.5 + Vec3::splat(0.5));
+
+        for direction in [
+            Vec3::Y,
+            Vec3::NEG_Y,
+            Vec3::X,
+            Vec3::NEG_X,
+            Vec3::Z,
+            Vec3::NEG_Z,
+            Vec3::new(0.3, 0.5, -0.8).normalize(),
+        ] {
+            let expected = direction * 0.5 + Vec3::splat(0.5);
+            let actual = image.sample_direction(direction);
+            assert!(
+                (actual - expected).length() < 0.05,
+                "方向 {direction:?} 取回来是 {actual:?}，该是 {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_pixels_rejects_a_mismatched_length() {
+        // 长度对不上就是行错位，而错位的环境图不报错、只是光照方向歪掉。
+        let result = std::panic::catch_unwind(|| HdrImage::from_pixels(4, 4, vec![0.0; 12]));
+        assert!(result.is_err(), "长度不对该 panic 而不是默默接受");
+    }
 }
 
 #[cfg(test)]

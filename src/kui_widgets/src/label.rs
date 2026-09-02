@@ -55,7 +55,7 @@ pub(crate) fn paint(
         rect.min,
         text,
         &TextStyle {
-            size: size,
+            size,
             ..Default::default()
         },
         color,

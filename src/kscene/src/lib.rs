@@ -1934,6 +1934,76 @@ FORMAT=32-bit_rle_rgbe
         }
     }
 
+    /// 同样一张 8×4，但整体亮度不同——探针之间要能分辨得开。
+    fn tiny_hdr_bright() -> kpbr::hdr::HdrImage {
+        let (w, h) = (8usize, 4usize);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            b"#?RADIANCE
+FORMAT=32-bit_rle_rgbe
+
+",
+        );
+        bytes.extend_from_slice(
+            format!(
+                "-Y {h} +X {w}
+"
+            )
+            .as_bytes(),
+        );
+        for _ in 0..w * h {
+            // 指数字节比 `tiny_hdr` 大 2，亮度是它的 4 倍。
+            bytes.extend_from_slice(&[128u8, 128, 128, 131]);
+        }
+        kpbr::hdr::HdrImage::decode(&bytes).expect("该能解码")
+    }
+
+    #[test]
+    fn each_probe_carries_its_own_irradiance() {
+        // 只做镜面那一半的话，室内的白墙照样被户外的天空照亮——
+        // 反射对了，环境光还是错的。而粗糙表面上后者占的比重更大，
+        // 反而更显眼。
+        let mut scene = scene_with_environment();
+        scene.add_reflection_probe(ReflectionProbe::default(), &tiny_hdr_bright());
+
+        let global = scene.environment().harmonics().coefficients()[0];
+        let probe = scene.reflection_probes()[0].irradiance.coefficients()[0];
+
+        assert!(
+            global.length() > 1e-6 && probe.length() > 1e-6,
+            "两组球谐都不该是零：全局 {global:?}，探针 {probe:?}"
+        );
+        assert!(
+            (probe.x / global.x - 4.0).abs() < 0.2,
+            "探针那张图亮 4 倍，球谐也该亮 4 倍：全局 {}，探针 {}",
+            global.x,
+            probe.x
+        );
+    }
+
+    #[test]
+    fn the_irradiance_order_matches_the_probe_order() {
+        // 渲染器按 `probe::select` 返回的下标去球谐缓冲里取第 index+1 组。
+        // 两个顺序对不上，物体就会拿到**别的房间**的环境光——
+        // 没有任何东西会报错，只是墙的颜色不对。
+        let mut scene = scene_with_environment();
+        scene.add_reflection_probe(ReflectionProbe::default(), &tiny_hdr());
+        scene.add_reflection_probe(ReflectionProbe::default(), &tiny_hdr_bright());
+
+        let probes = scene.reflection_probes();
+        assert_eq!(probes.len(), 2);
+        // 第 0 个探针用的是暗的那张，第 1 个是亮的。顺序反了这条就红。
+        assert!(
+            probes[1].irradiance.coefficients()[0].x
+                > probes[0].irradiance.coefficients()[0].x * 2.0,
+            "探针的球谐没有按加入顺序排：{:?}",
+            probes
+                .iter()
+                .map(|entry| entry.irradiance.coefficients()[0].x)
+                .collect::<Vec<_>>()
+        );
+    }
+
     fn scene_with_environment() -> Scene {
         let mut scene = Scene::new();
         scene.set_environment_hdr(&tiny_hdr(), settings());

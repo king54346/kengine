@@ -128,10 +128,14 @@ pub mod prelude {
         ParticleSystem, Space, SurfaceHit,
     };
     pub use kpbr::{
-        Environment, PbrMaterial,
+        Environment,
+        PbrMaterial,
         hdr::HdrImage,
         loader::HdrLoader,
         prefilter::{PrefilterSettings, prefilter},
+        // 光照探针现在管的是**漫反射和镜面两半**，不再只是「反射探针」，
+        // 摆场景时几乎一定会用到，所以进 prelude。
+        probe::ReflectionProbe,
     };
     pub use kphysics::{
         BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, CollisionEvent, InteractionGroups,

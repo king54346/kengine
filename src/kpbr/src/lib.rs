@@ -379,7 +379,16 @@ mod test {
             assert!(PBR_WGSL.contains(name), "WGSL 缺少函数 {name}");
         }
 
-        for name in ["ibl_irradiance", "ibl_specular", "ibl_diffuse", "ibl_sky"] {
+        for name in [
+            "ibl_irradiance",
+            "ibl_specular",
+            "ibl_diffuse",
+            "ibl_sky",
+            // 光照探针走这两条：系数由调用方给，而不是从 `Environment` 取。
+            // 主着色器按名字拼这份代码，改名了只会在运行时炸。
+            "ibl_irradiance_from_sh",
+            "ibl_diffuse_from_sh",
+        ] {
             assert!(IBL_WGSL.contains(name), "IBL WGSL 缺少函数 {name}");
         }
     }

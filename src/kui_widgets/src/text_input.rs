@@ -114,7 +114,6 @@ pub(crate) fn paint(
     // 框外面、盖住旁边的控件。
     ui.push_clip(inner);
 
-    let edit = edit;
     // 选区先画，文字盖在上面。反过来的话高亮会糊住文字。
     if edit.has_selection() {
         let range = edit.selection();

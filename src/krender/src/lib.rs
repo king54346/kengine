@@ -1111,12 +1111,8 @@ impl Renderer {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let globals_bind_group = clusters.bind_group(
-            &device,
-            &globals_layout,
-            &globals_buffer,
-            &probe_irradiance,
-        );
+        let globals_bind_group =
+            clusters.bind_group(&device, &globals_layout, &globals_buffer, &probe_irradiance);
 
         // ── group(1)：每个实例一份的变换与材质参数 ──
         // 用存储缓冲而非「uniform + 动态偏移」：后者每个对象都要重新绑一次绑定组，
@@ -1664,9 +1660,7 @@ impl Renderer {
     /// 白图只有一层，采任何层号都得到白色——「没有 cookie」于是等价于
     /// 「乘 1」，着色器不必为它写分支。和缺贴图时绑白图是同一个套路。
     fn cookie_texture(&self) -> &GpuTexture {
-        self.cookie
-            .as_ref()
-            .unwrap_or(&self.default_textures.white)
+        self.cookie.as_ref().unwrap_or(&self.default_textures.white)
     }
 
     /// 重建 group(3) 的两份绑定组。

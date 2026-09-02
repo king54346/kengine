@@ -747,21 +747,30 @@ mod test {
             enabled: true,
             cast_shadows: true,
             mask: 0b1010,
+            cookie: 0,
         }));
         let masked = scene.add_node(
             Node::new("only_hero")
                 .with_light(Light::point(3.0))
                 .with_light_mask(0b0110),
         );
-        let spot = scene.add_node(Node::new("spot").with_light(Light {
-            kind: klight::LightKind::Spot {
-                range: 12.0,
-                inner_angle: 15.0,
-                outer_angle: 30.0,
-            },
-            intensity: 2.0,
-            ..Default::default()
-        }));
+        let spot = scene.add_node(
+            Node::new("spot").with_light(
+                Light {
+                    kind: klight::LightKind::Spot {
+                        range: 12.0,
+                        inner_angle: 15.0,
+                        outer_angle: 30.0,
+                    },
+                    intensity: 2.0,
+                    ..Default::default()
+                }
+                .with_cookie(Some(3)),
+            ),
+        );
+        // 矩形面光源。尺寸丢了的话读档之后面板会变成默认大小，
+        // 而它同时决定亮度——一盏调好的灯会突然变亮或变暗。
+        let rect = scene.add_node(Node::new("panel").with_light(Light::rect(2.5, 1.25, 14.0)));
 
         let restored = roundtrip(&mut scene);
 
@@ -790,6 +799,22 @@ mod test {
                 assert_eq!((range, inner_angle, outer_angle), (12.0, 15.0, 30.0));
             }
             other => panic!("聚光灯读成了 {other:?}"),
+        }
+        // cookie 是「用图集里第几层」，存的是 layer+1（0 表示没有）。
+        // 丢了之后聚光灯会从投影仪退化成一个白光斑，且不报错。
+        assert_eq!(
+            restored[spot].light().unwrap().cookie,
+            4,
+            "聚光灯的 cookie 层号没存下来"
+        );
+
+        match restored[rect].light().unwrap().kind {
+            klight::LightKind::Rect {
+                width,
+                height,
+                range,
+            } => assert_eq!((width, height, range), (2.5, 1.25, 14.0)),
+            other => panic!("矩形面光源读成了 {other:?}"),
         }
     }
 

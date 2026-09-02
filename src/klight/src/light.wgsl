@@ -112,7 +112,7 @@ fn light_sample_direction(light: Light, world_position: vec3<f32>) -> vec4<f32> 
 fn light_cookie_uv(light: Light, world_position: vec3<f32>) -> vec2<f32> {
     let forward = normalize(light.direction.xyz);
     let right = normalize(light.right.xyz);
-    let up = cross(forward, right);
+    let up = cross(right, forward);
 
     let to_point = world_position - light.position.xyz;
     // 沿光轴的距离。太小的话除下来会爆，夹一个下限。
@@ -147,7 +147,7 @@ fn light_cookie_uv(light: Light, world_position: vec3<f32>) -> vec2<f32> {
 fn light_rect_closest(light: Light, point: vec3<f32>) -> vec3<f32> {
     let forward = normalize(light.direction.xyz);
     let right = normalize(light.right.xyz);
-    let up = cross(forward, right);
+    let up = cross(right, forward);
 
     let offset = point - light.position.xyz;
     let u = clamp(dot(offset, right), -light.params.x, light.params.x);
@@ -163,11 +163,17 @@ fn light_rect_closest(light: Light, point: vec3<f32>) -> vec3<f32> {
 fn light_rect_form_factor(light: Light, world_position: vec3<f32>, n: vec3<f32>) -> f32 {
     let forward = normalize(light.direction.xyz);
     let right = normalize(light.right.xyz);
-    let up = cross(forward, right);
+    let up = cross(right, forward);
     let half = vec2<f32>(light.params.x, light.params.y);
 
-    // 四个角，逆时针（从正面看）。顺序反了形状因子会是负的，
-    // 结果是整块面板变成「吸光」的黑洞。
+    // 四个角，**从着色点看过去是逆时针**（着色点在面板的 `forward` 一侧）。
+    //
+    // 绕序反了整个和式就是负的，`max(.., 0.0)` 会把它压成 0
+    // ——面板一点光都不发，看起来像「忘了打开这盏灯」而不像 bug。
+    // 这一条依赖 `up` 是**真的上轴**：`cross(forward, right)` 在右手系里
+    // 得到的是下轴，用它会把绕序一起带反，而两个错叠在一起时
+    // 形状因子仍是正的，只是图案上下颠倒——正是这种「看着像对的」
+    // 让下面那条测试非做不可。
     let center = light.position.xyz;
     var corners = array<vec3<f32>, 4>(
         center - right * half.x - up * half.y,

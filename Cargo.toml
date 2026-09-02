@@ -279,6 +279,18 @@ name = "lights_custom"
 path = "examples/kengine/new/lights_custom.rs"
 
 [[example]]
+name = "lights_spotlight"
+path = "examples/kengine/new/lights_spotlight.rs"
+
+[[example]]
+name = "lights_rectarealight"
+path = "examples/kengine/new/lights_rectarealight.rs"
+
+[[example]]
+name = "lightprobe"
+path = "examples/kengine/new/lightprobe.rs"
+
+[[example]]
 name = "shader_prepass"
 path = "examples/kengine/shader/shader_prepass.rs"
 

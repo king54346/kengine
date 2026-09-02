@@ -444,10 +444,7 @@ impl Light {
         // 右轴：节点的 +X。非均匀缩放下它未必和方向正交，
         // 但归一化之后足够——着色器那边会拿它和方向叉出上轴，
         // 真正歪掉要等到有人给灯加剪切变换，那时该修的是那个变换。
-        let right = world_transform
-            .x_axis
-            .truncate()
-            .normalize_or(Vec3::X);
+        let right = world_transform.x_axis.truncate().normalize_or(Vec3::X);
         // 聚光灯的外锥正切，cookie 投影要它把方向转成 UV。
         // 在这里算一次，省掉每个片元一次 `tan`。
         let tan_outer = match self.kind {
@@ -521,6 +518,11 @@ mod test {
             "light_radiance",
             "light_distance_attenuation",
             "light_spot_attenuation",
+            // cookie 与矩形面光源。主着色器按名字拼这份代码。
+            "light_cookie_uv",
+            "light_rect_form_factor",
+            "light_rect_closest",
+            "light_affects",
         ] {
             assert!(LIGHT_WGSL.contains(name), "WGSL 缺少函数 {name}");
         }
