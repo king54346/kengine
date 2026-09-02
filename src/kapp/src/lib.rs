@@ -381,6 +381,12 @@ impl App {
         let mut post = runtime.renderer.post_settings();
         let mut shadow = runtime.renderer.shadow_cascades();
         let mut ssao = runtime.renderer.ssao();
+        let mut clusters = runtime.renderer.clusters();
+        let cluster_stats = (
+            runtime.renderer.cluster_average(),
+            runtime.renderer.cluster_peak(),
+            runtime.renderer.cluster_overflow(),
+        );
 
         for (system_stage, system) in &mut self.systems {
             if *system_stage != stage {
@@ -394,6 +400,7 @@ impl App {
                 elapsed,
                 window: &runtime.window,
                 stats,
+                cluster_stats,
                 audio: &runtime.audio,
                 script_events: &runtime.script_events,
                 debug: &mut runtime.debug,
@@ -403,6 +410,7 @@ impl App {
                 compute: krender::ComputeContext::from_renderer(&runtime.renderer),
                 gpu_particles: &mut runtime.gpu_particles,
                 shadow: &mut shadow,
+                clusters: &mut clusters,
                 ssao: &mut ssao,
                 exit_requested: &mut exit_requested,
             };
@@ -416,6 +424,9 @@ impl App {
         }
         if ssao != runtime.renderer.ssao() {
             runtime.renderer.set_ssao(ssao);
+        }
+        if clusters != runtime.renderer.clusters() {
+            runtime.renderer.set_clusters(clusters);
         }
 
         exit_requested
@@ -447,6 +458,12 @@ impl App {
         let mut post = runtime.renderer.post_settings();
         let mut shadow = runtime.renderer.shadow_cascades();
         let mut ssao = runtime.renderer.ssao();
+        let mut clusters = runtime.renderer.clusters();
+        let cluster_stats = (
+            runtime.renderer.cluster_average(),
+            runtime.renderer.cluster_peak(),
+            runtime.renderer.cluster_overflow(),
+        );
 
         let mut exit_requested = false;
         for plugin in &mut self.plugins {
@@ -458,6 +475,7 @@ impl App {
                 elapsed,
                 window: &runtime.window,
                 stats,
+                cluster_stats,
                 audio: &runtime.audio,
                 script_events: &runtime.script_events,
                 debug: &mut runtime.debug,
@@ -467,6 +485,7 @@ impl App {
                 compute: krender::ComputeContext::from_renderer(&runtime.renderer),
                 gpu_particles: &mut runtime.gpu_particles,
                 shadow: &mut shadow,
+                clusters: &mut clusters,
                 ssao: &mut ssao,
                 exit_requested: &mut exit_requested,
             };
@@ -480,6 +499,9 @@ impl App {
         }
         if ssao != runtime.renderer.ssao() {
             runtime.renderer.set_ssao(ssao);
+        }
+        if clusters != runtime.renderer.clusters() {
+            runtime.renderer.set_clusters(clusters);
         }
 
         exit_requested

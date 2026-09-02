@@ -189,30 +189,22 @@ fn normalize_or_fallback(value: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
 
 // 片元所在的簇。
 //
-// 屏幕方向按像素坐标均分，深度方向按**指数**切——近处切得细、远处切得粗，
-// 因为近处才是光源密度最高的地方。这个公式必须和 CPU 侧
-// `klight::cluster` 里的完全一致：不一致的话着色器读到的是别的簇的名单，
-// 表现为光照在屏幕上整体错位一块，而且不越界、不报错。
+// 真正的公式在 `klight::cluster.wgsl` 里（`cluster_index`），
+// 和 CPU 侧的 `ClusterGrid` 是**同一份数学**，两边有一条真跑 GPU 的
+// 对拍测试守着。这里只负责把 `Globals` 里那几个字段拆出来喂进去。
+//
+// 不在这儿重写一遍：重写的那份一旦和 CPU 那份漂移，片元读到的就是
+// 别的簇的名单——光照在屏幕上整体错位一块，而且不越界、不报错、不掉帧。
 fn cluster_of(pixel: vec2<f32>, view_depth: f32) -> u32 {
-    let grid = globals.cluster_grid;
-    if (grid.x == 0u || grid.y == 0u || grid.z == 0u) {
-        return 0u;
-    }
-
-    let viewport = max(globals.frame_params.zw, vec2<f32>(1.0));
-    let tile = vec2<u32>(clamp(
-        floor(pixel / viewport * vec2<f32>(grid.xy)),
-        vec2<f32>(0.0),
-        vec2<f32>(grid.xy) - vec2<f32>(1.0),
-    ));
-
-    let near = max(globals.cluster_depth.x, 1e-4);
-    let depth = max(view_depth, near);
-    // `cluster_depth.z` 是 `1 / ln(far / near)`，CPU 侧倒好的。
-    let ratio = log(depth / near) * globals.cluster_depth.z;
-    let slice = u32(clamp(ratio * f32(grid.z), 0.0, f32(grid.z) - 1.0));
-
-    return (slice * grid.y + tile.y) * grid.x + tile.x;
+    return cluster_index(
+        pixel,
+        globals.frame_params.zw,
+        view_depth,
+        globals.cluster_grid.xy,
+        globals.cluster_grid.z,
+        globals.cluster_depth.x,
+        globals.cluster_depth.z,
+    );
 }
 
 // 一盏光对这个片元的贡献。

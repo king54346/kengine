@@ -238,6 +238,20 @@ pub fn assign(
 ///
 /// 保守多算几个簇只会让那几个簇的着色多循环几盏灯，**不会画错**；
 /// 少算才会漏光。所以这里一律往大了取。
+///
+/// # 为什么还要再往外扩一格
+///
+/// CPU 这边从**光源的 NDC 包围盒**算块号，着色器那边从**片元的像素坐标**
+/// 算块号——两条完全不同的算路。片元正好落在块的边界上时，两边可能
+/// 各走一边：实测某块 GPU 上 `960 * 16 / 1920` 算出的是 **7.9999995**
+/// （驱动把它重排成了乘以倒数），取整成 7，而 CPU 得 8。
+///
+/// 这不是「写得不一样」，是浮点重排本来就不受源码控制，换块显卡结论
+/// 可能就变了。所以**不去赌位级一致**，而是让正确性不依赖它：
+/// 往外扩一格，边界上两边选哪边都能取到这盏灯。
+///
+/// 代价是每盏灯多占几个簇的名单——那只让那几个簇多循环几盏照不到的灯，
+/// 而 `light_sample_direction` 对它们会立刻返回衰减 0。
 fn screen_tiles(grid: &ClusterGrid, projection: Mat4, center: Vec3, radius: f32) -> ([u32; 2], [u32; 2]) {
     let full = ([0, 0], [grid.tiles_x.saturating_sub(1), grid.tiles_y.saturating_sub(1)]);
 
@@ -274,14 +288,18 @@ fn screen_tiles(grid: &ClusterGrid, projection: Mat4, center: Vec3, radius: f32)
         ((normalized * count as f32) as u32).min(count.saturating_sub(1))
     };
 
+    // 往外扩一格，理由见上面的文档。
+    let grow_low = |value: u32| value.saturating_sub(1);
+    let grow_high = |value: u32, count: u32| (value + 1).min(count.saturating_sub(1));
+
     (
         [
-            to_tile(min[0], grid.tiles_x),
-            to_tile(-max[1], grid.tiles_y),
+            grow_low(to_tile(min[0], grid.tiles_x)),
+            grow_low(to_tile(-max[1], grid.tiles_y)),
         ],
         [
-            to_tile(max[0], grid.tiles_x),
-            to_tile(-min[1], grid.tiles_y),
+            grow_high(to_tile(max[0], grid.tiles_x), grid.tiles_x),
+            grow_high(to_tile(-min[1], grid.tiles_y), grid.tiles_y),
         ],
     )
 }

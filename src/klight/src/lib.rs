@@ -34,6 +34,14 @@ pub const MAX_LIGHTS: usize = 256;
 /// Cook-Torrance 光照求值的 WGSL 源码，由渲染器拼进着色器。
 pub const LIGHT_WGSL: &str = include_str!("light.wgsl");
 
+/// 聚簇下标的 WGSL 实现。
+///
+/// 和 [`cluster::ClusterGrid`] **必须算出同一个下标**。对不上的话片元
+/// 读到的是别的簇的名单——光照在屏幕上整体错位一块，而且不越界、
+/// 不报错、不掉帧。两边都放在这个 crate 里，就是为了让那条对拍测试
+/// 只编译这一段而不必把整套光照拖进来。
+pub const CLUSTER_WGSL: &str = include_str!("cluster.wgsl");
+
 /// 常用类型的集中导出。
 pub mod prelude {
     pub use crate::{
@@ -234,6 +242,22 @@ impl Light {
         }
     }
 
+    /// 半球光：从天空和地面两个方向来的环境光。
+    ///
+    /// `ground_color` 是地面反射的颜色，天空的颜色用
+    /// [`with_color`](Self::with_color) 给。
+    ///
+    /// 户外场景里它比一盏方向光顶用——只有太阳的话背光面是纯黑的，
+    /// 而现实里那一面被天空和地面照亮着。强度默认给 1 而不是点光源那种
+    /// 20：它是**环境**项，直接乘在反照率上，给大了整个画面会白掉。
+    pub fn hemisphere(ground_color: Vec3) -> Self {
+        Self {
+            kind: LightKind::Hemisphere { ground_color },
+            intensity: 1.0,
+            ..Default::default()
+        }
+    }
+
     /// 聚光灯。内外锥角为半角（角度制），内角会被钳制到不超过外角。
     pub fn spot(range: f32, inner_angle: f32, outer_angle: f32) -> Self {
         let outer = outer_angle.clamp(0.0, 89.9);
@@ -365,6 +389,16 @@ mod test {
         // 画面上是一堆位置乱七八糟的灯。
         assert_eq!(size_of::<GpuLight>(), 80);
         assert_eq!(size_of::<GpuLight>() % 16, 0);
+    }
+
+    #[test]
+    fn a_hemisphere_light_is_an_ambient_term_not_a_lamp() {
+        // 强度默认给 1 而不是点光源那种 20：它直接乘在反照率上，
+        // 给大了整个画面会白掉。
+        let light = Light::hemisphere(Vec3::splat(0.2));
+        assert_eq!(light.intensity, 1.0);
+        // 没有位置也没有范围，所以不参与聚簇。
+        assert_eq!(light.kind.range(), 0.0);
     }
 
     #[test]

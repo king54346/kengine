@@ -265,6 +265,11 @@ path = "examples/kengine/shader/gpu_readback.rs"
 name = "gpu_particles"
 path = "examples/kengine/shader/gpu_particles.rs"
 
+# ── three.js 的 webgpu_lights_* 移植 ──
+[[example]]
+name = "lights_many"
+path = "examples/kengine/new/lights_many.rs"
+
 [[example]]
 name = "shader_prepass"
 path = "examples/kengine/shader/shader_prepass.rs"

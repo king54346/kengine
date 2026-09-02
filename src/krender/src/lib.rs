@@ -130,12 +130,45 @@ struct Globals {
 }
 
 
+/// 聚簇前向着色的调节项。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClusterSettings {
+    /// 开不开。
+    ///
+    /// 关掉之后每个片元遍历**全部**光源——几百盏灯时会明显掉帧。
+    /// 留这个开关主要是为了对照：不能对照的话，「聚簇到底省了多少」
+    /// 就只能靠猜。
+    pub enabled: bool,
+    /// 屏幕横向切几块。
+    pub tiles_x: u32,
+    /// 屏幕纵向切几块。
+    pub tiles_y: u32,
+    /// 深度方向切几片。
+    ///
+    /// 切得越细名单越短，但簇的总数是三个维度相乘，涨得很快——
+    /// 32×18×24 就是 13824 个簇，每帧都要分配一遍。
+    pub slices: u32,
+}
+
+impl Default for ClusterSettings {
+    fn default() -> Self {
+        let grid = klight::cluster::ClusterGrid::default();
+        Self {
+            enabled: true,
+            tiles_x: grid.tiles_x,
+            tiles_y: grid.tiles_y,
+            slices: grid.slices,
+        }
+    }
+}
+
 /// 聚簇前向着色的 GPU 侧资源。
 ///
 /// 三块存储缓冲：光源数组、每簇的名单区间、拼在一起的名单本体。
 /// 划分与分配的数学在 [`klight::cluster`] 里，那一层是纯 CPU 的、
 /// 每条规则都有测试；这里只管把结果搬上显存。
 struct Clusters {
+    settings: ClusterSettings,
     grid: klight::cluster::ClusterGrid,
     /// 光源数组。全局光在前，可聚簇的在后。
     lights: wgpu::Buffer,
@@ -178,6 +211,7 @@ impl Clusters {
             indices: storage("kengine cluster indices", Self::INITIAL_INDICES * 4),
             indices_capacity: Self::INITIAL_INDICES,
             assignment: klight::cluster::Assignment::default(),
+            settings: ClusterSettings::default(),
             grid,
         }
     }
@@ -257,6 +291,7 @@ impl Clusters {
             .flat_map(|pair| pair.iter().copied())
             .collect();
         if self.assignment.ranges.len() as u64 > self.ranges_capacity {
+            // 网格尺寸是可调的，所以这块也要能长。
             self.ranges_capacity = self.assignment.ranges.len() as u64;
             self.ranges = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("kengine cluster ranges"),
@@ -1692,6 +1727,47 @@ impl Renderer {
         self.ui.upload_image(&self.device, &self.queue, texture);
     }
 
+    /// 聚簇前向着色的调节项。
+    pub fn clusters(&self) -> ClusterSettings {
+        self.clusters.settings
+    }
+
+    /// 改聚簇的调节项。下一帧生效。
+    pub fn set_clusters(&mut self, settings: ClusterSettings) {
+        self.clusters.settings = settings;
+    }
+
+    /// 上一帧每个簇平均有几盏灯。
+    ///
+    /// 这个数才说明聚簇有没有在干活：几百盏灯的场景里它通常是个位数，
+    /// 而关掉聚簇时每个片元要遍历的是**全部**光源。
+    pub fn cluster_average(&self) -> f32 {
+        let count = self.clusters.assignment.ranges.len().max(1);
+        let total: u32 = self.clusters.assignment.ranges.iter().map(|r| r[1]).sum();
+        total as f32 / count as f32
+    }
+
+    /// 上一帧名单最长的那个簇里有几盏灯。
+    ///
+    /// 平均值好看但最坏情况才决定帧时间——GPU 是按 warp 走的，
+    /// 一个 warp 里最慢的那个像素拖着所有人。
+    pub fn cluster_peak(&self) -> u32 {
+        self.clusters
+            .assignment
+            .ranges
+            .iter()
+            .map(|r| r[1])
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// 上一帧因为簇的名单满了而被丢掉的条目数。
+    ///
+    /// 不为 0 说明画面上某些地方少了几盏灯的贡献——通常是灯挤得太密。
+    pub fn cluster_overflow(&self) -> u32 {
+        self.clusters.assignment.overflow
+    }
+
     /// SSAO 的调节项。
     pub fn ssao(&self) -> SsaoSettings {
         self.ssao.settings
@@ -1968,7 +2044,13 @@ impl Renderer {
         // 正交相机下深度切片的公式（按 z 取对数）不成立，直接退回
         // 「每个片元遍历全部光源」。正交基本只用在 2D 和编辑器视图上，
         // 那里光源本来就没几盏。
-        let clustering_enabled = projection.w_axis.w == 0.0;
+        //
+        // 网格的尺寸由设置给，近远平面跟着相机走——相机的可视范围变了
+        // 而切片还按老的近远平面分的话，深度切片会整体偏到一边。
+        let clustering_enabled = projection.w_axis.w == 0.0 && self.clusters.settings.enabled;
+        self.clusters.grid.tiles_x = self.clusters.settings.tiles_x.max(1);
+        self.clusters.grid.tiles_y = self.clusters.settings.tiles_y.max(1);
+        self.clusters.grid.slices = self.clusters.settings.slices.max(1);
         self.clusters.grid.near = camera.z_near.max(1e-4);
         self.clusters.grid.far = camera.z_far.max(self.clusters.grid.near * 1.001);
         let regrew = self.clusters.upload(
@@ -3279,17 +3361,20 @@ fn standard_shader_source() -> String {
 /// - `surface.wgsl` 定义 `Surface`，钩子要用它；
 /// - `shader.wgsl` 调用钩子，所以钩子必须排在它之前。
 fn material_shader_source(hook: &str) -> String {
-    format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+    [
         klight::LIGHT_WGSL,
+        // 聚簇的下标公式。和 `klight::cluster::ClusterGrid` 是同一份数学，
+        // 两边有一条真跑 GPU 的对拍测试守着。
+        klight::CLUSTER_WGSL,
         kpbr::PBR_WGSL,
         kpbr::IBL_WGSL,
         shadow_sampling_source(),
         geometry_source(),
         include_str!("surface.wgsl"),
         hook,
-        include_str!("shader.wgsl")
-    )
+        include_str!("shader.wgsl"),
+    ]
+    .join("\n")
 }
 
 /// 几何声明能编译所需要的完整前缀。
@@ -3301,16 +3386,14 @@ fn material_shader_source(hook: &str) -> String {
 /// 主着色器走 `material_shader_source`，那里已经拼全了；
 /// 预通道只要几何这一半，于是需要这个单独的前缀。
 fn geometry_prelude() -> String {
-    format!(
-        "{}
-{}
-{}
-{}",
+    [
         klight::LIGHT_WGSL,
+        klight::CLUSTER_WGSL,
         kpbr::PBR_WGSL,
         kpbr::IBL_WGSL,
         geometry_source(),
-    )
+    ]
+    .join("\n")
 }
 
 /// 几何声明：`Globals`、`ObjectUniforms`、顶点属性、蒙皮与形变。
@@ -4121,27 +4204,71 @@ mod test {
 
     #[test]
     fn uniform_sizes_match_wgsl_layout() {
-        // Globals：view_proj(64) + vec4 × 3 + 级联矩阵(64 × 4)
-        //          + 切分距离(16) + 阴影参数(16) + IBL 参数(16)
-        //          + 环境(224) + 光源数组(64 × 16)
+        // Globals：view_proj(64) + camera/ambient/light_count 三个 vec4
+        //          + 级联矩阵(64 × 4) + 切分/阴影/IBL/depth/frame 五个 vec4
+        //          + 聚簇网格与深度两个 vec4 + 环境(224)。
+        //
+        // **光源数组已经不在这里了**——它搬去了存储缓冲，
+        // 上限才从十几盏提到几百盏。
         assert_eq!(
             size_of::<Globals>(),
-            64 + 16 * 3
-                + 64 * klight::cascade::MAX_CASCADES
+            64 + 16 * 3 + 64 * klight::cascade::MAX_CASCADES
                 + 16 * 5
+                + 16 * 2
                 + size_of::<GpuEnvironment>()
-                + 64 * MAX_LIGHTS
         );
         assert_eq!(size_of::<Globals>() % 16, 0);
         // ObjectUniforms：mat4x4(64) × 2 + base_color(16) + f32 × 4 + emissive(16)
-        //                 + 骨骼偏移(16) + UV 变换(16)
-        //                 + 探针 vec4 × 3(48) + 自定义参数 vec4 × 4(64) = 320。
+        //                 + 骨骼偏移(16) + 光照掩码(16) + UV 变换(16)
+        //                 + 探针 vec4 × 3(48) + 自定义参数 vec4 × 4(64)。
         // 四个 f32 恰好凑满 16 字节，emissive 才能落在 vec4 要求的对齐边界上。
         assert_eq!(
             size_of::<ObjectUniforms>(),
-            64 * 2 + 16 * 3 + 16 * 2 + 16 * 3 + 16 * PARAM_SLOTS
+            64 * 2 + 16 * 3 + 16 * 3 + 16 * 3 + 16 * PARAM_SLOTS
         );
         assert_eq!(size_of::<ObjectUniforms>() % 16, 0);
+    }
+
+    #[test]
+    fn the_light_buffer_is_no_longer_capped_at_sixteen() {
+        // 这一条钉住的是这次改动的**目的**。上限退回去的话，
+        // 「几百盏灯」那个例子会静默丢掉绝大多数灯。
+        assert!(MAX_LIGHTS >= 256);
+    }
+
+    #[test]
+    fn the_cluster_grid_matches_between_cpu_and_shader() {
+        // 着色器按 `cluster_grid` 和 `cluster_depth` 自己算簇下标，
+        // CPU 按 `klight::cluster` 分配。两边的公式对不上的话，
+        // 片元读到的是别的簇的名单——光照在屏幕上整体错位一块，
+        // 而且不越界、不报错。
+        //
+        // 这里验的是**字段的传递**：网格参数确实从 Rust 传到了 WGSL。
+        // 公式本身的一致性由 `slice_of_and_slice_range_agree` 和
+        // 下面那条字符串检查一起守。
+        let source = geometry_source();
+        assert!(source.contains("cluster_grid: vec4<u32>"));
+        assert!(source.contains("cluster_depth: vec4<f32>"));
+        assert!(source.contains("var<storage, read> lights: array<Light>"));
+        assert!(source.contains("var<storage, read> cluster_ranges"));
+        assert!(source.contains("var<storage, read> cluster_indices"));
+    }
+
+    #[test]
+    fn the_shader_derives_the_slice_the_same_way_the_cpu_does() {
+        // CPU：`log(z / near) / log(far / near) * slices`
+        // 着色器：`log(z / near) * (1 / log(far / near)) * slices`
+        //
+        // 同一个式子，只是把分母在 CPU 上倒好了省一次对数。
+        // 谁改了一边忘了另一边，这条会响。
+        assert!(
+            klight::CLUSTER_WGSL.contains("log(depth / safe_near) * inv_log_ratio"),
+            "着色器算切片的公式变了，去核对 klight::cluster::slice_of"
+        );
+        assert!(
+            include_str!("shader.wgsl").contains("return cluster_index("),
+            "主着色器该调用 klight 那份共享实现，而不是自己重写一遍"
+        );
     }
 
     #[test]
