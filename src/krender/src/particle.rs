@@ -956,7 +956,7 @@ mod gpu_tests {
     fn a_storage_buffer_has_a_stable_distinct_id() {
         // 绑定组按这个 id 缓存。两块缓冲撞 id 的话，
         // 第二个粒子系统会画出第一个的粒子。
-        let Some(gpu) = crate::ComputeContext::headless() else {
+        let Some(gpu) = crate::ComputeContext::shared() else {
             return;
         };
         let a = gpu.create_buffer_zeroed("a", 64);
@@ -970,7 +970,7 @@ mod gpu_tests {
     fn a_compute_shader_can_fill_a_particle_buffer() {
         // 端到端的那一半：真的开一台设备、真的用共享声明写一遍、
         // 真的读回来核对。剩下的一半（画出来）只能靠眼睛。
-        let Some(gpu) = crate::ComputeContext::headless() else {
+        let Some(gpu) = crate::ComputeContext::shared() else {
             return;
         };
 

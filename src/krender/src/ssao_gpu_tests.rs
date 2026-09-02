@@ -14,18 +14,12 @@ use super::*;
 /// 读回时不用抠填充。
 const SIZE: u32 = 64;
 
+/// 共用整个测试进程那一台设备。每条测试各开一台的话，
+/// 并发析构会间歇性地把进程带走——理由见
+/// [`ComputeContext::shared`](crate::ComputeContext)。
 fn headless() -> Option<(wgpu::Device, wgpu::Queue)> {
-    pollster::block_on(async {
-        let instance = wgpu::Instance::default();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
-            .await
-            .ok()?;
-        adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await
-            .ok()
-    })
+    let shared = crate::ComputeContext::shared()?;
+    Some((shared.device().clone(), shared.queue().clone()))
 }
 
 /// 一个正交相机，正对 -Z 看一个 `[-1,1]²` 的平面。

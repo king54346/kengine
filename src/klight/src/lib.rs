@@ -18,8 +18,8 @@
 #![warn(missing_docs)]
 
 pub mod attenuation;
-pub mod cluster;
 pub mod cascade;
+pub mod cluster;
 pub mod shadow;
 
 use bytemuck::{Pod, Zeroable};
@@ -221,6 +221,18 @@ impl kcore::visitor::Visit for Light {
         self.intensity.visit("Intensity", &mut region)?;
         self.enabled.visit("Enabled", &mut region)?;
         self.cast_shadows.visit("CastShadows", &mut region)?;
+
+        // 掩码是后加的字段。老存档里没有这块区域，读不到就当「照亮一切」
+        // ——为了一个位掩码让整个场景读不进来，不划算。
+        //
+        // 但**不能不存**：掩码是美术调出来的数据，丢了之后「这盏灯只照
+        // 角色」会变成「照亮一切」，读档之后画面就不一样了。
+        let mut mask = self.mask;
+        if mask.visit("Mask", &mut region).is_ok() {
+            self.mask = mask;
+        } else if region.is_reading() {
+            self.mask = u32::MAX;
+        }
         Ok(())
     }
 }
@@ -275,6 +287,19 @@ impl Light {
     /// 指定颜色。
     pub fn with_color(mut self, color: Vec3) -> Self {
         self.color = color;
+        self
+    }
+
+    /// 指定这盏灯照亮哪些层。见 [`mask`](Self::mask)。
+    ///
+    /// ```
+    /// # use klight::Light;
+    /// // 只照第 0 层——比如「只打在角色身上的补光」。
+    /// let key = Light::point(6.0).with_mask(0b0001);
+    /// assert_eq!(key.mask, 1);
+    /// ```
+    pub fn with_mask(mut self, mask: u32) -> Self {
+        self.mask = mask;
         self
     }
 

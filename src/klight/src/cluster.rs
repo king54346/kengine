@@ -252,8 +252,19 @@ pub fn assign(
 ///
 /// 代价是每盏灯多占几个簇的名单——那只让那几个簇多循环几盏照不到的灯，
 /// 而 `light_sample_direction` 对它们会立刻返回衰减 0。
-fn screen_tiles(grid: &ClusterGrid, projection: Mat4, center: Vec3, radius: f32) -> ([u32; 2], [u32; 2]) {
-    let full = ([0, 0], [grid.tiles_x.saturating_sub(1), grid.tiles_y.saturating_sub(1)]);
+fn screen_tiles(
+    grid: &ClusterGrid,
+    projection: Mat4,
+    center: Vec3,
+    radius: f32,
+) -> ([u32; 2], [u32; 2]) {
+    let full = (
+        [0, 0],
+        [
+            grid.tiles_x.saturating_sub(1),
+            grid.tiles_y.saturating_sub(1),
+        ],
+    );
 
     // 球跨过近平面时，它在屏幕上的投影会翻到无穷远——这时老实地
     // 取整屏。不特判的话投影出来的 NDC 是发散的，包围盒会变成 NaN，
@@ -427,9 +438,11 @@ mod test {
             position: Vec3::new(0.0, 0.0, -500.0),
             radius: 1.0,
         };
-        assert!(assign(&grid, &[light], view(), projection())
-            .indices
-            .is_empty());
+        assert!(
+            assign(&grid, &[light], view(), projection())
+                .indices
+                .is_empty()
+        );
     }
 
     #[test]
@@ -463,9 +476,11 @@ mod test {
             position: Vec3::new(0.0, 0.0, -10.0),
             radius: 0.0,
         };
-        assert!(assign(&grid, &[light], view(), projection())
-            .indices
-            .is_empty());
+        assert!(
+            assign(&grid, &[light], view(), projection())
+                .indices
+                .is_empty()
+        );
     }
 
     #[test]

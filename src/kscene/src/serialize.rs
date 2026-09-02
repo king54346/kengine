@@ -173,6 +173,17 @@ impl Visit for Node {
         self.visible.visit("Visible", &mut region)?;
         self.morph_weights.visit("MorphWeights", &mut region)?;
 
+        // 光照分层的另一半。灯那边存了，物体这边不存的话，读档之后
+        // 「这盏灯只照角色」会变成「照亮一切」——两边必须同进同退。
+        //
+        // 后加的字段，老存档里没有这块区域，读不到就当「接受一切光照」。
+        let mut light_mask = self.light_mask;
+        if light_mask.visit("LightMask", &mut region).is_ok() {
+            self.light_mask = light_mask;
+        } else if region.is_reading() {
+            self.light_mask = u32::MAX;
+        }
+
         visit_optional("Camera", &mut self.camera, &mut region, Default::default)?;
         visit_optional("Light", &mut self.light, &mut region, Default::default)?;
         visit_optional("Skin", &mut self.skin, &mut region, || {
@@ -735,7 +746,13 @@ mod test {
             intensity: 4.5,
             enabled: true,
             cast_shadows: true,
+            mask: 0b1010,
         }));
+        let masked = scene.add_node(
+            Node::new("only_hero")
+                .with_light(Light::point(3.0))
+                .with_light_mask(0b0110),
+        );
         let spot = scene.add_node(Node::new("spot").with_light(Light {
             kind: klight::LightKind::Spot {
                 range: 12.0,
@@ -752,6 +769,17 @@ mod test {
         assert_eq!(sun.intensity, 4.5);
         assert!(sun.cast_shadows);
         assert_eq!(sun.color, Vec3::new(1.0, 0.9, 0.8));
+        // 掩码是美术调出来的数据。丢了之后「这盏灯只照角色」会变成
+        // 「照亮一切」，读档之后画面就不一样了——而且不报任何错。
+        assert_eq!(sun.mask, 0b1010, "光照分层的掩码没存下来");
+        // 物体那一半也要存。两边同进同退才行——只存一半的话读档之后
+        // 「这盏灯只照角色」会悄悄变成「照亮一切」。
+        assert_eq!(restored[masked].light_mask, 0b0110, "节点的光照层没存下来");
+        assert_eq!(
+            restored[directional].light_mask,
+            u32::MAX,
+            "没设过的节点该读回「接受一切光照」"
+        );
 
         match restored[spot].light().unwrap().kind {
             klight::LightKind::Spot {

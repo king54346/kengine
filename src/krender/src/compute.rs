@@ -256,6 +256,28 @@ impl ComputeContext {
         pollster::block_on(Self::headless_async())
     }
 
+    /// 整个测试进程共用的一台无头设备。
+    ///
+    /// # 为什么要共用
+    ///
+    /// 每调一次 [`headless`](Self::headless) 都会新开一个 `wgpu::Instance`
+    /// 和一台设备。libtest 并行跑测试时几十台设备同时创建又同时析构，
+    /// 在 Windows 上会**间歇性地把进程带走**：实测三次里有一次
+    /// `STATUS_STACK_BUFFER_OVERRUN`，而且是在「全部测试通过」之后
+    /// 的退出阶段崩的——测试报告全绿，退出码却是失败。
+    ///
+    /// 共用一台，而且**故意泄漏**（`OnceLock` 持有到进程结束），
+    /// 于是根本没有并发析构这回事。测试进程本来就要退出，泄漏一台设备
+    /// 不构成问题；换来的是不再有那种「绿了但崩了」的报告。
+    ///
+    /// 顺带还快不少：建设备是这些测试里最慢的一步。
+    #[cfg(test)]
+    pub(crate) fn shared() -> Option<&'static Self> {
+        use std::sync::OnceLock;
+        static SHARED: OnceLock<Option<ComputeContext>> = OnceLock::new();
+        SHARED.get_or_init(Self::headless).as_ref()
+    }
+
     /// [`headless`](Self::headless) 的异步版本。
     pub async fn headless_async() -> Option<Self> {
         let instance = wgpu::Instance::default();
@@ -273,6 +295,18 @@ impl ComputeContext {
             .ok()?;
 
         Some(Self { device, queue })
+    }
+
+    /// 这台设备。同一个 crate 里的测试要拿它自己建管线。
+    #[cfg(test)]
+    pub(crate) fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// 这台设备的队列。
+    #[cfg(test)]
+    pub(crate) fn queue(&self) -> &wgpu::Queue {
+        &self.queue
     }
 
     /// 编译一条计算管线。
@@ -660,8 +694,8 @@ mod tests {
     ///
     /// 拿不到就返回 [`None`]——CI 上通常没有 GPU，那种环境下这些测试
     /// 应当跳过而不是红。本地开发一定会真的跑到。
-    fn headless() -> Option<ComputeContext> {
-        ComputeContext::headless()
+    fn headless() -> Option<&'static ComputeContext> {
+        ComputeContext::shared()
     }
 
     /// 把字节按 `f32` 解出来。

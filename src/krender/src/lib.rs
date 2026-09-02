@@ -129,7 +129,6 @@ struct Globals {
     environment: GpuEnvironment,
 }
 
-
 /// 聚簇前向着色的调节项。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClusterSettings {
@@ -4212,7 +4211,8 @@ mod test {
         // 上限才从十几盏提到几百盏。
         assert_eq!(
             size_of::<Globals>(),
-            64 + 16 * 3 + 64 * klight::cascade::MAX_CASCADES
+            64 + 16 * 3
+                + 64 * klight::cascade::MAX_CASCADES
                 + 16 * 5
                 + 16 * 2
                 + size_of::<GpuEnvironment>()

@@ -271,6 +271,14 @@ name = "lights_many"
 path = "examples/kengine/new/lights_many.rs"
 
 [[example]]
+name = "lights_selective"
+path = "examples/kengine/new/lights_selective.rs"
+
+[[example]]
+name = "lights_custom"
+path = "examples/kengine/new/lights_custom.rs"
+
+[[example]]
 name = "shader_prepass"
 path = "examples/kengine/shader/shader_prepass.rs"
 
