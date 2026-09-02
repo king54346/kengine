@@ -258,7 +258,6 @@ impl Ui {
     }
 }
 
-
 /// 在 `outer` 里居中放一个宽高比为 `aspect` 的矩形，尽量大但不超出。
 ///
 /// 「contain」而不是「cover」：宁可留白，也不把图裁掉一块——
@@ -528,7 +527,13 @@ mod tests {
         let outer = Rect::new(0.0, 0.0, 200.0, 100.0);
         let mut ui = Ui::new();
         ui.begin_frame(Vec2::new(800.0, 600.0), 1.0);
-        ui.image_fit(outer, 0.0, kcore::uuid::Uuid::nil(), [[0.0, 0.0], [1.0, 1.0]], Vec4::ONE);
+        ui.image_fit(
+            outer,
+            0.0,
+            kcore::uuid::Uuid::nil(),
+            [[0.0, 0.0], [1.0, 1.0]],
+            Vec4::ONE,
+        );
         ui.end_frame();
 
         assert!(!ui.draw_list().is_empty(), "宽高比未知时也该画出来");

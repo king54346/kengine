@@ -196,6 +196,23 @@ path = "examples/kengine/camera/first_person_view_model.rs"
 name = "sprite_on_ui_2d"
 path = "examples/kengine/camera/2d_on_ui.rs"
 
+# ── bevy 的 examples/ui 移植 ──
+[[example]]
+name = "ui_layout"
+path = "examples/kengine/ui/layout.rs"
+
+[[example]]
+name = "ui_widgets"
+path = "examples/kengine/ui/widgets.rs"
+
+[[example]]
+name = "ui_images"
+path = "examples/kengine/ui/images.rs"
+
+[[example]]
+name = "ui_scroll"
+path = "examples/kengine/ui/scroll.rs"
+
 # ── bevy 的 examples/scene 移植 ──
 [[example]]
 name = "world_serialization"

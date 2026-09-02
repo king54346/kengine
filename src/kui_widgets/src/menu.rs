@@ -2088,7 +2088,10 @@ mod widget_tests {
         let mut w = WidgetUi::default();
 
         for _ in 0..3 {
-            assert_eq!(dropdown_frame(&mut w, &mut ui, &UiInput::default(), 1), None);
+            assert_eq!(
+                dropdown_frame(&mut w, &mut ui, &UiInput::default(), 1),
+                None
+            );
         }
     }
 
