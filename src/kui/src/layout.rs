@@ -76,6 +76,48 @@ pub enum AlignCross {
     Center,
 }
 
+/// 一个节点按什么规则排它的孩子。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Display {
+    /// 弹性盒：孩子沿主轴排成一条。绝大多数界面都是这个。
+    #[default]
+    Flex,
+    /// 网格：孩子按 [`Style::grid_columns`] 折行。
+    ///
+    /// 和「一堆 `Row` 套在 `Column` 里」的区别是**跨行对齐**：
+    /// 网格的第二列在每一行里都是同一个宽度，而一行行手排的话
+    /// 每行各按各的内容宽，列会对不齐。物品栏、关卡选择、键位表
+    /// 都要的是网格。
+    Grid,
+    /// 不参与布局，也不占位置，连同整棵子树一起消失。
+    ///
+    /// 和「画的时候跳过」不是一回事：那样它仍然占着位置，
+    /// 后面的东西不会补上来。
+    None,
+}
+
+/// 网格的一条轨道（一列或一行）有多宽。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum Track {
+    /// 由这一列里最宽的那个孩子决定。
+    #[default]
+    Auto,
+    /// 固定像素。
+    Px(f32),
+    /// 按比例分剩余空间。`Fr(1.0)` 各占一份，等宽。
+    Fr(f32),
+}
+
+impl Track {
+    fn to_taffy(self) -> TrackSizingFunction {
+        match self {
+            Track::Auto => auto(),
+            Track::Px(v) => length(v),
+            Track::Fr(v) => fr(v),
+        }
+    }
+}
+
 /// 一个长度：固定像素、百分比，或者由内容决定。
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Length {
@@ -155,8 +197,17 @@ pub struct Style {
     pub width: Length,
     /// 高。
     pub height: Length,
-    /// 最小宽 / 高（像素）。
+    /// 最小宽 / 高（像素）。`0` 表示不限。
     pub min_size: Vec2,
+    /// 最大宽 / 高（像素）。`0` 表示不限。
+    ///
+    /// 用 `0` 而不是 `Option<Vec2>` 当「不限」，是为了让 [`Style`] 保持
+    /// `Copy` 且能 `..Default::default()` 一路写下来。宽度为 0 的界面
+    /// 元素没有意义，所以这个哨兵值不会和真实取值撞上。
+    ///
+    /// 最大宽和 [`grow`](Self::grow) 配合起来才是常见的那个需求：
+    /// 「铺满，但别超过 600 像素」——正文栏宽度、对话框、提示条都是这样。
+    pub max_size: Vec2,
     /// 内边距。
     pub padding: Edges,
     /// 外边距。
@@ -176,6 +227,26 @@ pub struct Style {
     /// 在这里没有意义，因为浮层的目标位置要先知道锚点排在哪，
     /// 而那要等这一轮求解出来。
     pub absolute: bool,
+    /// 这个节点按什么规则排它的孩子。
+    pub display: Display,
+    /// [`Display::Grid`] 时有几列，以及每列多宽。
+    ///
+    /// 只用前 `grid_column_count` 条。列数为 0 时退化成一列。
+    ///
+    /// # 为什么是定长数组而不是 `Vec`
+    ///
+    /// [`Style`] 是 `Copy` 的——它在整个布局层里按值传来传去，
+    /// 每帧每个节点一份。为了网格把它改成 `Clone` 会让所有调用点
+    /// 多一次分配，而**游戏界面里超过 12 列的网格基本不存在**
+    /// （物品栏 8~10 列，键位表 3 列）。真要更多就嵌一层。
+    pub grid_columns: [Track; MAX_GRID_COLUMNS],
+    /// 上面那个数组里有几条是有效的。
+    pub grid_column_count: u8,
+    /// 这个**孩子**横跨几列。`0` 和 `1` 都表示一列。
+    ///
+    /// 网格里的小标题、分隔线要它：一条占满整行的标题，
+    /// 而不是被挤在第一列。
+    pub grid_span: u8,
 }
 
 impl Default for Style {
@@ -187,6 +258,7 @@ impl Default for Style {
             width: Length::Auto,
             height: Length::Auto,
             min_size: Vec2::ZERO,
+            max_size: Vec2::ZERO,
             padding: Edges::default(),
             margin: Edges::default(),
             gap: 0.0,
@@ -194,14 +266,103 @@ impl Default for Style {
             // flexbox 的默认收缩比是 1：空间不够时元素会缩，而不是溢出。
             shrink: 1.0,
             absolute: false,
+            display: Display::Flex,
+            grid_columns: [Track::Auto; MAX_GRID_COLUMNS],
+            grid_column_count: 0,
+            grid_span: 1,
         }
+    }
+}
+
+/// 一个网格最多能有几列。理由见 [`Style::grid_columns`]。
+pub const MAX_GRID_COLUMNS: usize = 12;
+
+impl Style {
+    /// 把这个节点变成 `columns` 列等宽的网格。
+    ///
+    /// 最常用的那种：物品栏、关卡选择、颜色板。每列 `Fr(1.0)`，
+    /// 行高由内容决定。
+    ///
+    /// ```
+    /// # use kui::{Style, Display};
+    /// let grid = Style::default().with_uniform_grid(4);
+    /// assert_eq!(grid.display, Display::Grid);
+    /// ```
+    ///
+    /// 超过 [`MAX_GRID_COLUMNS`] 的部分会被丢掉——静默截断比 panic 好，
+    /// 但会记一条日志，因为「列数不对」在画面上表现为整个网格错位。
+    pub fn with_uniform_grid(self, columns: usize) -> Self {
+        self.with_grid(&[Track::Fr(1.0)].repeat(columns.max(1)))
+    }
+
+    /// 把这个节点变成网格，逐列指定宽度。
+    ///
+    /// 键位表那种「名字一列自适应、按键一列固定宽」用它。
+    pub fn with_grid(mut self, columns: &[Track]) -> Self {
+        if columns.len() > MAX_GRID_COLUMNS {
+            klog::warn!(
+                "网格要 {} 列，但最多只支持 {MAX_GRID_COLUMNS} 列，多的被丢掉了",
+                columns.len()
+            );
+        }
+        self.display = Display::Grid;
+        self.grid_column_count = columns.len().min(MAX_GRID_COLUMNS) as u8;
+        for (slot, track) in self.grid_columns.iter_mut().zip(columns) {
+            *slot = *track;
+        }
+        self
+    }
+
+    /// 让这个**孩子**横跨几列。网格里的标题行用它。
+    pub fn spanning(mut self, columns: usize) -> Self {
+        self.grid_span = columns.clamp(1, MAX_GRID_COLUMNS) as u8;
+        self
+    }
+
+    /// 限制最大宽度。「铺满，但别超过这么宽」。
+    pub fn with_max_width(mut self, width: f32) -> Self {
+        self.max_size.x = width;
+        self
+    }
+
+    /// 限制最大高度。
+    pub fn with_max_height(mut self, height: f32) -> Self {
+        self.max_size.y = height;
+        self
     }
 }
 
 impl Style {
     fn to_taffy(self) -> taffy::Style {
+        // 网格的列。`grid_column_count` 为 0 时留空，taffy 会退化成一列。
+        let template: Vec<GridTemplateComponent<String>> = self.grid_columns
+            [..self.grid_column_count as usize]
+            .iter()
+            .map(|track| GridTemplateComponent::Single(track.to_taffy()))
+            .collect();
+
         taffy::Style {
-            display: Display::Flex,
+            display: match self.display {
+                Display::Flex => taffy::Display::Flex,
+                Display::Grid => taffy::Display::Grid,
+                Display::None => taffy::Display::None,
+            },
+            grid_template_columns: template,
+            // 行数不指定：孩子放不下就自动开新行，行高由内容决定。
+            // 这正是「一格一格往里塞」想要的行为——固定行数反而会让
+            // 多出来的物品消失。
+            grid_column: if self.grid_span > 1 {
+                // CSS 的 `grid-column: span N` 展开成
+                // `grid-column-start: span N; grid-column-end: auto`。
+                // 写反成 `start: auto, end: span N` 的话 taffy 不认，
+                // 表现为跨列静默失效——标题挤在第一列里。
+                Line {
+                    start: span(self.grid_span as u16),
+                    end: GridPlacement::Auto,
+                }
+            } else {
+                Line::AUTO
+            },
             flex_direction: match self.direction {
                 Direction::Column => FlexDirection::Column,
                 Direction::Row => FlexDirection::Row,
@@ -231,6 +392,18 @@ impl Style {
                 },
                 height: if self.min_size.y > 0.0 {
                     length(self.min_size.y)
+                } else {
+                    auto()
+                },
+            },
+            max_size: Size {
+                width: if self.max_size.x > 0.0 {
+                    length(self.max_size.x)
+                } else {
+                    auto()
+                },
+                height: if self.max_size.y > 0.0 {
+                    length(self.max_size.y)
                 } else {
                     auto()
                 },
@@ -943,5 +1116,276 @@ mod tests {
     fn count_is_iterative_too() {
         let root = chain(5_000);
         assert_eq!(root.count(), 5_000);
+    }
+
+    // ── 网格 ──
+
+    /// 建一个 `columns` 列的网格，里面塞 `count` 个 40×20 的格子。
+    fn grid_of(columns: usize, count: usize, available: Vec2) -> Solved {
+        let cell = Style {
+            width: Length::Px(40.0),
+            height: Length::Px(20.0),
+            ..Default::default()
+        };
+        // 网格自己必须有确定宽度。宽度是 `Auto` 的话它会缩到内容宽，
+        // `Fr` 就没有剩余空间可分——列会挤成一团，而这不是网格的错。
+        let mut root = LayoutNode::new(
+            Id::new("grid"),
+            Style {
+                width: Length::Percent(1.0),
+                ..Style::default().with_uniform_grid(columns)
+            },
+        );
+        for index in 0..count {
+            root.children
+                .push(LayoutNode::new(Id::new("grid").index(index), cell));
+        }
+        solve(&root, available)
+    }
+
+    #[test]
+    fn a_grid_wraps_after_the_column_count() {
+        // 四列六格：第 4 格该换到第二行，而且和第 0 格左对齐。
+        let solved = grid_of(4, 6, Vec2::new(400.0, 400.0));
+        let at = |i: usize| solved.rect(Id::new("grid").index(i)).unwrap();
+
+        assert_eq!(at(0).min.y, at(3).min.y, "前四个该在同一行");
+        assert!(at(4).min.y > at(0).min.y, "第五个该换行");
+        assert_eq!(at(4).min.x, at(0).min.x, "换行之后该回到第一列");
+    }
+
+    #[test]
+    fn grid_columns_line_up_across_rows() {
+        // 这是网格相对「一行行手排」的**唯一**理由：跨行对齐。
+        // 手排的话每行各按各的内容宽，第二列会参差不齐。
+        let solved = grid_of(3, 6, Vec2::new(300.0, 400.0));
+        let at = |i: usize| solved.rect(Id::new("grid").index(i)).unwrap();
+
+        assert_eq!(at(1).min.x, at(4).min.x, "第二列在两行里该对齐");
+        assert_eq!(at(2).min.x, at(5).min.x, "第三列在两行里该对齐");
+    }
+
+    #[test]
+    fn uniform_grid_columns_are_equally_wide() {
+        // `Fr(1.0)` 各占一份。列宽不等的话物品栏会歪。
+        let mut root = LayoutNode::new(
+            Id::new("g"),
+            Style {
+                width: Length::Percent(1.0),
+                ..Style::default().with_uniform_grid(4)
+            },
+        );
+        for index in 0..4 {
+            root.children.push(LayoutNode::new(
+                Id::new("g").index(index),
+                Style {
+                    height: Length::Px(10.0),
+                    ..Default::default()
+                },
+            ));
+        }
+        let solved = solve(&root, Vec2::new(400.0, 100.0));
+        let width = |i: usize| solved.rect(Id::new("g").index(i)).unwrap().size().x;
+
+        for index in 1..4 {
+            assert!(
+                (width(index) - width(0)).abs() < 0.01,
+                "第 {index} 列宽 {} ≠ 第 0 列宽 {}",
+                width(index),
+                width(0)
+            );
+        }
+    }
+
+    #[test]
+    fn a_spanning_child_takes_several_columns() {
+        // 网格里的小标题要占满一整行，而不是被挤在第一列。
+        let mut root = LayoutNode::new(
+            Id::new("g"),
+            Style {
+                width: Length::Percent(1.0),
+                ..Style::default().with_uniform_grid(3)
+            },
+        );
+        root.children.push(LayoutNode::new(
+            Id::new("title"),
+            Style {
+                height: Length::Px(20.0),
+                ..Default::default()
+            }
+            .spanning(3),
+        ));
+        root.children.push(LayoutNode::new(
+            Id::new("cell"),
+            Style {
+                height: Length::Px(20.0),
+                ..Default::default()
+            },
+        ));
+
+        let solved = solve(&root, Vec2::new(300.0, 200.0));
+        let title = solved.rect(Id::new("title")).unwrap();
+        let cell = solved.rect(Id::new("cell")).unwrap();
+
+        assert!(title.size().x > cell.size().x * 2.5, "标题没有跨列");
+        assert!(cell.min.y > title.min.y, "格子该排在标题下面一行");
+    }
+
+    #[test]
+    fn a_grid_can_give_each_column_its_own_width() {
+        // 键位表：名字一列自适应，按键一列固定宽。
+        let mut root = LayoutNode::new(
+            Id::new("g"),
+            Style {
+                width: Length::Percent(1.0),
+                ..Style::default().with_grid(&[Track::Fr(1.0), Track::Px(80.0)])
+            },
+        );
+        for name in ["a", "b"] {
+            root.children.push(LayoutNode::new(
+                Id::new(name),
+                Style {
+                    height: Length::Px(20.0),
+                    ..Default::default()
+                },
+            ));
+        }
+
+        let solved = solve(&root, Vec2::new(300.0, 100.0));
+        assert!((solved.rect(Id::new("b")).unwrap().size().x - 80.0).abs() < 0.01);
+        assert!(solved.rect(Id::new("a")).unwrap().size().x > 150.0);
+    }
+
+    #[test]
+    fn too_many_columns_are_truncated_instead_of_panicking() {
+        // 静默截断比 panic 好，但列数不对在画面上表现为整个网格错位，
+        // 所以那条路径会记一条日志。
+        let style = Style::default().with_uniform_grid(MAX_GRID_COLUMNS + 5);
+        assert_eq!(style.grid_column_count as usize, MAX_GRID_COLUMNS);
+    }
+
+    #[test]
+    fn zero_columns_degrade_to_one() {
+        // 计算出来的列数可能是 0（比如「可用宽度 / 格子宽度」向下取整）。
+        // 那时排成一列比整个网格消失好。
+        assert_eq!(Style::default().with_uniform_grid(0).grid_column_count, 1);
+    }
+
+    // ── display: none ──
+
+    #[test]
+    fn a_hidden_node_takes_no_space() {
+        // 和「画的时候跳过」不是一回事：那样它仍然占着位置。
+        let row = |hidden: bool| {
+            let mut root = LayoutNode::new(
+                Id::new("row"),
+                Style {
+                    direction: Direction::Row,
+                    ..Default::default()
+                },
+            );
+            root.children.push(LayoutNode::new(
+                Id::new("a"),
+                Style {
+                    width: Length::Px(50.0),
+                    height: Length::Px(10.0),
+                    display: if hidden { Display::None } else { Display::Flex },
+                    ..Default::default()
+                },
+            ));
+            root.children.push(LayoutNode::new(
+                Id::new("b"),
+                Style {
+                    width: Length::Px(50.0),
+                    height: Length::Px(10.0),
+                    ..Default::default()
+                },
+            ));
+            solve(&root, Vec2::new(400.0, 100.0))
+                .rect(Id::new("b"))
+                .unwrap()
+                .min
+                .x
+        };
+
+        assert!(row(true) < row(false), "藏起来之后后面的该补上来");
+        assert_eq!(row(true), 0.0);
+    }
+
+    // ── max_size ──
+
+    #[test]
+    fn max_width_caps_a_growing_child() {
+        // 「铺满，但别超过这么宽」——正文栏、对话框、提示条都是这样。
+        let solve_with = |max: f32| {
+            let mut root = LayoutNode::new(
+                Id::new("root"),
+                Style {
+                    width: Length::Percent(1.0),
+                    ..Default::default()
+                },
+            );
+            root.children.push(LayoutNode::new(
+                Id::new("body"),
+                Style {
+                    width: Length::Percent(1.0),
+                    height: Length::Px(10.0),
+                    max_size: Vec2::new(max, 0.0),
+                    ..Default::default()
+                },
+            ));
+            solve(&root, Vec2::new(1000.0, 100.0))
+                .rect(Id::new("body"))
+                .unwrap()
+                .size()
+                .x
+        };
+
+        assert!((solve_with(0.0) - 1000.0).abs() < 0.01, "0 该表示不限");
+        assert!((solve_with(600.0) - 600.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn max_height_caps_a_tall_child() {
+        let mut root = LayoutNode::new(Id::new("root"), Style::default());
+        root.children.push(LayoutNode::new(
+            Id::new("tall"),
+            Style {
+                height: Length::Px(500.0),
+                max_size: Vec2::new(0.0, 120.0),
+                ..Default::default()
+            },
+        ));
+
+        let height = solve(&root, Vec2::new(400.0, 1000.0))
+            .rect(Id::new("tall"))
+            .unwrap()
+            .size()
+            .y;
+        assert!((height - 120.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn min_size_still_wins_over_max_size() {
+        // CSS 的规矩：min 压过 max。两个都设且冲突时，结果是 min——
+        // 这一条不写测试的话很容易在改动里被弄反。
+        let mut root = LayoutNode::new(Id::new("root"), Style::default());
+        root.children.push(LayoutNode::new(
+            Id::new("x"),
+            Style {
+                width: Length::Px(10.0),
+                height: Length::Px(10.0),
+                min_size: Vec2::new(200.0, 0.0),
+                max_size: Vec2::new(50.0, 0.0),
+                ..Default::default()
+            },
+        ));
+
+        let width = solve(&root, Vec2::new(400.0, 100.0))
+            .rect(Id::new("x"))
+            .unwrap()
+            .size()
+            .x;
+        assert!((width - 200.0).abs() < 0.01, "min 该压过 max，实际 {width}");
     }
 }

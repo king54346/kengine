@@ -2093,6 +2093,7 @@ dependencies = [
  "bytemuck",
  "kcore",
  "kfont",
+ "klog",
  "kmath",
  "ktexture",
  "naga",
@@ -2103,6 +2104,7 @@ dependencies = [
 name = "kui_widgets"
 version = "0.1.0"
 dependencies = [
+ "kcore",
  "kfont",
  "kmath",
  "kui",

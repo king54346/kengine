@@ -188,6 +188,14 @@ path = "examples/kengine/camera/custom_projection.rs"
 name = "top_down_camera_2d"
 path = "examples/kengine/camera/2d_top_down_camera.rs"
 
+[[example]]
+name = "first_person_view_model"
+path = "examples/kengine/camera/first_person_view_model.rs"
+
+[[example]]
+name = "sprite_on_ui_2d"
+path = "examples/kengine/camera/2d_on_ui.rs"
+
 # ── bevy 的 examples/scene 移植 ──
 [[example]]
 name = "world_serialization"

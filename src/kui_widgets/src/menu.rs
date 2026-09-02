@@ -267,6 +267,91 @@ impl WidgetUi {
         )
     }
 
+    /// 一个下拉框：合着时显示当前选中的那一项，点开是一列选项。
+    ///
+    /// 返回的 id 既是这个框本身，也是它那层浮层的锚点——接着交给
+    /// [`dropdown_menu`](Self::dropdown_menu)。
+    ///
+    /// ```no_run
+    /// # use kui_widgets::WidgetUi;
+    /// # let mut w = WidgetUi::default();
+    /// # let mut quality = 1usize;
+    /// const QUALITY: [&str; 3] = ["低", "中", "高"];
+    ///
+    /// // 摆在它该在的位置。
+    /// let picker = w.dropdown("quality", QUALITY[quality]);
+    ///
+    /// // ……界面的其余部分……
+    ///
+    /// // 帧末再弹列表。
+    /// if let Some(picked) = w.dropdown_menu(picker, &QUALITY, quality) {
+    ///     quality = picked;
+    /// }
+    /// ```
+    ///
+    /// # 为什么要分成两次调用
+    ///
+    /// 和 [`menu_button`](Self::menu_button) 是同一个理由：**浮层必须
+    /// 在这一帧的最后声明**。命中从后往前找，弹出的列表要是声明得早，
+    /// 后面声明的控件会从它头上抢走点击——列表看得见，却点不动。
+    ///
+    /// 合成一次调用当然更顺手，但那样就只有「下拉框是界面里最后一个
+    /// 控件」时才对，而这个前提没法在类型上表达，也没法在运行时检查。
+    pub fn dropdown(&mut self, id: &str, text: impl Into<String>) -> Id {
+        let key = Id::new(id);
+        let open = self.menu_chain.first() == Some(&key);
+        self.push(
+            id,
+            Widget::Dropdown {
+                text: text.into(),
+                open,
+            },
+        )
+    }
+
+    /// 弹出下拉框的选项列表，返回**这一帧被选中的下标**。
+    ///
+    /// 没打开、或者打开了但没点任何一项时返回 [`None`]——
+    /// 也就是说返回 `Some` 的那一帧才是「用户改了选择」。
+    ///
+    /// # 滞后一帧
+    ///
+    /// 和 [`response`](Self::response) 一样：矩形要等整棵树排完才知道，
+    /// 所以「被点中」是在松开的**下一帧**才读得到的。菜单的关闭也
+    /// 刻意推迟了一帧，正是为了让这一读读得到——当场关掉的话，
+    /// 被点的那一项下一帧就不再被声明，用户会看到「点哪一项都没反应」。
+    ///
+    /// `selected` 是当前值，用来在列表里打勾。**越界不会 panic**，
+    /// 只是没有一项带勾：选项列表长度变化（难度选项随解锁增加）时
+    /// 崩掉一个界面不划算。
+    pub fn dropdown_menu(
+        &mut self,
+        anchor: Id,
+        options: &[impl AsRef<str>],
+        selected: usize,
+    ) -> Option<usize> {
+        if !self.begin_menu(anchor) {
+            return None;
+        }
+
+        let mut picked = None;
+        // id 从锚点派生，所以同一个界面里放两个下拉框不会互相串。
+        for (index, option) in options.iter().enumerate() {
+            let item = self.push_menu_item(
+                &format!("{}#{index}", anchor.0),
+                option.as_ref().to_string(),
+                true,
+                false,
+                index == selected,
+            );
+            if self.response(item).clicked {
+                picked = Some(index);
+            }
+        }
+        self.end_menu();
+        picked
+    }
+
     /// 开 `anchor` 这个锚点的菜单。返回它**是不是开着**。
     ///
     /// 返回 `false` 时里面的项一个都不要声明——声明了再藏的话它们仍然
@@ -314,7 +399,15 @@ impl WidgetUi {
     /// 禁用项**能被跳过但不能被停留**——高亮停在一个点不动的项上，
     /// 用户会以为菜单卡住了。
     pub fn menu_item_with(&mut self, id: &str, text: impl Into<String>, enabled: bool) -> Id {
-        self.push_menu_item(id, text.into(), enabled, false)
+        self.push_menu_item(id, text.into(), enabled, false, false)
+    }
+
+    /// 菜单里一个可勾选的项。左边画一个勾。
+    ///
+    /// 「显示网格 ✓」这类开关式的菜单项用它。状态和复选框一样由调用方
+    /// 保管——存在控件里的话，同一个 id 在两处用就会互相覆盖。
+    pub fn menu_item_checked(&mut self, id: &str, text: impl Into<String>, checked: bool) -> Id {
+        self.push_menu_item(id, text.into(), true, false, checked)
     }
 
     /// 菜单里一个会展开子菜单的项。
@@ -322,10 +415,17 @@ impl WidgetUi {
     /// 返回的 id 就是那层子菜单的锚点，接着用
     /// [`begin_menu`](Self::begin_menu) 声明它的内容。
     pub fn submenu_item(&mut self, id: &str, text: impl Into<String>) -> Id {
-        self.push_menu_item(id, text.into(), true, true)
+        self.push_menu_item(id, text.into(), true, true, false)
     }
 
-    fn push_menu_item(&mut self, id: &str, text: String, enabled: bool, submenu: bool) -> Id {
+    fn push_menu_item(
+        &mut self,
+        id: &str,
+        text: String,
+        enabled: bool,
+        submenu: bool,
+        checked: bool,
+    ) -> Id {
         let key = Id::new(id);
         // 高亮按这一层菜单记，所以要知道自己是这层的第几项。
         //
@@ -353,6 +453,7 @@ impl WidgetUi {
                 enabled,
                 highlighted,
                 submenu,
+                checked,
             },
         );
         key
@@ -407,7 +508,12 @@ impl WidgetUi {
         let clicked: Vec<Id> = self
             .declared
             .iter()
-            .filter(|d| matches!(d.widget, Widget::MenuButton { .. }))
+            .filter(|d| {
+                matches!(
+                    d.widget,
+                    Widget::MenuButton { .. } | Widget::Dropdown { .. }
+                )
+            })
             .filter(|d| self.interaction.response(d.id).clicked)
             .map(|d| d.id)
             .collect();
@@ -527,7 +633,10 @@ impl WidgetUi {
 
         let in_panel = self.menu_rects.iter().any(|rect| rect.contains(pointer));
         let on_button = self.declared.iter().zip(&self.rects).any(|(d, rect)| {
-            matches!(d.widget, Widget::MenuButton { .. }) && rect.contains(pointer)
+            matches!(
+                d.widget,
+                Widget::MenuButton { .. } | Widget::Dropdown { .. }
+            ) && rect.contains(pointer)
         });
 
         if !in_panel && !on_button {
@@ -650,11 +759,81 @@ pub(crate) fn button_size(ui: &Ui, theme: &Theme, text: &str) -> Vec2 {
     ui.measure(text, &text_style(theme.font_size), None).size
 }
 
+/// 量一个下拉框的内容：文字加右边那个 ▾。
+pub(crate) fn dropdown_size(ui: &Ui, theme: &Theme, text: &str) -> Vec2 {
+    let size = ui.measure(text, &text_style(theme.font_size), None).size;
+    Vec2::new(size.x + ARROW_WIDTH + 8.0, size.y)
+}
+
+/// 出几何：下拉框。
+///
+/// 和菜单按钮的区别是**它显示的是值不是命令**——所以画成一个带边框的
+/// 字段（文字靠左，像输入框），而不是一段居中的文字。
+/// 画成一样的话，用户分不出「点了会执行什么」和「点了会挑一个值」。
+pub(crate) fn paint_dropdown(
+    ui: &mut Ui,
+    theme: &Theme,
+    rect: Rect,
+    response: &Response,
+    text: &str,
+    open: bool,
+) {
+    let fill = if open || response.held {
+        theme.active
+    } else if response.hovered {
+        theme.hovered
+    } else {
+        theme.surface
+    };
+    ui.rounded_rect(rect, theme.radius, fill);
+    ui.border(rect, theme.radius, 1.0, theme.outline);
+    if response.focused {
+        ui.border(rect.shrink(-2.0), theme.radius + 2.0, 2.0, theme.focus);
+    }
+
+    ui.text(
+        Vec2::new(rect.min.x + 6.0, rect.center().y - theme.font_size * 0.6),
+        text,
+        &TextStyle {
+            size: theme.font_size,
+            ..Default::default()
+        },
+        theme.text,
+        // 文字太长时截断，别让它盖到箭头上。
+        Some((rect.size().x - ARROW_WIDTH - 8.0).max(0.0)),
+    );
+    paint_chevron(ui, rect, theme.text);
+}
+
+/// 下拉框右边那个朝下的 ▾。
+///
+/// 子菜单那个箭头朝右，这个朝下——方向本身就是提示：
+/// 「列表会掉在下面」而不是「展开在旁边」。
+fn paint_chevron(ui: &mut Ui, rect: Rect, color: Vec4) {
+    let size = 4.0;
+    let center = Vec2::new(rect.max.x - ARROW_WIDTH * 0.5, rect.center().y);
+    // 两笔画一个 ∨。这一层只有矩形和线段，为一个 8 像素的箭头
+    // 引进多边形填充不划算。
+    ui.polyline(
+        &[
+            Vec2::new(center.x - size, center.y - size * 0.5),
+            Vec2::new(center.x, center.y + size * 0.5),
+            Vec2::new(center.x + size, center.y - size * 0.5),
+        ],
+        1.5,
+        color,
+    );
+}
+
 /// 量一个菜单项的内容。
 pub(crate) fn item_size(ui: &Ui, theme: &Theme, text: &str, submenu: bool) -> Vec2 {
     let size = ui.measure(text, &text_style(theme.font_size), None).size;
-    // 有子菜单的项要给右边的箭头留位置，不然箭头会压在文字上。
-    Vec2::new(size.x + if submenu { ARROW_WIDTH } else { 0.0 }, size.y)
+    // 左边永远留一条放勾的槽（理由见 `paint_item`），右边有子菜单时
+    // 再给箭头留位置——不留的话箭头会压在文字上。
+    Vec2::new(
+        size.x + CHECK_WIDTH + if submenu { ARROW_WIDTH } else { 0.0 },
+        size.y,
+    )
 }
 
 /// 菜单的底板。
@@ -706,6 +885,7 @@ pub(crate) fn paint_item(
     enabled: bool,
     highlighted: bool,
     submenu: bool,
+    checked: bool,
 ) {
     // 高亮是**键盘**走出来的，悬停是鼠标扫出来的，两者画成一样——
     // 用户不该看得出自己刚才用的是键盘还是鼠标。
@@ -714,8 +894,24 @@ pub(crate) fn paint_item(
     }
 
     let color = if enabled { theme.text } else { theme.dim };
+
+    // 勾占左边一条固定宽度的槽。**不管勾不勾选都留着这条槽**——
+    // 只在勾选时留的话，勾一下整列文字会往右跳一截；而同一条菜单里
+    // 有勾的和没勾的混着排时，文字会参差不齐。
+    // 系统菜单也都是这么做的（左边永远有一条空槽）。
+    let text_x = rect.min.x + CHECK_WIDTH;
+    if checked {
+        let size = theme.font_size * 0.55;
+        let box_rect = Rect {
+            min: Vec2::new(rect.min.x + 2.0, rect.center().y - size * 0.5),
+            max: Vec2::new(rect.min.x + 2.0 + size, rect.center().y + size * 0.5),
+        };
+        // 和复选框用的是同一个勾，形状一致。
+        ui.polyline(&crate::checkbox::check_points(box_rect), size * 0.15, color);
+    }
+
     ui.text(
-        Vec2::new(rect.min.x, rect.center().y - theme.font_size * 0.6),
+        Vec2::new(text_x, rect.center().y - theme.font_size * 0.6),
         text,
         &TextStyle {
             size: theme.font_size,
@@ -729,6 +925,9 @@ pub(crate) fn paint_item(
         paint_arrow(ui, rect, color);
     }
 }
+
+/// 勾那条槽有多宽。
+const CHECK_WIDTH: f32 = 16.0;
 
 /// 子菜单项右边那个小三角。
 fn paint_arrow(ui: &mut Ui, rect: Rect, color: Vec4) {
@@ -1797,5 +1996,162 @@ mod widget_tests {
         w.finish(&mut ui, &UiInput::default());
         assert!(!w.menus_open());
         assert!(w.response(a).rect.size() != Vec2::ZERO);
+    }
+
+    // ── 下拉框 ──
+
+    const QUALITY: [&str; 3] = ["低", "中", "高"];
+
+    /// 一个只有下拉框的界面。`picked` 收本帧选中的下标。
+    fn dropdown_frame(
+        w: &mut WidgetUi,
+        ui: &mut kui::Ui,
+        input: &UiInput,
+        selected: usize,
+    ) -> Option<usize> {
+        w.begin();
+        let picker = w.dropdown("quality", QUALITY[selected]);
+        let picked = w.dropdown_menu(picker, &QUALITY, selected);
+        w.finish(ui, input);
+        picked
+    }
+
+    #[test]
+    fn a_dropdown_opens_and_closes_like_a_menu() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        dropdown_frame(&mut w, &mut ui, &UiInput::default(), 0);
+        assert!(!w.menus_open());
+
+        let field = w.response(Id::new("quality")).rect.center();
+        // `click` 走的是固定的 `declare`，这里得自己走两帧。
+        dropdown_frame(&mut w, &mut ui, &press(field.x, field.y), 0);
+        let mut release = at(field.x, field.y);
+        release.released.push(PointerButton::Primary);
+        dropdown_frame(&mut w, &mut ui, &release, 0);
+
+        assert!(w.menus_open(), "点下拉框该把列表打开");
+    }
+
+    #[test]
+    fn a_closed_dropdown_declares_no_options() {
+        // 关着还声明的话，那些项仍然参与命中——鼠标扫过列表本该在的
+        // 那片区域会莫名点不到底下的东西。
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+        dropdown_frame(&mut w, &mut ui, &UiInput::default(), 0);
+
+        let option = w.response(Id::new(&format!("{}#0", Id::new("quality").0)));
+        assert_eq!(option.rect.size(), Vec2::ZERO, "关着的时候不该有选项");
+    }
+
+    #[test]
+    fn picking_an_option_reports_its_index() {
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        // 开。
+        dropdown_frame(&mut w, &mut ui, &UiInput::default(), 0);
+        let field = w.response(Id::new("quality")).rect.center();
+        dropdown_frame(&mut w, &mut ui, &press(field.x, field.y), 0);
+        let mut release = at(field.x, field.y);
+        release.released.push(PointerButton::Primary);
+        dropdown_frame(&mut w, &mut ui, &release, 0);
+
+        // 列表排好了，点第三项。
+        dropdown_frame(&mut w, &mut ui, &UiInput::default(), 0);
+        let third = w
+            .response(Id::new(&format!("{}#2", Id::new("quality").0)))
+            .rect
+            .center();
+        assert_ne!(third, Vec2::ZERO, "列表没排出来");
+
+        dropdown_frame(&mut w, &mut ui, &press(third.x, third.y), 0);
+        let mut release = at(third.x, third.y);
+        release.released.push(PointerButton::Primary);
+        dropdown_frame(&mut w, &mut ui, &release, 0);
+
+        // **再走一帧**：控件的响应滞后一帧（矩形要等排完才知道），
+        // 所以「被点中」是在松开的下一帧才读得到的。
+        // 菜单的关闭也刻意推迟一帧，正是为了让这一读读得到。
+        let picked = dropdown_frame(&mut w, &mut ui, &UiInput::default(), 0);
+
+        assert_eq!(picked, Some(2), "该报出被点的那一项");
+    }
+
+    #[test]
+    fn an_untouched_dropdown_reports_nothing() {
+        // 返回 `Some` 的那一帧才是「用户改了选择」。每帧都报当前值的话，
+        // 调用方分不出「没动」和「又选了一遍同一个」。
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        for _ in 0..3 {
+            assert_eq!(dropdown_frame(&mut w, &mut ui, &UiInput::default(), 1), None);
+        }
+    }
+
+    #[test]
+    fn an_out_of_range_selection_does_not_panic() {
+        // 选项列表会变长变短（难度随解锁增加），越界时崩掉一个界面不划算。
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        w.begin();
+        let picker = w.dropdown("q", "?");
+        let picked = w.dropdown_menu(picker, &QUALITY, 99);
+        w.finish(&mut ui, &UiInput::default());
+
+        assert_eq!(picked, None);
+    }
+
+    #[test]
+    fn two_dropdowns_do_not_share_option_ids() {
+        // 选项 id 从锚点派生。不派生的话两个下拉框的第 0 项 id 相同，
+        // 点一个另一个也会跟着变。
+        let mut ui = ui();
+        let mut w = WidgetUi::default();
+
+        w.begin();
+        let a = w.dropdown("a", "甲");
+        let b = w.dropdown("b", "乙");
+        w.dropdown_menu(a, &QUALITY, 0);
+        w.dropdown_menu(b, &QUALITY, 0);
+        w.finish(&mut ui, &UiInput::default());
+
+        assert_ne!(
+            Id::new(&format!("{}#0", a.0)),
+            Id::new(&format!("{}#0", b.0))
+        );
+    }
+
+    #[test]
+    fn the_selected_option_is_ticked() {
+        // 没有勾的话，下拉框打开之后看不出现在选的是哪个。
+        let strokes = |selected: usize| {
+            let mut ui = ui();
+            let mut w = WidgetUi::default();
+
+            // 先开起来。
+            dropdown_frame(&mut w, &mut ui, &UiInput::default(), selected);
+            let field = w.response(Id::new("quality")).rect.center();
+            dropdown_frame(&mut w, &mut ui, &press(field.x, field.y), selected);
+            let mut release = at(field.x, field.y);
+            release.released.push(PointerButton::Primary);
+            dropdown_frame(&mut w, &mut ui, &release, selected);
+            dropdown_frame(&mut w, &mut ui, &UiInput::default(), selected);
+            ui.end_frame();
+
+            ui.draw_list()
+                .vertices()
+                .iter()
+                .filter(|v| v.params[2] == kui::MODE_SEGMENT)
+                .count()
+        };
+
+        // 合着的下拉框自己有一个 ∨（两段折线），打开之后多出选中项那个勾
+        // （也是两段）。
+        assert!(strokes(1) > 0, "一笔都没画");
     }
 }

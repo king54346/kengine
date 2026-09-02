@@ -111,7 +111,29 @@ pub(crate) enum Widget {
         highlighted: bool,
         /// 它右边还有一层子菜单。
         submenu: bool,
+        /// 左边画一个勾。
+        ///
+        /// 两种用途：可勾选的菜单项（「显示网格 ✓」），以及下拉框里
+        /// 标出当前选中的那一项。后者没有勾的话，下拉框打开之后
+        /// 看不出现在选的是哪个。
+        checked: bool,
     },
+    /// 一张贴图：图标、头像、物品格子里的东西。
+    Image {
+        /// 纹理 id。必须先登记过，否则渲染器会跳过这一批。
+        texture: kcore::uuid::Uuid,
+        /// 占多大。贴图没有「内在」尺寸，见 `image` 模块的说明。
+        size: Vec2,
+        /// 取图集里的哪一块。
+        uv: [[f32; 2]; 2],
+        /// 染色，会乘上去。
+        tint: Vec4,
+    },
+    /// 下拉框：合着时是一个显示当前选项的框，点开是一列选项。
+    ///
+    /// 和 [`Widget::MenuButton`] 的区别是**它显示的是值不是命令**——
+    /// 所以画成一个带边框的字段加一个 ▾，而不是一段光秃秃的文字。
+    Dropdown { text: String, open: bool },
     /// 复选框。
     Checkbox { text: String, checked: bool },
     /// 滑条。`fraction` 是值在值域里的位置，已归一化到 0..=1——
@@ -155,6 +177,7 @@ impl Widget {
         match self {
             Widget::Button { .. }
             | Widget::MenuButton { .. }
+            | Widget::Dropdown { .. }
             | Widget::Checkbox { .. }
             | Widget::Radio { .. }
             | Widget::ListItem { .. }
@@ -163,6 +186,9 @@ impl Widget {
             | Widget::Slider { .. }
             | Widget::TextInput { .. } => true,
             Widget::Panel { .. }
+            // 图标不是控件：Tab 走上去按回车什么也不会发生。
+            // 要一个能点的图标就把它放进按钮里。
+            | Widget::Image { .. }
             | Widget::Label { .. }
             | Widget::MenuItem { .. }
             | Widget::Modal { .. }
@@ -184,12 +210,14 @@ impl Widget {
         match self {
             Widget::Button { .. }
             | Widget::MenuButton { .. }
+            | Widget::Dropdown { .. }
             | Widget::Checkbox { .. }
             | Widget::Radio { .. }
             | Widget::ListItem { .. }
             | Widget::Folder { .. } => true,
             Widget::TextInput { .. }
             | Widget::Panel { .. }
+            | Widget::Image { .. }
             | Widget::Label { .. }
             | Widget::MenuItem { .. }
             | Widget::Slider { .. }
@@ -1015,9 +1043,11 @@ impl WidgetUi {
         let theme = &self.theme;
         match widget {
             Widget::Panel { .. } => crate::panel::size(ui, theme),
+            Widget::Image { size, .. } => crate::image::size(ui, theme, *size),
             Widget::Label { text, size, .. } => crate::label::size(ui, theme, text, *size),
             Widget::Button { text, .. } => crate::button::size(ui, theme, text),
             Widget::MenuButton { text, .. } => crate::menu::button_size(ui, theme, text),
+            Widget::Dropdown { text, .. } => crate::menu::dropdown_size(ui, theme, text),
             Widget::MenuItem { text, submenu, .. } => {
                 crate::menu::item_size(ui, theme, text, *submenu)
             }
@@ -1079,6 +1109,12 @@ impl WidgetUi {
             let response = self.interaction.response(declared.id);
 
             match &declared.widget {
+                Widget::Image {
+                    texture,
+                    size,
+                    uv,
+                    tint,
+                } => crate::image::paint(ui, theme, rect, &response, *texture, *size, *uv, *tint),
                 Widget::Panel { color, radius, .. } => {
                     crate::panel::paint(ui, theme, rect, &response, *color, *radius)
                 }
@@ -1091,11 +1127,15 @@ impl WidgetUi {
                 Widget::MenuButton { text, open } => {
                     crate::menu::paint_button(ui, theme, rect, &response, text, *open)
                 }
+                Widget::Dropdown { text, open } => {
+                    crate::menu::paint_dropdown(ui, theme, rect, &response, text, *open)
+                }
                 Widget::MenuItem {
                     text,
                     enabled,
                     highlighted,
                     submenu,
+                    checked,
                 } => crate::menu::paint_item(
                     ui,
                     theme,
@@ -1105,6 +1145,7 @@ impl WidgetUi {
                     *enabled,
                     *highlighted,
                     *submenu,
+                    *checked,
                 ),
                 Widget::Checkbox { text, checked, .. } => {
                     crate::checkbox::paint(ui, theme, rect, &response, text, *checked)

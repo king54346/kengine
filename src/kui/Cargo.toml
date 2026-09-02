@@ -11,6 +11,7 @@ ktexture = { path = "../ktexture" }
 bytemuck = { version = "1.25.2", features = ["derive"] }
 # flexbox 的语义细节极多，而这部分完全没有引擎特异性。
 # taffy 有一整套 CSS 一致性测试，自己写只能得到一个测试更少的版本。
+klog = { path = "../klog" }
 taffy = "0.13"
 
 [dev-dependencies]

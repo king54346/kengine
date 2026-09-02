@@ -80,6 +80,7 @@ pub mod button;
 pub mod checkbox;
 pub mod dialog;
 pub mod folder;
+pub mod image;
 pub mod label;
 pub mod list;
 pub mod menu;

@@ -18,6 +18,12 @@ pub struct Ui {
     list: DrawList,
     screen: Vec2,
     scale: f32,
+    /// 登记过的界面贴图。渲染器每帧扫一遍，新的就上传。
+    ///
+    /// 和精灵贴图（`Scene::register_sprite_texture`）是同一套做法，
+    /// 也是同一个理由：`DrawList::image` 只带一个 id，渲染器得先
+    /// **见过**这张贴图才画得出来。
+    textures: Vec<Texture>,
 }
 
 impl Default for Ui {
@@ -41,6 +47,7 @@ impl Ui {
             list: DrawList::default(),
             screen: Vec2::ZERO,
             scale: 1.0,
+            textures: Vec::new(),
         }
     }
 
@@ -50,6 +57,25 @@ impl Ui {
         // 全清一遍最稳，反正只在加载时发生。
         self.atlas.clear();
         self.fonts.push(font)
+    }
+
+    /// 登记一张界面贴图。
+    ///
+    /// 没登记过的纹理 id，渲染器会**跳过**那一批——而不是拿字形图集
+    /// 顶替（顶替会在界面上印出一片字形）。同一张图登记两次是空操作。
+    ///
+    /// **在加载时登记，不要每帧登记**：贴图是长期资源，
+    /// 一张 1024² 的图集每帧重传要走 4 MB 带宽。
+    pub fn register_texture(&mut self, texture: Texture) {
+        if self.textures.iter().any(|t| t.id() == texture.id()) {
+            return;
+        }
+        self.textures.push(texture);
+    }
+
+    /// 已登记的界面贴图。渲染器每帧扫一遍。
+    pub fn textures(&self) -> &[Texture] {
+        &self.textures
     }
 
     /// 一个字体都没有。此时所有文字调用都是空操作。
@@ -126,6 +152,49 @@ impl Ui {
         self.list.polyline(points, thickness, color);
     }
 
+    /// 一张贴图。
+    ///
+    /// `texture` 是 [`ktexture::Texture::id`]，而且这张贴图必须**先登记**过
+    /// （`Renderer::register_ui_texture`）——没登记过的批次会被渲染器
+    /// **跳过**，而不是拿字形图集顶替（那会在界面上印出一片字形）。
+    ///
+    /// `uv` 是 `[[u0, v0], [u1, v1]]`，取图集里的一块；整张图就是
+    /// `[[0.0, 0.0], [1.0, 1.0]]`。`tint` 会**乘**上去，全白表示原色。
+    ///
+    /// # 为什么界面贴图要单独走一条
+    ///
+    /// 整个界面通常只要一次绘制——纯色和文字共用字形图集那一张纹理。
+    /// 一张外来的贴图会**打断这次合批**：换纹理就得换绑定组。所以图标、
+    /// 头像这些最好自己先打成一张图集，一次画完，而不是一张一张贴。
+    ///
+    /// [`ktexture::Texture::id`]: ktexture::Texture::id
+    pub fn image(&mut self, rect: Rect, texture: kcore::uuid::Uuid, uv: [[f32; 2]; 2], tint: Vec4) {
+        self.list.image(rect, texture, uv, tint);
+    }
+
+    /// 一张贴图，按**保持长宽比**的方式塞进 `rect`，居中，多出来的边留白。
+    ///
+    /// 直接用 [`image`](Self::image) 的话贴图会被拉伸成 `rect` 的形状——
+    /// 头像、物品图标被拉扁是界面上最常见的那种「看着不对但说不上哪儿不对」。
+    ///
+    /// `aspect` 是贴图自己的宽高比（`width / height`）。为 0 或负数时
+    /// 退回拉伸——那说明调用方还没拿到贴图尺寸，画歪总比不画好。
+    pub fn image_fit(
+        &mut self,
+        rect: Rect,
+        aspect: f32,
+        texture: kcore::uuid::Uuid,
+        uv: [[f32; 2]; 2],
+        tint: Vec4,
+    ) {
+        let target = if aspect > 0.0 {
+            fit_rect(rect, aspect)
+        } else {
+            rect
+        };
+        self.list.image(target, texture, uv, tint);
+    }
+
     /// 压一层裁剪。
     pub fn push_clip(&mut self, rect: Rect) {
         self.list.push_clip(rect);
@@ -186,6 +255,30 @@ impl Ui {
         let layout = self.measure(text, style, None);
         let origin = rect.center() - layout.size * 0.5;
         self.text(origin, text, style, color, None)
+    }
+}
+
+
+/// 在 `outer` 里居中放一个宽高比为 `aspect` 的矩形，尽量大但不超出。
+///
+/// 「contain」而不是「cover」：宁可留白，也不把图裁掉一块——
+/// 图标被裁掉半个角比留一圈白更难看，而且看不出来是被裁了。
+fn fit_rect(outer: Rect, aspect: f32) -> Rect {
+    let size = outer.size();
+    if size.x <= 0.0 || size.y <= 0.0 {
+        return outer;
+    }
+    let outer_aspect = size.x / size.y;
+    let fitted = if outer_aspect > aspect {
+        // 容器更宽：高度顶满，宽度按比例缩。
+        Vec2::new(size.y * aspect, size.y)
+    } else {
+        Vec2::new(size.x, size.x / aspect)
+    };
+    let offset = (size - fitted) * 0.5;
+    Rect {
+        min: outer.min + offset,
+        max: outer.min + offset + fitted,
     }
 }
 
@@ -378,5 +471,83 @@ mod tests {
 
         ui.begin_frame(Vec2::new(800.0, 600.0), 1.0);
         assert!(ui.draw_list().is_empty(), "上一帧的图元没清掉会一直累积");
+    }
+
+    // ── 贴图 ──
+
+    #[test]
+    fn an_image_fits_without_stretching() {
+        // 宽容器里放一张正方形的图：高度顶满，左右留白，且居中。
+        let fitted = fit_rect(Rect::new(0.0, 0.0, 200.0, 100.0), 1.0);
+
+        assert_eq!(fitted.size(), Vec2::new(100.0, 100.0));
+        assert_eq!(fitted.min.x, 50.0, "该左右居中");
+        assert_eq!(fitted.min.y, 0.0);
+    }
+
+    #[test]
+    fn a_tall_container_leaves_room_above_and_below() {
+        let fitted = fit_rect(Rect::new(0.0, 0.0, 100.0, 200.0), 1.0);
+
+        assert_eq!(fitted.size(), Vec2::new(100.0, 100.0));
+        assert_eq!(fitted.min.y, 50.0);
+    }
+
+    #[test]
+    fn a_matching_aspect_fills_the_whole_rect() {
+        let outer = Rect::new(10.0, 20.0, 200.0, 100.0);
+        assert_eq!(fit_rect(outer, 2.0).size(), outer.size());
+    }
+
+    #[test]
+    fn an_empty_rect_is_returned_unchanged() {
+        // 布局还没排出来的那一帧尺寸是 0，除零会得到 NaN，
+        // 而 NaN 的矩形会让整块界面消失。
+        let empty = Rect::new(0.0, 0.0, 0.0, 0.0);
+        assert_eq!(fit_rect(empty, 1.0), empty);
+    }
+
+    #[test]
+    fn a_fitted_image_never_leaves_its_container() {
+        let outer = Rect::new(30.0, 40.0, 120.0, 80.0);
+        for aspect in [0.2_f32, 0.5, 1.0, 1.5, 4.0] {
+            let fitted = fit_rect(outer, aspect);
+            assert!(
+                fitted.min.x >= outer.min.x - 0.01
+                    && fitted.min.y >= outer.min.y - 0.01
+                    && fitted.max.x <= outer.max.x + 0.01
+                    && fitted.max.y <= outer.max.y + 0.01,
+                "宽高比 {aspect} 时图跑出了容器：{fitted:?} vs {outer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_aspect_falls_back_to_stretching() {
+        // 贴图还在异步加载时拿不到尺寸。画歪总比不画好。
+        let outer = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let mut ui = Ui::new();
+        ui.begin_frame(Vec2::new(800.0, 600.0), 1.0);
+        ui.image_fit(outer, 0.0, kcore::uuid::Uuid::nil(), [[0.0, 0.0], [1.0, 1.0]], Vec4::ONE);
+        ui.end_frame();
+
+        assert!(!ui.draw_list().is_empty(), "宽高比未知时也该画出来");
+    }
+
+    #[test]
+    fn drawing_an_image_emits_geometry() {
+        let mut ui = Ui::new();
+        ui.begin_frame(Vec2::new(800.0, 600.0), 1.0);
+        ui.image(
+            Rect::new(0.0, 0.0, 32.0, 32.0),
+            kcore::uuid::Uuid::from_u128(7),
+            [[0.0, 0.0], [1.0, 1.0]],
+            Vec4::ONE,
+        );
+        ui.end_frame();
+
+        assert_eq!(ui.draw_list().vertices().len(), 4);
+        // 贴图会另起一批：换纹理就得换绑定组，合不进纯色那一批。
+        assert!(ui.draw_list().batches().len() >= 1);
     }
 }

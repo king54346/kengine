@@ -1997,6 +1997,10 @@ impl Renderer {
         for texture in scene.sprite_textures() {
             self.sprites.upload(&self.device, &self.queue, texture);
         }
+        // 界面贴图同理。`upload_image` 内部也会跳过已经见过的。
+        for texture in ui.textures() {
+            self.ui.upload_image(&self.device, &self.queue, texture);
+        }
         // 排序必须在 CPU 上做：精灵全在同一平面，深度缓冲帮不上忙。
         let mut sprite_scratch = std::mem::take(&mut self.sprite_scratch);
         sprite_scratch.clear();

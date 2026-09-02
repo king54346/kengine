@@ -8,3 +8,6 @@ edition = "2024"
 kui = { path = "../kui" }
 kfont = { path = "../kfont" }
 kmath = { path = "../kmath" }
+# 贴图控件只需要 `Uuid`：控件层不认识 `ktexture::Texture`，
+# 它拿到的就是一个 id 和一块 UV。
+kcore = { path = "../kcore" }

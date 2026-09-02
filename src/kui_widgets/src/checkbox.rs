@@ -26,7 +26,7 @@ impl WidgetUi {
 ///
 /// 比例是照着常见字体里的勾调的：起笔偏左下、折点靠近底边、收笔在右上
 /// 且比起笔高不少。三段等长的「对号」看起来像个歪掉的 V，不像勾。
-fn check_points(box_rect: Rect) -> [Vec2; 3] {
+pub(crate) fn check_points(box_rect: Rect) -> [Vec2; 3] {
     let size = box_rect.size();
     let at = |x: f32, y: f32| box_rect.min + Vec2::new(size.x * x, size.y * y);
     [at(0.22, 0.52), at(0.42, 0.72), at(0.78, 0.30)]

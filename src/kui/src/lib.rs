@@ -57,7 +57,8 @@ pub use context::Ui;
 pub use draw::{DrawBatch, DrawList, MODE_RECT, MODE_SEGMENT, Rect, UiVertex};
 pub use interact::{EditAction, Hit, Interaction, NavKey, PointerButton, Response, UiInput};
 pub use layout::{
-    AlignCross, Direction, Edges, Id, Justify, LayoutNode, Length, MAX_DEPTH, Solved, Style, solve,
+    AlignCross, Direction, Display, Edges, Id, Justify, LayoutNode, Length, MAX_DEPTH,
+    MAX_GRID_COLUMNS, Solved, Style, Track, solve,
 };
 pub use style_attr::{Applied, Selector, StyleError, Visual};
 
