@@ -271,8 +271,17 @@ impl ComputeContext {
     /// 不构成问题；换来的是不再有那种「绿了但崩了」的报告。
     ///
     /// 顺带还快不少：建设备是这些测试里最慢的一步。
-    #[cfg(test)]
-    pub(crate) fn shared() -> Option<&'static Self> {
+    ///
+    /// # 谁该用它
+    ///
+    /// **测试和离线工具**。游戏里不该用：泄漏一台设备在会退出的进程里
+    /// 无所谓，在跑几小时的进程里不是。渲染中的计算请走
+    /// [`from_renderer`](Self::from_renderer)——那台设备才和渲染管线共通。
+    ///
+    /// 是 `pub` 而不是 `pub(crate)`，因为集成测试（`tests/` 下的那些）
+    /// 各自是独立的 crate，够不着 crate 内部的东西——而它们恰恰是
+    /// 最容易撞上那个退出崩溃的：每个测试二进制都会自己开一台设备。
+    pub fn shared_headless() -> Option<&'static Self> {
         use std::sync::OnceLock;
         static SHARED: OnceLock<Option<ComputeContext>> = OnceLock::new();
         SHARED.get_or_init(Self::headless).as_ref()
@@ -695,7 +704,7 @@ mod tests {
     /// 拿不到就返回 [`None`]——CI 上通常没有 GPU，那种环境下这些测试
     /// 应当跳过而不是红。本地开发一定会真的跑到。
     fn headless() -> Option<&'static ComputeContext> {
-        ComputeContext::shared()
+        ComputeContext::shared_headless()
     }
 
     /// 把字节按 `f32` 解出来。

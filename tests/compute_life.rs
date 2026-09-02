@@ -18,7 +18,8 @@ const SHADER: &str = include_str!("../examples/kengine/shader/compute_game_of_li
 
 /// 一台跑着生命游戏的无头 GPU。
 struct Life {
-    gpu: ComputeContext,
+    /// 借的是整个进程共用的那一台，不是自己开的（见 `shared_headless`）。
+    gpu: &'static ComputeContext,
     pipeline: kengine::krender::ComputePipeline,
     buffers: [kengine::krender::StorageBuffer; 2],
     front: usize,
@@ -27,7 +28,8 @@ struct Life {
 impl Life {
     /// 没有可用适配器就返回 `None`，调用方据此跳过。
     fn new(seed: &[u32]) -> Option<Self> {
-        let gpu = ComputeContext::headless()?;
+        // 共用整个测试进程的那一台设备，见 `shared_headless` 的文档。
+        let gpu = ComputeContext::shared_headless()?;
         let shader = Shader::from_wgsl(SHADER).expect("着色器编译不过");
         let pipeline = gpu.create_pipeline(&shader).expect("建不了计算管线");
 

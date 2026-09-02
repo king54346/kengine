@@ -18,7 +18,7 @@ const SIZE: u32 = 64;
 /// 并发析构会间歇性地把进程带走——理由见
 /// [`ComputeContext::shared`](crate::ComputeContext)。
 fn headless() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let shared = crate::ComputeContext::shared()?;
+    let shared = crate::ComputeContext::shared_headless()?;
     Some((shared.device().clone(), shared.queue().clone()))
 }
 
