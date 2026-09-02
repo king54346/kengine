@@ -31,6 +31,14 @@ pub struct Node {
     /// 高一个 `offset`，很快就浮在半空了。水面、植被这类东西
     /// 通常也该关掉。
     pub receives_decals: bool,
+    /// 这个物体接受**哪些层**的光照。位掩码，和光源的
+    /// [`Light::mask`](klight::Light::mask) 按位与，非零才被照亮。
+    ///
+    /// 默认全 1（接受一切）。两边都得同意：任一方把对方的层关掉就不照。
+    ///
+    /// 典型用法是「这盏灯只打在角色身上」——把角色放进一个单独的层，
+    /// 那盏灯只开那一层。拿「把灯挪远」之类的物理手段去凑永远凑不准。
+    pub light_mask: u32,
 
     pub(crate) mesh: Option<Mesh>,
     pub(crate) material: Option<Material>,
@@ -79,6 +87,7 @@ impl Node {
             transform: Transform::IDENTITY,
             visible: true,
             receives_decals: true,
+            light_mask: u32::MAX,
             mesh: None,
             material: None,
             camera: None,
@@ -122,6 +131,12 @@ impl Node {
     /// 挂上光源。位置与朝向取自本节点的世界变换（照射方向为 -Z）。
     pub fn with_light(mut self, light: Light) -> Self {
         self.light = Some(light);
+        self
+    }
+
+    /// 指定这个物体接受哪些层的光照。见 [`light_mask`](Self::light_mask)。
+    pub fn with_light_mask(mut self, mask: u32) -> Self {
+        self.light_mask = mask;
         self
     }
 

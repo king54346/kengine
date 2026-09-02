@@ -14,6 +14,8 @@ struct Light {
     // 聚光灯：x = 内锥余弦，y = 外锥余弦
     // 半球光：xyz = 地面色
     params: vec4<f32>,
+    // x = 照亮哪些层的位掩码，其余保留
+    extra: vec4<u32>,
 };
 
 const LIGHT_DIRECTIONAL: f32 = 0.0;
@@ -84,6 +86,15 @@ fn light_sample_direction(light: Light, world_position: vec3<f32>) -> vec4<f32> 
 fn light_hemisphere(light: Light, normal: vec3<f32>) -> vec3<f32> {
     let t = normal.y * 0.5 + 0.5;
     return mix(light.params.rgb, light.color.rgb, t) * light.color.a;
+}
+
+// 这盏灯照不照亮这个物体。
+//
+// 两边都得同意：任一方把对方的层关掉就不照。用「与非零」而不是「相等」，
+// 是为了让一盏灯能同时照好几层——相等的话每盏灯只能属于一层，
+// 「照亮角色和道具、但不照场景」就写不出来了。
+fn light_affects(light: Light, object_mask: u32) -> bool {
+    return (light.extra.x & object_mask) != 0u;
 }
 
 // 光源的辐射亮度（颜色 × 强度 × 衰减）。

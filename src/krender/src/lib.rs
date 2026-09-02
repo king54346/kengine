@@ -97,7 +97,11 @@ struct Globals {
     camera_position: [f32; 4],
     /// rgb = 环境光贡献
     ambient: [f32; 4],
-    /// x = 生效光源数，其余为对齐填充
+    /// x = 不参与聚簇的光源数（方向光、半球光，排在数组最前面），
+    /// y = 光源总数，zw 保留。
+    ///
+    /// 分成两段是因为方向光和半球光**没有位置也没有范围**，照亮所有东西。
+    /// 塞进簇里等于每个簇都有它们，白白占名单。
     light_count: [u32; 4],
     /// 各级级联的光空间矩阵。用不满的级填单位阵。
     light_view_proj: [[[f32; 4]; 4]; klight::cascade::MAX_CASCADES],
@@ -117,8 +121,175 @@ struct Globals {
     /// 自定义材质最常要的两样：没有时间做不了流动，没有视口尺寸
     /// 算不出屏幕 UV。
     frame_params: [f32; 4],
+    /// 聚簇网格：x/y = 屏幕分块数，z = 深度切片数，w = 是否启用（0/1）。
+    cluster_grid: [u32; 4],
+    /// x = 近平面，y = 远平面，z = `1 / ln(far / near)`（着色器省一次对数），
+    /// w 保留。
+    cluster_depth: [f32; 4],
     environment: GpuEnvironment,
-    lights: [GpuLight; MAX_LIGHTS],
+}
+
+
+/// 聚簇前向着色的 GPU 侧资源。
+///
+/// 三块存储缓冲：光源数组、每簇的名单区间、拼在一起的名单本体。
+/// 划分与分配的数学在 [`klight::cluster`] 里，那一层是纯 CPU 的、
+/// 每条规则都有测试；这里只管把结果搬上显存。
+struct Clusters {
+    grid: klight::cluster::ClusterGrid,
+    /// 光源数组。全局光在前，可聚簇的在后。
+    lights: wgpu::Buffer,
+    lights_capacity: u64,
+    /// 每个簇一项 `[起点, 长度]`。
+    ranges: wgpu::Buffer,
+    ranges_capacity: u64,
+    /// 所有簇的名单首尾相接。
+    indices: wgpu::Buffer,
+    indices_capacity: u64,
+    /// 复用的分配结果，避免每帧重新分配那几个 `Vec`。
+    assignment: klight::cluster::Assignment,
+}
+
+impl Clusters {
+    /// 一开始按多少条目开缓冲。不够会翻倍扩容。
+    const INITIAL_LIGHTS: u64 = 64;
+    const INITIAL_INDICES: u64 = 4096;
+
+    fn new(device: &wgpu::Device) -> Self {
+        let grid = klight::cluster::ClusterGrid::default();
+        let storage = |label: &str, size: u64| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: size.max(16),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+
+        let ranges_capacity = grid.count() as u64;
+        Self {
+            lights: storage(
+                "kengine light buffer",
+                Self::INITIAL_LIGHTS * size_of::<GpuLight>() as u64,
+            ),
+            lights_capacity: Self::INITIAL_LIGHTS,
+            ranges: storage("kengine cluster ranges", ranges_capacity * 8),
+            ranges_capacity,
+            indices: storage("kengine cluster indices", Self::INITIAL_INDICES * 4),
+            indices_capacity: Self::INITIAL_INDICES,
+            assignment: klight::cluster::Assignment::default(),
+            grid,
+        }
+    }
+
+    /// 建 group(0) 的绑定组。缓冲扩容之后要重建。
+    fn bind_group(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        globals: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("kengine globals bind group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: globals.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.lights.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.ranges.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.indices.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
+    /// 传这一帧的光源与名单。返回缓冲有没有被重开（重开了就要重建绑定组）。
+    fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        lights: &[GpuLight],
+        spheres: &[klight::cluster::ClusterLight],
+        view: Mat4,
+        projection: Mat4,
+    ) -> bool {
+        let mut regrew = false;
+
+        // 光源数组。
+        if lights.len() as u64 > self.lights_capacity {
+            self.lights_capacity = (lights.len() as u64).next_power_of_two();
+            self.lights = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("kengine light buffer"),
+                size: self.lights_capacity * size_of::<GpuLight>() as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            regrew = true;
+        }
+        if !lights.is_empty() {
+            queue.write_buffer(&self.lights, 0, bytemuck::cast_slice(lights));
+        }
+
+        // 分配。
+        self.assignment = klight::cluster::assign(&self.grid, spheres, view, projection);
+        if self.assignment.overflow > 0 {
+            // 静默丢掉的话表现为「某个角落莫名偏暗」，很难查。
+            klog::once!(klog::warn!(
+                "有簇的光源数超过上限，{} 条被丢掉了（场景里的灯挤得太密）",
+                self.assignment.overflow
+            ));
+        }
+
+        let ranges: Vec<u32> = self
+            .assignment
+            .ranges
+            .iter()
+            .flat_map(|pair| pair.iter().copied())
+            .collect();
+        if self.assignment.ranges.len() as u64 > self.ranges_capacity {
+            self.ranges_capacity = self.assignment.ranges.len() as u64;
+            self.ranges = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("kengine cluster ranges"),
+                size: self.ranges_capacity * 8,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            regrew = true;
+        }
+        if !ranges.is_empty() {
+            queue.write_buffer(&self.ranges, 0, bytemuck::cast_slice(&ranges));
+        }
+
+        if self.assignment.indices.len() as u64 > self.indices_capacity {
+            self.indices_capacity = (self.assignment.indices.len() as u64).next_power_of_two();
+            self.indices = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("kengine cluster indices"),
+                size: self.indices_capacity * 4,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            regrew = true;
+        }
+        if !self.assignment.indices.is_empty() {
+            queue.write_buffer(
+                &self.indices,
+                0,
+                bytemuck::cast_slice(&self.assignment.indices),
+            );
+        }
+
+        regrew
+    }
 }
 
 /// 阴影深度 pass 的全局量，对应 `shadow.wgsl` 的 `ShadowGlobals`。
@@ -167,6 +338,10 @@ struct ObjectUniforms {
     /// 蒙皮实例各有一套骨骼矩阵，但它们拼在同一个缓冲里，
     /// 靠这个偏移各取各的——于是同一个蒙皮网格的多个实例仍然能合批。
     skin: [u32; 4],
+    /// x = 接受哪些层的光照（位掩码），其余保留。
+    ///
+    /// 跟着对象走而不是单开一条绑定：那样「这盏灯只照角色」不必打断合批。
+    flags: [u32; 4],
     /// 纹理坐标变换：xy = 缩放，zw = 偏移。
     ///
     /// 精灵图集靠它从一张大图里取出一格：整张图的 UV 是 0..1，
@@ -540,6 +715,9 @@ pub struct Renderer {
 
     globals_buffer: wgpu::Buffer,
     globals_bind_group: wgpu::BindGroup,
+    globals_layout: wgpu::BindGroupLayout,
+    /// 聚簇前向着色：光源数组 + 每簇名单。
+    clusters: Clusters,
 
     object_layout: wgpu::BindGroupLayout,
     object_buffer: wgpu::Buffer,
@@ -800,16 +978,53 @@ impl Renderer {
         // ── group(0)：每帧全局量 ──
         let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("kengine globals layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: NonZeroU64::new(size_of::<Globals>() as u64),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(size_of::<Globals>() as u64),
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                // 光源数组。从 uniform 搬到存储缓冲，是为了让上限从
+                // 十几盏提到几百盏——uniform 的大小要在管线里写死，
+                // 而存储缓冲是变长的。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(size_of::<GpuLight>() as u64),
+                    },
+                    count: None,
+                },
+                // 每个簇的名单区间。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(8),
+                    },
+                    count: None,
+                },
+                // 名单本体。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(4),
+                    },
+                    count: None,
+                },
+            ],
         });
 
         let globals_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -819,14 +1034,8 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let globals_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("kengine globals bind group"),
-            layout: &globals_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: globals_buffer.as_entire_binding(),
-            }],
-        });
+        let clusters = Clusters::new(&device);
+        let globals_bind_group = clusters.bind_group(&device, &globals_layout, &globals_buffer);
 
         // ── group(1)：每个实例一份的变换与材质参数 ──
         // 用存储缓冲而非「uniform + 动态偏移」：后者每个对象都要重新绑一次绑定组，
@@ -1280,6 +1489,8 @@ impl Renderer {
             depth_view,
             globals_buffer,
             globals_bind_group,
+            globals_layout,
+            clusters,
             object_layout,
             object_buffer,
             object_bind_group,
@@ -1643,29 +1854,59 @@ impl Renderer {
         //
         // 投射阴影的光源必须占据 index 0——着色器只对首个光源做阴影判定，
         // 顺序错了会导致阴影套在错误的光源上。
+        // 光源分成两段：**前面是全局光**（方向光、半球光——没有位置也没有
+        // 范围，照亮一切），**后面是可聚簇的**（点光源、聚光灯）。
+        //
+        // 分段是聚簇的前提：全局光塞进簇里等于每个簇都有它们，白白占名单。
+        // 着色器无条件遍历前一段，按簇遍历后一段。
+        //
+        // 投射阴影的那盏必须占据 index 0——着色器只对首个光源做阴影判定。
         let shadow_caster = scene.shadow_caster();
-        let mut lights = [GpuLight::default(); MAX_LIGHTS];
-        let mut light_count = 0usize;
+        let mut global_lights: Vec<GpuLight> = Vec::new();
+        let mut clustered_lights: Vec<GpuLight> = Vec::new();
+        let mut cluster_spheres: Vec<klight::cluster::ClusterLight> = Vec::new();
 
         if let Some((light, transform)) = shadow_caster {
-            lights[0] = light.to_gpu(transform);
-            light_count = 1;
+            global_lights.push(light.to_gpu(transform));
         }
 
         let mut caster_skipped = false;
+        let mut overflowed = false;
         for (light, transform) in scene.visible_lights() {
             // 跳过已放在首位的那一盏；后续同样标记了投影的光源按普通光源处理。
             if light.cast_shadows && shadow_caster.is_some() && !caster_skipped {
                 caster_skipped = true;
                 continue;
             }
-            if light_count >= MAX_LIGHTS {
-                klog::once!(klog::warn!("场景光源超过上限 {MAX_LIGHTS}，多余的已被忽略"));
+            if global_lights.len() + clustered_lights.len() >= MAX_LIGHTS {
+                overflowed = true;
                 break;
             }
-            lights[light_count] = light.to_gpu(transform);
-            light_count += 1;
+
+            let gpu = light.to_gpu(transform);
+            match light.kind {
+                klight::LightKind::Directional | klight::LightKind::Hemisphere { .. } => {
+                    global_lights.push(gpu)
+                }
+                _ => {
+                    cluster_spheres.push(klight::cluster::ClusterLight {
+                        position: transform.w_axis.truncate(),
+                        radius: light.kind.range(),
+                    });
+                    clustered_lights.push(gpu);
+                }
+            }
         }
+        if overflowed {
+            klog::once!(klog::warn!("场景光源超过上限 {MAX_LIGHTS}，多余的已被忽略"));
+        }
+
+        // 全局光排在前面，可聚簇的接在后面。簇名单里存的是**后一段里的下标**，
+        // 着色器取用时要加上全局段的长度。
+        let global_count = global_lights.len();
+        let mut lights = global_lights;
+        lights.extend_from_slice(&clustered_lights);
+        let light_count = lights.len();
 
         // ── HDR 环境图 ──
         // 只在版本号变了时重传：一条 256×128 的 mip 链是几兆的浮点数据，
@@ -1722,6 +1963,33 @@ impl Renderer {
             }
         }
         cascade_splits[3] = cascades.len() as f32;
+        // ── 聚簇：分配 + 上传 ──
+        //
+        // 正交相机下深度切片的公式（按 z 取对数）不成立，直接退回
+        // 「每个片元遍历全部光源」。正交基本只用在 2D 和编辑器视图上，
+        // 那里光源本来就没几盏。
+        let clustering_enabled = projection.w_axis.w == 0.0;
+        self.clusters.grid.near = camera.z_near.max(1e-4);
+        self.clusters.grid.far = camera.z_far.max(self.clusters.grid.near * 1.001);
+        let regrew = self.clusters.upload(
+            &self.device,
+            &self.queue,
+            &lights,
+            if clustering_enabled {
+                &cluster_spheres
+            } else {
+                &[]
+            },
+            view,
+            projection,
+        );
+        if regrew {
+            // 缓冲重开之后旧的绑定组还指着已经没人用的那块内存。
+            self.globals_bind_group =
+                self.clusters
+                    .bind_group(&self.device, &self.globals_layout, &self.globals_buffer);
+        }
+
         let shadow_enabled = !cascades.is_empty() && light_count > 0;
         let settings = self.shadow.settings;
 
@@ -1732,7 +2000,7 @@ impl Renderer {
                 view_proj: view_proj.to_cols_array_2d(),
                 camera_position: camera_position.extend(1.0).to_array(),
                 ambient: [0.0; 4],
-                light_count: [light_count as u32, 0, 0, 0],
+                light_count: [global_count as u32, light_count as u32, 0, 0],
                 light_view_proj,
                 cascade_splits,
                 ibl_params: [self.environment_mips as f32, 0.0, 0.0, 0.0],
@@ -1749,8 +2017,21 @@ impl Renderer {
                     settings.resolution.max(256) as f32,
                     if shadow_enabled { 1.0 } else { 0.0 },
                 ],
+                cluster_grid: [
+                    self.clusters.grid.tiles_x,
+                    self.clusters.grid.tiles_y,
+                    self.clusters.grid.slices,
+                    u32::from(clustering_enabled),
+                ],
+                cluster_depth: [
+                    self.clusters.grid.near,
+                    self.clusters.grid.far,
+                    // 着色器每个片元都要算 `log(z/near) / log(far/near)`。
+                    // 分母是常数，在这里倒一次，那边就只剩一次乘法。
+                    1.0 / (self.clusters.grid.far / self.clusters.grid.near).ln(),
+                    0.0,
+                ],
                 environment: scene.environment().to_gpu(),
-                lights,
             }]),
         );
 
@@ -1937,6 +2218,7 @@ impl Renderer {
                         .extend(0.0)
                         .to_array(),
                     skin: [skin_offset.unwrap_or(0), morph.0, morph.1, weight_offset],
+                    flags: [item.light_mask, 0, 0, 0],
                     uv_transform: uv_transform_of(material),
                     probe_position,
                     probe_min,

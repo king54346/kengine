@@ -186,6 +186,100 @@ fn normalize_or_fallback(value: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
     return value * inverseSqrt(length_squared);
 }
 
+
+// 片元所在的簇。
+//
+// 屏幕方向按像素坐标均分，深度方向按**指数**切——近处切得细、远处切得粗，
+// 因为近处才是光源密度最高的地方。这个公式必须和 CPU 侧
+// `klight::cluster` 里的完全一致：不一致的话着色器读到的是别的簇的名单，
+// 表现为光照在屏幕上整体错位一块，而且不越界、不报错。
+fn cluster_of(pixel: vec2<f32>, view_depth: f32) -> u32 {
+    let grid = globals.cluster_grid;
+    if (grid.x == 0u || grid.y == 0u || grid.z == 0u) {
+        return 0u;
+    }
+
+    let viewport = max(globals.frame_params.zw, vec2<f32>(1.0));
+    let tile = vec2<u32>(clamp(
+        floor(pixel / viewport * vec2<f32>(grid.xy)),
+        vec2<f32>(0.0),
+        vec2<f32>(grid.xy) - vec2<f32>(1.0),
+    ));
+
+    let near = max(globals.cluster_depth.x, 1e-4);
+    let depth = max(view_depth, near);
+    // `cluster_depth.z` 是 `1 / ln(far / near)`，CPU 侧倒好的。
+    let ratio = log(depth / near) * globals.cluster_depth.z;
+    let slice = u32(clamp(ratio * f32(grid.z), 0.0, f32(grid.z) - 1.0));
+
+    return (slice * grid.y + tile.y) * grid.x + tile.x;
+}
+
+// 一盏光对这个片元的贡献。
+//
+// 抽成函数是因为它有三个调用点（全局段、簇内、聚簇关着时的全遍历），
+// 三处各抄一遍的话，改一处忘两处是迟早的事。
+fn shade_light(
+    light: Light,
+    index: u32,
+    n: vec3<f32>,
+    v: vec3<f32>,
+    albedo: vec3<f32>,
+    metallic: f32,
+    roughness: f32,
+    occlusion: f32,
+    world_position: vec3<f32>,
+    object_mask: u32,
+) -> vec3<f32> {
+    // 光照分层：灯和物体两边都得同意。
+    if (!light_affects(light, object_mask)) {
+        return vec3<f32>(0.0);
+    }
+
+    // 半球光是环境项，不走「入射方向 + BRDF」那条路：它没有方向，
+    // 也不产生高光。金属没有漫反射，所以按金属度衰减。
+    if (light.position.w == LIGHT_HEMISPHERE) {
+        return light_hemisphere(light, n) * albedo * (1.0 - metallic) * occlusion;
+    }
+
+    let sample = light_sample_direction(light, world_position);
+    // 衰减为 0 说明超出作用范围或在聚光锥外。
+    if (sample.w <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+
+    var visibility = 1.0;
+    // 只有第一盏光（阴影投射者）参与阴影计算。
+    if (index == 0u && globals.shadow_params.w > 0.5) {
+        let n_dot_l = max(dot(n, sample.xyz), 0.0);
+        // 沿法线推开一点再采样，比纯深度偏移更不容易漏光。
+        let offset_position = world_position + n * globals.shadow_params.y;
+        // 按到相机的距离选级联。用世界空间距离而不是视空间 z：
+        // 视空间 z 在视野边缘会偏小，导致边缘用了过细的级联，
+        // 而那一级根本没覆盖到那里——表现为屏幕四角的阴影消失。
+        let view_depth = distance(world_position, globals.camera_position.xyz);
+        let layer = pick_cascade(view_depth, globals.cascade_splits);
+        visibility = shadow_factor_cascade(
+            shadow_map,
+            shadow_sampler,
+            globals.light_view_proj[layer],
+            layer,
+            offset_position,
+            n_dot_l,
+            globals.shadow_params.x,
+            globals.shadow_params.z,
+        );
+    }
+
+    return pbr_direct_lighting(
+        n, v, sample.xyz,
+        albedo,
+        metallic,
+        roughness,
+        light_radiance(light, sample.w),
+    ) * visibility;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let object = objects[in.instance];
@@ -264,55 +358,45 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let occlusion = clamp(surface.occlusion * ssao, 0.0, 1.0);
     let v = surface.view_direction;
 
-    // 逐光源累加。光源数量由 CPU 侧截断到数组容量，这里再夹一次以防越界。
+    // ── 逐光源累加 ──
+    //
+    // 光源数组分成两段：**全局光**（方向光、半球光——没有位置也没有范围）
+    // 无条件全遍历；**可聚簇的**（点光源、聚光灯）只遍历自己那个簇的名单。
+    //
+    // 分段的意义：全局光塞进簇里等于每个簇都有它们，白白占名单；
+    // 而点光源不分簇的话，几百盏灯就是每个片元几百次距离计算，
+    // 其中绝大多数离这个片元十万八千里。
     var color = vec3<f32>(0.0);
-    let count = min(globals.light_count.x, 16u);
-    for (var i = 0u; i < count; i = i + 1u) {
-        let light = globals.lights[i];
+    let object_mask = object.flags.x;
+    let global_count = min(globals.light_count.x, globals.light_count.y);
 
-        // 半球光是环境项，不走「入射方向 + BRDF」那条路：它没有方向，
-        // 也不产生高光。金属没有漫反射，所以按金属度衰减。
-        if (light.position.w == LIGHT_HEMISPHERE) {
-            color += light_hemisphere(light, n) * albedo * (1.0 - metallic) * occlusion;
-            continue;
-        }
+    for (var i = 0u; i < global_count; i = i + 1u) {
+        color += shade_light(
+            lights[i], i, n, v, albedo, metallic, roughness, occlusion,
+            in.world_position, object_mask,
+        );
+    }
 
-        let sample = light_sample_direction(light, in.world_position);
-        // 衰减为 0 说明超出作用范围或在聚光锥外，跳过。
-        if (sample.w <= 0.0) {
-            continue;
-        }
-
-        var visibility = 1.0;
-        // 只有第一盏光（阴影投射者）参与阴影计算。
-        if (i == 0u && globals.shadow_params.w > 0.5) {
-            let n_dot_l = max(dot(n, sample.xyz), 0.0);
-            // 沿法线推开一点再采样，比纯深度偏移更不容易漏光。
-            let offset_position = in.world_position + n * globals.shadow_params.y;
-            // 按到相机的距离选级联。用世界空间距离而不是视空间 z：
-            // 视空间 z 在视野边缘会偏小，导致边缘用了过细的级联，
-            // 而那一级根本没覆盖到那里——表现为屏幕四角的阴影消失。
-            let view_depth = distance(in.world_position, globals.camera_position.xyz);
-            let layer = pick_cascade(view_depth, globals.cascade_splits);
-            visibility = shadow_factor_cascade(
-                shadow_map,
-                shadow_sampler,
-                globals.light_view_proj[layer],
-                layer,
-                offset_position,
-                n_dot_l,
-                globals.shadow_params.x,
-                globals.shadow_params.z,
+    // 可聚簇的那一段。
+    let cluster = cluster_of(in.clip_position.xy, surface.view_depth);
+    if (globals.cluster_grid.w > 0u) {
+        let range = cluster_ranges[cluster];
+        for (var slot = 0u; slot < range.y; slot = slot + 1u) {
+            // 名单里存的是「可聚簇那一段」里的下标，要加上全局段的长度。
+            let index = global_count + cluster_indices[range.x + slot];
+            color += shade_light(
+                lights[index], index, n, v, albedo, metallic, roughness, occlusion,
+                in.world_position, object_mask,
             );
         }
-
-        color += pbr_direct_lighting(
-            n, v, sample.xyz,
-            albedo,
-            metallic,
-            roughness,
-            light_radiance(light, sample.w),
-        ) * visibility;
+    } else {
+        // 聚簇关着（正交相机）：老老实实全遍历。
+        for (var i = global_count; i < globals.light_count.y; i = i + 1u) {
+            color += shade_light(
+                lights[i], i, n, v, albedo, metallic, roughness, occlusion,
+                in.world_position, object_mask,
+            );
+        }
     }
 
     // ── 环境光（IBL）──

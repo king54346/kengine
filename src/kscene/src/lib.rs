@@ -85,6 +85,8 @@ pub struct RenderItem<'a> {
     pub skin: Option<&'a [Mat4]>,
     /// 形变权重，与网格的形变目标一一对应；没有形变时是空切片。
     pub morph_weights: &'a [f32],
+    /// 接受哪些层的光照。见 [`Node::light_mask`]。
+    pub light_mask: u32,
 }
 
 /// 渲染器每帧收集到的一个粒子系统。
@@ -1162,6 +1164,7 @@ impl Scene {
             aabb: node.global_aabb,
             skin: node.skin().map(Skin::matrices),
             morph_weights: node.morph_weights(),
+            light_mask: node.light_mask,
         })
     }
 
@@ -1217,6 +1220,7 @@ impl Scene {
                     aabb: node.global_aabb,
                     skin: node.skin().map(Skin::matrices),
                     morph_weights: node.morph_weights(),
+                    light_mask: node.light_mask,
                 })
         })
     }

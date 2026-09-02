@@ -14,7 +14,8 @@ struct Globals {
     camera_position: vec4<f32>,
     // rgb = 环境光贡献，a 未使用
     ambient: vec4<f32>,
-    // x = 生效的光源数量，其余保留
+    // x = 不参与聚簇的光源数（方向光、半球光，排在数组最前面），
+    // y = 光源总数，zw 保留
     light_count: vec4<u32>,
     // 各级级联的光空间矩阵。用不满的级填单位阵。
     light_view_proj: array<mat4x4<f32>, 4>,
@@ -31,8 +32,11 @@ struct Globals {
     // 时间和视口尺寸是自定义材质最常要的两样东西：没有时间做不了流动，
     // 没有视口尺寸算不出屏幕 UV。
     frame_params: vec4<f32>,
+    // 聚簇网格：x/y = 屏幕分块数，z = 深度切片数，w = 是否启用
+    cluster_grid: vec4<u32>,
+    // x = 近平面，y = 远平面，z = 1 / ln(far / near)，w 保留
+    cluster_depth: vec4<f32>,
     environment: Environment,
-    lights: array<Light, 16>,
 };
 
 struct ObjectUniforms {
@@ -50,6 +54,8 @@ struct ObjectUniforms {
     emissive: vec4<f32>,
     // x = 骨骼矩阵起点，y = 形变增量起点，z = 形变目标数，w = 形变权重起点
     skin: vec4<u32>,
+    // x = 接受哪些层的光照（位掩码），其余保留
+    flags: vec4<u32>,
     // 纹理坐标变换：xy = 缩放，zw = 偏移。图集里取一格子图就靠它。
     uv_transform: vec4<f32>,
     // 反射探针：xyz = 采集点，w = 纹理数组的层号。
@@ -79,6 +85,15 @@ struct MorphDelta {
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
+// 光源数组。全局光（方向光、半球光）在前，可聚簇的（点、聚光）在后。
+//
+// 从 uniform 搬到存储缓冲，是为了让上限从十几盏提到几百盏——
+// uniform 的大小要在管线里写死，而存储缓冲是变长的。
+@group(0) @binding(1) var<storage, read> lights: array<Light>;
+// 每个簇的名单区间：x = 起点，y = 长度。
+@group(0) @binding(2) var<storage, read> cluster_ranges: array<vec2<u32>>;
+// 所有簇的名单首尾相接。存的是**可聚簇那一段**里的下标。
+@group(0) @binding(3) var<storage, read> cluster_indices: array<u32>;
 // 每个实例一份，用 instance_index 寻址。存储缓冲而非 uniform：
 // 一次 draw 就能画完一批同网格同贴图的对象，不必逐个切换动态偏移。
 @group(1) @binding(0) var<storage, read> objects: array<ObjectUniforms>;

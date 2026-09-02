@@ -18,6 +18,7 @@
 #![warn(missing_docs)]
 
 pub mod attenuation;
+pub mod cluster;
 pub mod cascade;
 pub mod shadow;
 
@@ -28,7 +29,7 @@ use kmath::{Mat4, Vec3};
 ///
 /// 超出的光源会被丢弃——受 uniform 缓冲大小与着色器循环开销限制。
 /// 要支持更多光源需要改用延迟渲染或分簇前向渲染。
-pub const MAX_LIGHTS: usize = 16;
+pub const MAX_LIGHTS: usize = 256;
 
 /// Cook-Torrance 光照求值的 WGSL 源码，由渲染器拼进着色器。
 pub const LIGHT_WGSL: &str = include_str!("light.wgsl");
@@ -107,6 +108,15 @@ pub struct Light {
     pub enabled: bool,
     /// 是否投射阴影。目前只有场景里第一盏开启此项的方向光会生效。
     pub cast_shadows: bool,
+    /// 这盏灯照亮哪些**层**。位掩码，和节点的
+    /// [`light_mask`](kscene::Node::light_mask) 按位与，非零才照亮。
+    ///
+    /// 默认是全 1（照亮一切）。分层的用处是「这盏灯只打在角色身上」
+    /// 「这盏灯只照场景不照角色」——美术调光时几乎必用，而用「把灯挪远」
+    /// 之类的物理手段去凑永远凑不准。
+    ///
+    /// 灯和物体**两边都得同意**：任一方把对方的层关掉就不照。
+    pub mask: u32,
 }
 
 impl Default for Light {
@@ -117,6 +127,9 @@ impl Default for Light {
             intensity: 3.0,
             enabled: true,
             cast_shadows: false,
+            // 全 1：默认照亮一切。默认给 1 的话，
+            // 「没设过掩码的灯」和「只在第 0 层的灯」就分不开了。
+            mask: u32::MAX,
         }
     }
 }
@@ -292,6 +305,7 @@ impl Light {
             direction: [direction.x, direction.y, direction.z, self.kind.range()],
             color: [self.color.x, self.color.y, self.color.z, self.intensity],
             params,
+            extra: [self.mask, 0, 0, 0],
         }
     }
 }
@@ -308,6 +322,12 @@ pub struct GpuLight {
     pub color: [f32; 4],
     /// x = 内锥余弦，y = 外锥余弦。
     pub params: [f32; 4],
+    /// x = 照亮哪些层的位掩码，其余保留。
+    ///
+    /// 单开一个 `u32` 的 vec4 而不是把掩码塞进 `params.w`：
+    /// 掩码是**位**，从 `f32` 里 bitcast 出来能用但读起来像在耍花招，
+    /// 而且下一个要加的东西（cookie 贴图的层号）也是整数。
+    pub extra: [u32; 4],
 }
 
 impl Default for GpuLight {
@@ -340,9 +360,37 @@ mod test {
 
     #[test]
     fn gpu_layout_matches_wgsl() {
-        // 4 个 vec4 = 64 字节；与 light.wgsl 的 Light 结构一致。
-        assert_eq!(size_of::<GpuLight>(), 64);
+        // 5 个 vec4 = 80 字节；与 light.wgsl 的 Light 结构一致。
+        // 对不上不会报错，只会让着色器逐盏读到错位的字段——
+        // 画面上是一堆位置乱七八糟的灯。
+        assert_eq!(size_of::<GpuLight>(), 80);
         assert_eq!(size_of::<GpuLight>() % 16, 0);
+    }
+
+    #[test]
+    fn a_light_lights_everything_by_default() {
+        // 默认给 1 而不是全 1 的话，「没设过掩码的灯」和
+        // 「只在第 0 层的灯」就分不开了。
+        assert_eq!(Light::default().mask, u32::MAX);
+    }
+
+    #[test]
+    fn the_mask_survives_the_trip_to_the_gpu() {
+        let light = Light {
+            mask: 0b1010,
+            ..Light::default()
+        };
+        assert_eq!(light.to_gpu(Mat4::IDENTITY).extra[0], 0b1010);
+    }
+
+    #[test]
+    fn masks_overlap_rather_than_match() {
+        // 用「与非零」而不是「相等」：相等的话每盏灯只能属于一层，
+        // 「照亮角色和道具、但不照场景」就写不出来了。
+        let light_mask = 0b0011u32;
+        assert_ne!(light_mask & 0b0001, 0, "该照亮第 0 层");
+        assert_ne!(light_mask & 0b0010, 0, "也该照亮第 1 层");
+        assert_eq!(light_mask & 0b0100, 0, "不该照亮第 2 层");
     }
 
     #[test]
