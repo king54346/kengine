@@ -78,6 +78,10 @@ pub(crate) fn size(_ui: &Ui, _theme: &Theme, size: Vec2) -> Vec2 {
 ///
 /// 按**保持长宽比**贴：布局给的矩形不一定是调用方要的那个比例
 /// （被 `grow` 拉伸过、被 `shrink` 压过），直接铺满会把图标拉扁。
+//
+// 八个参数是绘制这一层的统一形状（ui / theme / rect / response 四个固定，
+// 后面跟这个控件自己的数据），凑成结构体只会多一个没人复用的类型。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn paint(
     ui: &mut Ui,
     _theme: &Theme,
@@ -142,7 +146,12 @@ mod tests {
         let mut w = WidgetUi::default();
         w.begin();
         w.panel("bg");
-        w.image("icon", Uuid::from_u128(7), Vec2::splat(32.0), [[0.0, 0.0], [1.0, 1.0]]);
+        w.image(
+            "icon",
+            Uuid::from_u128(7),
+            Vec2::splat(32.0),
+            [[0.0, 0.0], [1.0, 1.0]],
+        );
         w.finish(&mut ui, &UiInput::default());
         ui.end_frame();
 

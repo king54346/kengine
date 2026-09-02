@@ -2,7 +2,7 @@
 //!
 //! 一个粒子系统 = 一个[发射器](Emitter) + 一池粒子 + 两条随寿命变化的[曲线](Gradient)。
 //! 本 crate **不依赖 wgpu**：模拟在 CPU 上跑完，导出一份中立的 [`GpuParticle`] 数组，
-//! 由渲染器上传显存；着色器源码作为常量 [`PARTICLE_WGSL`] 一并提供。
+//! 由渲染器上传显存；着色器源码由 [`particle_wgsl`] 提供。
 //!
 //! # 存储用「列」而不是「行」
 //!
@@ -65,11 +65,30 @@ pub mod prelude {
     };
 }
 
+/// 一个粒子在显存里的样子，WGSL 声明。
+///
+/// **和 [`GpuParticle`] 必须逐字节一致。**
+///
+/// 单独拿出来是为了让**计算着色器也能用同一份**：GPU 粒子由用户自己的
+/// compute 写进一块 storage buffer，再直接交给粒子管线画
+/// （见 `krender::GpuParticles`）。两边各抄一遍的话，字段顺序或填充一旦
+/// 对不上，wgpu **不会报错**——绑定只校验总长度——画出来是一堆乱飞的方片。
+///
+/// ```ignore
+/// let source = [kparticle::PARTICLE_STRUCT_WGSL, my_compute_source].join("\n");
+/// ```
+pub const PARTICLE_STRUCT_WGSL: &str = include_str!("particle_struct.wgsl");
+
 /// 粒子着色器源码。
 ///
 /// 自带绑定声明，可以直接编译成模块：
 /// `group(0)` 全局量、`group(1)` 粒子数组、`group(2)` 贴图。
-pub const PARTICLE_WGSL: &str = include_str!("particle.wgsl");
+///
+/// 是个函数而不是常量，因为它由两段拼成：[`PARTICLE_STRUCT_WGSL`]
+/// 加上渲染那部分。拆开是为了让计算着色器能复用前半段。
+pub fn particle_wgsl() -> String {
+    [PARTICLE_STRUCT_WGSL, include_str!("particle.wgsl")].join("\n")
+}
 
 /// 粒子在哪个空间里演化。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1118,7 +1137,7 @@ mod test {
         // 同样的字段顺序算出来的大小可能不同（`vec3` 的对齐是 16 而不是 12，
         // 一个写在末尾的 `vec3` 填充就能让结构体从 48 涨到 64）。
         // 所以让 naga 按 WGSL 的规则算一遍，两边必须对得上。
-        let module = naga::front::wgsl::parse_str(PARTICLE_WGSL).expect("着色器应当能解析");
+        let module = naga::front::wgsl::parse_str(&particle_wgsl()).expect("着色器应当能解析");
         let mut layouter = naga::proc::Layouter::default();
         layouter.update(module.to_ctx()).expect("应当能算出布局");
 

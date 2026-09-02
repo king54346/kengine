@@ -24,6 +24,7 @@ pub use compute::{
     Binding as ComputeBinding, ComputeContext, ComputeError, ComputePipeline, StorageBuffer,
     StorageFormat, StorageTexture,
 };
+pub use particle::GpuParticles;
 pub use post::PostSettings;
 pub use tonemap::ToneMapping;
 // 级联参数本身属于 `klight`，但调它的人是冲着「渲染器怎么画阴影」来的，
@@ -1554,7 +1555,12 @@ impl Renderer {
     }
 
     /// 绘制一帧。
-    pub fn render(&mut self, scene: &Scene, ui: &Ui) -> RenderOutcome {
+    pub fn render(
+        &mut self,
+        scene: &Scene,
+        ui: &Ui,
+        gpu_particles: &[GpuParticles],
+    ) -> RenderOutcome {
         let now = std::time::Instant::now();
         let frame_delta = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
@@ -1974,12 +1980,13 @@ impl Renderer {
 
         // ── 粒子：收集、排序、上传 ──
         // 半透明，所以既不进 BVH 也不参与批处理，单独走一条路。
-        let mut particle_items = scene.visible_particles(frustum.as_ref());
+        let particle_items = scene.visible_particles(frustum.as_ref());
         let mut scratch = std::mem::take(&mut self.particle_scratch);
         let particle_batches = self.particles.prepare(
             &self.device,
             &self.queue,
-            &mut particle_items,
+            &particle_items,
+            gpu_particles,
             particle::ParticleCamera {
                 view_proj,
                 camera_to_world,
@@ -1987,7 +1994,10 @@ impl Renderer {
             },
             &mut scratch,
         );
-        stats.particles = scratch.len() as u32;
+        // GPU 粒子的数量是游戏报的：它们在 CPU 上不存在，
+        // `scratch` 里一个都没有。
+        stats.particles =
+            scratch.len() as u32 + gpu_particles.iter().map(|s| s.count).sum::<u32>();
         stats.draw_calls += particle_batches.len() as u32;
         self.particle_scratch = scratch;
 

@@ -129,6 +129,12 @@ struct Runtime {
     ui: Ui,
     /// 本帧喂给 UI 的输入。由 `kinput` 翻译而来。
     ui_input: UiInput,
+    /// 本帧提交的 GPU 粒子。即时模式：每帧清空，不提交就不画。
+    ///
+    /// 放在这里而不是 `Scene` 里，是因为它引用 `krender::StorageBuffer`
+    /// ——而 `kscene` 在 `krender` 的下游，反过来依赖就成环了。
+    /// 精灵能待在 `Scene` 里是因为它只带一个纹理 id。
+    gpu_particles: Vec<krender::GpuParticles>,
 }
 
 /// 把 `kinput` 的状态翻译成 UI 要的输入。
@@ -394,6 +400,7 @@ impl App {
                 ui_input: &runtime.ui_input,
                 post: &mut post,
                 compute: krender::ComputeContext::from_renderer(&runtime.renderer),
+                gpu_particles: &mut runtime.gpu_particles,
                 shadow: &mut shadow,
                 exit_requested: &mut exit_requested,
             };
@@ -452,6 +459,7 @@ impl App {
                 ui_input: &runtime.ui_input,
                 post: &mut post,
                 compute: krender::ComputeContext::from_renderer(&runtime.renderer),
+                gpu_particles: &mut runtime.gpu_particles,
                 shadow: &mut shadow,
                 exit_requested: &mut exit_requested,
             };
@@ -516,6 +524,7 @@ impl AppHandler for App {
             script_events: Vec::new(),
             debug: DebugDraw::none(),
             ui: Ui::new(),
+            gpu_particles: Vec::new(),
             ui_input: UiInput::default(),
         }));
 
@@ -697,7 +706,10 @@ impl AppHandler for App {
         // 一帧有效的输入（刚按下、刚松开、滚轮、文本）到此为止。
         runtime.ui_input.end_frame();
 
-        match runtime.renderer.render(&runtime.scene, &runtime.ui) {
+        match runtime
+            .renderer
+            .render(&runtime.scene, &runtime.ui, &runtime.gpu_particles)
+        {
             RenderOutcome::Ok | RenderOutcome::Skip => {}
             RenderOutcome::Reconfigure => {
                 let size = runtime.renderer.size();
@@ -716,6 +728,9 @@ impl AppHandler for App {
             runtime.scene.gizmos_mut().clear();
             // 2D 精灵同理。
             runtime.scene.clear_sprites();
+            // GPU 粒子也是即时模式的。清的只是这一帧的提交列表，
+            // 缓冲本身由游戏保管，不会被丢掉。
+            runtime.gpu_particles.clear();
 
             // 热重载排在帧末：这一帧的逻辑与渲染已经用完了旧数据，
             // 换在这里最不容易撞上「用到一半资源被换掉」。

@@ -62,6 +62,7 @@
 //! 拿去画就行了。
 
 use crate::Renderer;
+use kcore::uuid::Uuid;
 use kshader::{Shader, ShaderStage};
 
 /// 建计算管线时出的错。
@@ -108,14 +109,26 @@ pub struct ComputePipeline {
 /// GPU 上一块可读写的数据。
 #[derive(Debug)]
 pub struct StorageBuffer {
-    buffer: wgpu::Buffer,
+    /// 同一个 crate 里的渲染代码要拿它去建绑定组（GPU 粒子那条路）。
+    pub(crate) buffer: wgpu::Buffer,
     size: u64,
+    /// 缓存绑定组用的键。
+    ///
+    /// 建绑定组不便宜，而同一块缓冲每帧都会被交过来一次，
+    /// 所以渲染器按这个 id 缓存。wgpu 的 `Buffer` 自己没有稳定可比的
+    /// 标识，只能自己发一个。
+    id: Uuid,
 }
 
 impl StorageBuffer {
     /// 字节数。
     pub fn size(&self) -> u64 {
         self.size
+    }
+
+    /// 这块缓冲的标识。渲染器按它缓存绑定组。
+    pub fn id(&self) -> Uuid {
+        self.id
     }
 }
 
@@ -322,6 +335,7 @@ impl ComputeContext {
         StorageBuffer {
             size: contents.len() as u64,
             buffer,
+            id: Uuid::new_v4(),
         }
     }
 
@@ -338,7 +352,11 @@ impl ComputeContext {
             mapped_at_creation: false,
         });
 
-        StorageBuffer { buffer, size }
+        StorageBuffer {
+            buffer,
+            size,
+            id: Uuid::new_v4(),
+        }
     }
 
     /// 建一张清零的 storage texture。

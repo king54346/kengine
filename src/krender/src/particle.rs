@@ -27,6 +27,70 @@ struct ParticleGlobals {
     soft_params: [f32; 4],
 }
 
+/// 一批**由计算着色器填出来的**粒子。
+///
+/// 和挂在节点上的 [`ParticleSystem`](kparticle::ParticleSystem) 走的是
+/// 同一条渲染管线——那条路本来就从 storage buffer 取数据，方片在顶点
+/// 着色器里长出来，压根没有顶点缓冲。所以「让 GPU 算出来的粒子直接被画」
+/// 缺的只是**让渲染器用别人给的那块缓冲**，而不是它自己每帧 `write_buffer`
+/// 填的那块。
+///
+/// # 缓冲里必须是什么
+///
+/// 一个紧凑的 `array<Particle>`，`Particle` 的布局见
+/// [`kparticle::PARTICLE_STRUCT_WGSL`]——**把那段拼在自己的计算着色器
+/// 前面，不要手抄**。抄错了 wgpu 不会报错（绑定只校验总长度），
+/// 画出来是一堆乱飞的方片。
+///
+/// # 排序这件事说清楚
+///
+/// 粒子是半透明的，alpha 混合不可交换，所以画的顺序错了颜色就错。
+/// CPU 粒子由渲染器**逐粒子**从远到近排；GPU 粒子在 CPU 上没有位置，
+/// 排不了。所以：
+///
+/// | 混合方式 | 结果 |
+/// |---|---|
+/// | [`BlendMode::Additive`] | **正确**。加法可交换，顺序无关 |
+/// | [`BlendMode::Alpha`] | 系统之间按 [`bounds`](Self::bounds) 排，但**同一批内部不排** |
+///
+/// 要 alpha 又要正确，只能自己在 GPU 上把缓冲排好再交过来
+/// （bitonic sort）。引擎不代劳：那需要另一条完整的计算管线，
+/// 而绝大多数 GPU 粒子（火花、烟尘、魔法）用加法混合本来就更好看。
+///
+/// # 生命周期
+///
+/// 每帧提交一次，和精灵一样是即时模式的。缓冲本身由游戏保管
+/// （`Arc` 是为了让提交这一步不必转移所有权），渲染器只在绘制时借用。
+pub struct GpuParticles {
+    /// 粒子数据。由 [`ComputeContext`](crate::ComputeContext) 建、
+    /// 由计算着色器填。
+    pub particles: std::sync::Arc<crate::StorageBuffer>,
+    /// 画前多少个。**不是缓冲的容量**——缓冲通常按上限开，实际存活的
+    /// 少得多，多画的那些会是上一帧的残留或者未初始化的垃圾。
+    pub count: u32,
+    /// 贴图。[`None`] 用内置的软圆点。
+    ///
+    /// 用 `Arc` 而不是按值传：这个结构每帧都要造一遍，而
+    /// [`Texture`] 里是一整块像素，按值传等于每帧拷一遍贴图。
+    pub texture: Option<std::sync::Arc<Texture>>,
+    /// 混合方式。见上面「排序这件事说清楚」。
+    pub blend: BlendMode,
+    /// 世界空间包围盒，用来和别的粒子系统排先后。
+    ///
+    /// **只能由游戏给**：粒子在哪只有 GPU 知道。给个保守的大盒子即可，
+    /// 它不参与剔除，只参与系统之间的排序。
+    pub bounds: kmath::Aabb,
+}
+
+/// 一次绘制的粒子数据从哪儿来。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// 渲染器自己那块缓冲，CPU 模拟的粒子每帧写进去。
+    Internal,
+    /// 外部交来的一块 storage buffer，由计算着色器填。值是它的 id。
+    External(Uuid),
+}
+
 /// 一个粒子系统对应的一次绘制。
 ///
 /// 不做跨系统的合批：相邻两个系统的贴图和混合方式往往不同，
@@ -36,6 +100,7 @@ pub(crate) struct ParticleBatch {
     count: u32,
     texture: Uuid,
     blend: BlendMode,
+    source: Source,
 }
 
 /// 建场景深度的绑定组。
@@ -104,6 +169,13 @@ pub(crate) struct ParticleResources {
     storage_bind_group: wgpu::BindGroup,
     /// 当前粒子缓冲能容纳的粒子数。
     capacity: u64,
+    /// 外部缓冲（GPU 粒子）的绑定组，按 `StorageBuffer::id` 缓存。
+    ///
+    /// 缓存是必要的：同一块缓冲每帧都会被交过来一次，而建绑定组
+    /// 不便宜。缓冲被游戏丢掉之后这里会留下一条死项——**不清理**，
+    /// 因为一个绑定组只有几十字节，而「什么时候算丢掉了」需要引擎去
+    /// 猜游戏的意图。真有几千个一次性缓冲的话那是用法本身有问题。
+    external_bind_groups: FxHashMap<Uuid, wgpu::BindGroup>,
 
     texture_layout: wgpu::BindGroupLayout,
     textures: FxHashMap<Uuid, GpuTexture>,
@@ -132,7 +204,7 @@ impl ParticleResources {
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("kengine particle shader"),
-            source: wgpu::ShaderSource::Wgsl(kparticle::PARTICLE_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(kparticle::particle_wgsl().into()),
         });
 
         // ── group(0)：每帧全局量 ──
@@ -181,6 +253,7 @@ impl ParticleResources {
         });
         let (storage_buffer, storage_bind_group) =
             create_storage(device, &storage_layout, Self::INITIAL_CAPACITY);
+        let external_bind_groups = FxHashMap::default();
 
         // ── group(2)：贴图 ──
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -293,6 +366,7 @@ impl ParticleResources {
             storage_buffer,
             storage_bind_group,
             capacity: Self::INITIAL_CAPACITY,
+            external_bind_groups,
             texture_layout,
             textures: FxHashMap::default(),
             bind_groups: FxHashMap::default(),
@@ -308,7 +382,9 @@ impl ParticleResources {
 
     /// 收集本帧所有粒子并上传显存，返回按绘制顺序排好的批次。
     ///
-    /// `items` 会被按到相机的距离**从远到近**重排。
+    /// CPU 模拟的（`items`）和计算着色器填的（`gpu`）排在**同一个序**里，
+    /// 都按到相机的距离从远到近。分成两段各排各的话，两类系统之间的
+    /// 前后关系就成了「谁在数组里排前面」，和它们离相机多远无关。
     /// 换一张深度纹理（窗口尺寸变化时）。
     pub(crate) fn set_depth_view(&mut self, device: &wgpu::Device, view: &wgpu::TextureView) {
         self.depth_bind_group = create_depth_bind_group(device, &self.depth_layout, view);
@@ -318,7 +394,8 @@ impl ParticleResources {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        items: &mut [ParticleItem<'_>],
+        items: &[ParticleItem<'_>],
+        gpu: &[GpuParticles],
         camera: ParticleCamera,
         scratch: &mut Vec<GpuParticle>,
     ) -> Vec<ParticleBatch> {
@@ -328,21 +405,53 @@ impl ParticleResources {
             projection,
         } = camera;
         scratch.clear();
-        if items.is_empty() {
+        if items.is_empty() && gpu.is_empty() {
             return Vec::new();
         }
 
         let camera_position = camera_to_world.to_scale_rotation_translation().2;
 
         // 系统之间也要排序：每个系统内部排好了，系统之间乱序照样会盖错。
-        items.sort_unstable_by(|a, b| {
-            let a = (a.aabb.center() - camera_position).length_squared();
-            let b = (b.aabb.center() - camera_position).length_squared();
-            b.total_cmp(&a)
-        });
+        //
+        // CPU 的和 GPU 的**排在同一个序里**：分成两段各排各的话，
+        // 一团 GPU 火花和一团 CPU 烟尘之间的前后关系就成了「谁在数组里
+        // 排前面」，而那和它们离相机多远无关。
+        //
+        // 排的是 (距离, 来源, 下标) 三元组而不是直接排两个数组：
+        // `items` 排完之后 `gpu` 那边的下标就对不上了。
+        let mut order: Vec<(f32, bool, usize)> = Vec::with_capacity(items.len() + gpu.len());
+        for (index, item) in items.iter().enumerate() {
+            let distance = (item.aabb.center() - camera_position).length_squared();
+            order.push((distance, false, index));
+        }
+        for (index, system) in gpu.iter().enumerate() {
+            let distance = (system.bounds.center() - camera_position).length_squared();
+            order.push((distance, true, index));
+        }
+        order.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
 
-        let mut batches = Vec::with_capacity(items.len());
-        for item in items.iter() {
+        let mut batches = Vec::with_capacity(order.len());
+        for (_, is_gpu, index) in order {
+            if is_gpu {
+                let system = &gpu[index];
+                if system.count == 0 {
+                    continue;
+                }
+                self.ensure_external_bind_group(device, system);
+                batches.push(ParticleBatch {
+                    // GPU 粒子从自己那块缓冲的头开始画。一块缓冲一个系统——
+                    // 想把几个系统塞进一块缓冲的话，那块缓冲的分段规则
+                    // 只有游戏自己知道，引擎猜不了。
+                    first: 0,
+                    count: system.count,
+                    texture: self.ensure_gpu_texture(device, queue, system),
+                    blend: system.blend,
+                    source: Source::External(system.particles.id()),
+                });
+                continue;
+            }
+
+            let item = &items[index];
             let first = scratch.len() as u32;
             item.system
                 .collect(item.transform, camera_position, scratch);
@@ -356,10 +465,13 @@ impl ParticleResources {
                 count,
                 texture: self.ensure_texture(device, queue, item),
                 blend: item.system.blend,
+                source: Source::Internal,
             });
         }
 
         if scratch.is_empty() {
+            // 全都是 GPU 粒子时也要更新全局量——方片的朝向在那里面。
+            self.write_globals(queue, view_proj, camera_to_world, projection);
             return batches;
         }
 
@@ -373,6 +485,23 @@ impl ParticleResources {
         queue.write_buffer(&self.storage_buffer, 0, bytemuck::cast_slice(scratch));
 
         // 方片沿相机的右向量与上向量张开，于是永远正对镜头。
+        self.write_globals(queue, view_proj, camera_to_world, projection);
+
+        batches
+    }
+
+    /// 写这一帧的全局量。
+    ///
+    /// 单独拎出来是因为它有**两个**调用点：正常那条，以及「这一帧全是
+    /// GPU 粒子、`scratch` 是空的」那条。漏掉后者的话方片会用上一帧的
+    /// 相机朝向张开——相机一转，粒子集体歪一下再正回来。
+    fn write_globals(
+        &self,
+        queue: &wgpu::Queue,
+        view_proj: Mat4,
+        camera_to_world: Mat4,
+        projection: Mat4,
+    ) {
         queue.write_buffer(
             &self.globals_buffer,
             0,
@@ -408,8 +537,41 @@ impl ParticleResources {
                     .to_array(),
             }]),
         );
+    }
 
-        batches
+    /// 确保这块外部缓冲有一个绑定组。
+    fn ensure_external_bind_group(&mut self, device: &wgpu::Device, system: &GpuParticles) {
+        let id = system.particles.id();
+        if self.external_bind_groups.contains_key(&id) {
+            return;
+        }
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("kengine gpu particle storage bind group"),
+            layout: &self.storage_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: system.particles.buffer.as_entire_binding(),
+            }],
+        });
+        self.external_bind_groups.insert(id, bind_group);
+    }
+
+    /// 确保 GPU 粒子系统的贴图已上传，返回绑定组的键。
+    fn ensure_gpu_texture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        system: &GpuParticles,
+    ) -> Uuid {
+        let Some(texture) = system.texture.as_deref() else {
+            return Self::DEFAULT_TEXTURE;
+        };
+        let id = texture.id();
+        self.textures
+            .entry(id)
+            .or_insert_with(|| upload_texture(device, queue, texture));
+        self.ensure_bind_group(device, id);
+        id
     }
 
     /// 提交绘制。必须在不透明物体与天空**之后**调用。
@@ -423,8 +585,19 @@ impl ParticleResources {
                 BlendMode::Alpha => &self.alpha_pipeline,
                 BlendMode::Additive => &self.additive_pipeline,
             });
+            // 粒子数据可能来自渲染器自己那块缓冲，也可能来自计算着色器
+            // 填的一块外部缓冲。绑定组的布局是同一个，换的只是缓冲。
+            let storage = match batch.source {
+                Source::Internal => &self.storage_bind_group,
+                Source::External(id) => {
+                    let Some(bind_group) = self.external_bind_groups.get(&id) else {
+                        continue;
+                    };
+                    bind_group
+                }
+            };
             pass.set_bind_group(0, &self.globals_bind_group, &[]);
-            pass.set_bind_group(1, &self.storage_bind_group, &[]);
+            pass.set_bind_group(1, storage, &[]);
             pass.set_bind_group(2, texture, &[]);
             pass.set_bind_group(3, &self.depth_bind_group, &[]);
             // 六个顶点拼一个方片，几何在顶点着色器里长出来，不需要顶点缓冲。
@@ -562,12 +735,12 @@ mod test {
 
     #[test]
     fn particle_shader_passes_validation() {
-        Shader::from_wgsl(kparticle::PARTICLE_WGSL).expect("粒子着色器应当通过校验");
+        Shader::from_wgsl(kparticle::particle_wgsl()).expect("粒子着色器应当通过校验");
     }
 
     #[test]
     fn particle_shader_entry_points_match_pipeline() {
-        let shader = Shader::from_wgsl(kparticle::PARTICLE_WGSL).unwrap();
+        let shader = Shader::from_wgsl(kparticle::particle_wgsl()).unwrap();
 
         // 这两个名字硬编码在建管线的代码里。
         assert_eq!(shader.vertex_entry(), Some("particle_vs"));
@@ -585,9 +758,10 @@ mod test {
     fn shader_builds_quads_from_the_vertex_index() {
         // 粒子的方片是在顶点着色器里长出来的，没有顶点缓冲。
         // 改成 CPU 生成顶点时这里会报警。
-        assert!(kparticle::PARTICLE_WGSL.contains("@builtin(vertex_index)"));
-        assert!(kparticle::PARTICLE_WGSL.contains("@builtin(instance_index)"));
-        assert!(kparticle::PARTICLE_WGSL.contains("var<storage, read> particles"));
+        let source = kparticle::particle_wgsl();
+        assert!(source.contains("@builtin(vertex_index)"));
+        assert!(source.contains("@builtin(instance_index)"));
+        assert!(source.contains("var<storage, read> particles"));
     }
 
     /// WGSL 里 `linear_depth` 的 Rust 版。两边必须给出同样的结果——

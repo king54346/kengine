@@ -98,6 +98,24 @@ pub struct Context<'a> {
     ///
     /// 克隆很便宜（内部是 `Arc`），可以自行保存副本。
     pub compute: krender::ComputeContext,
+    /// 本帧要画的 GPU 粒子。**即时模式：不提交就不画**，和精灵一样。
+    ///
+    /// 粒子数据是一块由 [`compute`](Self::compute) 建、由计算着色器填的
+    /// storage buffer；渲染器直接拿它当顶点数据源，不经过 CPU。
+    ///
+    /// ```ignore
+    /// ctx.gpu_particles.push(krender::GpuParticles {
+    ///     particles: self.buffer.clone(),
+    ///     count: self.alive,
+    ///     texture: None,
+    ///     blend: BlendMode::Additive,
+    ///     bounds: self.bounds,
+    /// });
+    /// ```
+    ///
+    /// 缓冲里的结构必须和 [`kparticle::PARTICLE_STRUCT_WGSL`] 一致，
+    /// 排序的限制见 [`krender::GpuParticles`]。
+    pub gpu_particles: &'a mut Vec<krender::GpuParticles>,
     /// 阴影级联的划分参数。改了下一帧生效。
     ///
     /// 场景尺度和默认那套差得远时一定要调：默认按几十米的户外场景配，

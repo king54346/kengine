@@ -20,18 +20,7 @@ struct ParticleGlobals {
     soft_params: vec4<f32>,
 };
 
-struct Particle {
-    position: vec3<f32>,
-    size: f32,
-    color: vec4<f32>,
-    rotation: f32,
-    // 填充写成三个标量而不是一个 vec3：vec3 的对齐要求是 16 字节，
-    // 会把自己推到偏移 48，整个结构体因此涨到 64 字节，
-    // 与 CPU 侧紧凑排布的 48 字节对不上，绑定时就会被 wgpu 打回。
-    padding_x: f32,
-    padding_y: f32,
-    padding_z: f32,
-};
+// `Particle` 的声明在 `particle_struct.wgsl` 里，由 `particle_wgsl()` 拼在这段前面。
 
 @group(0) @binding(0) var<uniform> particle_globals: ParticleGlobals;
 @group(1) @binding(0) var<storage, read> particles: array<Particle>;
