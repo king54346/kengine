@@ -94,6 +94,11 @@ struct MorphDelta {
 @group(0) @binding(2) var<storage, read> cluster_ranges: array<vec2<u32>>;
 // 所有簇的名单首尾相接。存的是**可聚簇那一段**里的下标。
 @group(0) @binding(3) var<storage, read> cluster_indices: array<u32>;
+
+// 每个光照探针的漫反射球谐，9 个 vec4 一组。
+// 第 0 组是全局环境；物体属于哪一组由 `object.probe_position.w` 说了算，
+// 和镜面反射取哪一层用的是同一个层号。
+@group(0) @binding(4) var<storage, read> probe_irradiance: array<vec4<f32>>;
 // 每个实例一份，用 instance_index 寻址。存储缓冲而非 uniform：
 // 一次 draw 就能画完一批同网格同贴图的对象，不必逐个切换动态偏移。
 @group(1) @binding(0) var<storage, read> objects: array<ObjectUniforms>;

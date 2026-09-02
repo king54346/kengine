@@ -370,6 +370,7 @@ mod test {
         // 渲染器按名字调用这些函数，改名会导致拼接后的着色器编译失败。
         for name in [
             "pbr_direct_lighting",
+            "pbr_area_lighting",
             "pbr_ambient",
             "pbr_fresnel_schlick",
             "pbr_distribution_ggx",

@@ -68,7 +68,12 @@ fn ibl_sky(env: Environment, direction: vec3<f32>) -> vec3<f32> {
 
 // 球谐求值：9 个系数一次多项式展开，比采样辐照度贴图便宜得多。
 // 系数在 CPU 侧已经乘过余弦卷积之外的部分，这里补上各阶的卷积因子。
-fn ibl_irradiance(env: Environment, n: vec3<f32>) -> vec3<f32> {
+// 球谐 → 辐照度。**系数由调用方给**，而不是从 `Environment` 里取。
+//
+// 拆出这一层是为了光照探针：每个探针有自己的一组系数，存在一块
+// 存储缓冲里，按物体所属的探针层号去取。照着 `Environment` 写死的话，
+// 一个场景就只能有一组漫反射环境光。
+fn ibl_irradiance_from_sh(sh: array<vec4<f32>, 9>, n: vec3<f32>, intensity: f32) -> vec3<f32> {
     let c0 = 0.282095;
     let c1 = 0.488603;
     let c2 = 1.092548;
@@ -80,18 +85,18 @@ fn ibl_irradiance(env: Environment, n: vec3<f32>) -> vec3<f32> {
     let a1 = 2.0 * IBL_PI / 3.0;
     let a2 = IBL_PI / 4.0;
 
-    var result = env.sh[0].rgb * (c0 * a0);
-    result += env.sh[1].rgb * (c1 * n.y * a1);
-    result += env.sh[2].rgb * (c1 * n.z * a1);
-    result += env.sh[3].rgb * (c1 * n.x * a1);
-    result += env.sh[4].rgb * (c2 * n.x * n.y * a2);
-    result += env.sh[5].rgb * (c2 * n.y * n.z * a2);
-    result += env.sh[6].rgb * (c3 * (3.0 * n.z * n.z - 1.0) * a2);
-    result += env.sh[7].rgb * (c2 * n.x * n.z * a2);
-    result += env.sh[8].rgb * (c4 * (n.x * n.x - n.y * n.y) * a2);
+    var result = sh[0].rgb * (c0 * a0);
+    result += sh[1].rgb * (c1 * n.y * a1);
+    result += sh[2].rgb * (c1 * n.z * a1);
+    result += sh[3].rgb * (c1 * n.x * a1);
+    result += sh[4].rgb * (c2 * n.x * n.y * a2);
+    result += sh[5].rgb * (c2 * n.y * n.z * a2);
+    result += sh[6].rgb * (c3 * (3.0 * n.z * n.z - 1.0) * a2);
+    result += sh[7].rgb * (c2 * n.x * n.z * a2);
+    result += sh[8].rgb * (c4 * (n.x * n.x - n.y * n.y) * a2);
 
     // 低阶球谐在高对比环境下可能出现轻微负值。
-    return max(result, vec3<f32>(0.0)) * env.sun_color.a;
+    return max(result, vec3<f32>(0.0)) * intensity;
 }
 
 // 镜面环境反射。
@@ -193,6 +198,12 @@ fn ibl_specular_prefiltered(
 }
 
 // 漫反射环境贡献。金属没有漫反射，故按金属度衰减。
+
+// 全局环境的辐照度。
+fn ibl_irradiance(env: Environment, n: vec3<f32>) -> vec3<f32> {
+    return ibl_irradiance_from_sh(env.sh, n, env.sun_color.a);
+}
+
 fn ibl_diffuse(
     env: Environment,
     n: vec3<f32>,
@@ -200,7 +211,19 @@ fn ibl_diffuse(
     metallic: f32,
     occlusion: f32,
 ) -> vec3<f32> {
-    let irradiance = ibl_irradiance(env, n);
+    return ibl_diffuse_from_sh(env.sh, n, env.sun_color.a, albedo, metallic, occlusion);
+}
+
+// 用一组给定的球谐系数算漫反射环境光。光照探针走这条。
+fn ibl_diffuse_from_sh(
+    sh: array<vec4<f32>, 9>,
+    n: vec3<f32>,
+    intensity: f32,
+    albedo: vec3<f32>,
+    metallic: f32,
+    occlusion: f32,
+) -> vec3<f32> {
+    let irradiance = ibl_irradiance_from_sh(sh, n, intensity);
     let k_diffuse = 1.0 - clamp(metallic, 0.0, 1.0);
     // 辐照度已含 π，Lambert BRDF 的 1/π 正好抵消。
     return albedo * irradiance * k_diffuse * occlusion / IBL_PI;

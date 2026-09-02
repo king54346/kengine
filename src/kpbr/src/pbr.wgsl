@@ -82,6 +82,54 @@ fn pbr_direct_lighting(
     return (diffuse + specular) * radiance * n_dot_l;
 }
 
+// 面光源的直接光照。
+//
+// 和 `pbr_direct_lighting` 的唯一区别是**漫反射不用 `n·l`**，
+// 而是用调用方算好的形状因子（矩形对着色点张成的立体角乘余弦）。
+//
+// 为什么要分开：点光源的 `n·l` 是「一个方向上的余弦」，而面光源要的是
+// 「整块面积上的余弦积分」。拿 `n·l` 去凑的话，贴着板子的表面会明显偏暗
+// ——那里半个天空都是光源，余弦积分接近 1，而指向中心的 `n·l` 可能很小。
+//
+// 高光仍然走 `n·l`：那一半是代表点近似，本来就是把面光源当成一盏
+// 位置特殊的点光源在算。
+fn pbr_area_lighting(
+    n: vec3<f32>,
+    v: vec3<f32>,
+    l: vec3<f32>,
+    albedo: vec3<f32>,
+    metallic: f32,
+    roughness: f32,
+    radiance: vec3<f32>,
+    form_factor: f32,
+) -> vec3<f32> {
+    let h = normalize(v + l);
+    let n_dot_v = max(dot(n, v), 0.0);
+    let n_dot_l = max(dot(n, l), 0.0);
+    let n_dot_h = max(dot(n, h), 0.0);
+    let h_dot_v = max(dot(h, v), 0.0);
+
+    // 形状因子为零说明矩形整个在表面背后，高光也就无从谈起。
+    if (form_factor <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+
+    let f0 = pbr_f0(albedo, metallic);
+    let f = pbr_fresnel_schlick(h_dot_v, f0);
+    let k_diffuse = (vec3<f32>(1.0) - f) * (1.0 - clamp(metallic, 0.0, 1.0));
+    let diffuse = k_diffuse * albedo / PBR_PI;
+
+    var specular = vec3<f32>(0.0);
+    if (n_dot_l > 0.0) {
+        let d = pbr_distribution_ggx(n_dot_h, roughness);
+        let g = pbr_geometry_smith(n_dot_v, n_dot_l, roughness);
+        specular = (d * g * f) / max(4.0 * n_dot_v * n_dot_l, 1e-7) * n_dot_l;
+    }
+
+    // 漫反射乘形状因子（已含余弦），高光乘 `n·l`（在上面乘过了）。
+    return (diffuse * form_factor + specular) * radiance;
+}
+
 // 极简环境光：用常量代替 IBL，保证背光面不会全黑。
 // 真正的基于图像的光照留待后续。
 fn pbr_ambient(albedo: vec3<f32>, occlusion: f32, ambient: vec3<f32>) -> vec3<f32> {

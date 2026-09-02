@@ -135,6 +135,13 @@ pub struct ReflectionProbeEntry {
     /// 预滤波的 mip 链。用 `Arc` 是因为渲染器按版本号决定重传，
     /// 中间可能持有它一帧。
     pub levels: std::sync::Arc<Vec<kpbr::prefilter::PrefilteredLevel>>,
+    /// 这个探针位置上的漫反射环境光（球谐）。
+    ///
+    /// 和 `levels` 出自同一张图，但两者管的是**光照的两半**：`levels`
+    /// 给镜面反射，这个给漫反射。只做前者的话，室内的白墙仍然被
+    /// 户外的天空照亮——反射对了，环境光还是错的，而后者在粗糙表面上
+    /// 占的比重更大，反而更显眼。
+    pub irradiance: kpbr::ibl::SphericalHarmonics,
 }
 
 /// 一个场景。
@@ -175,6 +182,8 @@ pub struct Scene {
     /// 存在场景上而不是让调用方直接找渲染器——插件拿得到场景，
     /// 拿不到渲染器。
     sprite_textures: Vec<ktexture::Texture>,
+    /// 聚光灯的投影贴图图集。一层一张图案。
+    cookie_atlas: Option<ktexture::Texture>,
     /// 本帧的调试线。
     ///
     /// 放在场景上而不是渲染器上，是因为想画调试线的代码（游戏逻辑、
@@ -246,6 +255,7 @@ impl Scene {
             gizmos: Gizmos::new(),
             sprites: Vec::new(),
             sprite_textures: Vec::new(),
+            cookie_atlas: None,
             prefiltered_environment: None,
             reflection_probes: Vec::new(),
             probe_settings: kpbr::prefilter::PrefilterSettings::default(),
@@ -273,6 +283,7 @@ impl Scene {
             gizmos: Gizmos::new(),
             sprites: Vec::new(),
             sprite_textures: Vec::new(),
+            cookie_atlas: None,
             prefiltered_environment: None,
             reflection_probes: Vec::new(),
             probe_settings: kpbr::prefilter::PrefilterSettings::default(),
@@ -1332,6 +1343,27 @@ impl Scene {
         &self.sprite_textures
     }
 
+    /// 设置聚光灯的投影贴图（cookie / gobo）图集。
+    ///
+    /// 必须是一张**多层**纹理（[`Texture::from_layers`]）：一盏灯用
+    /// [`Light::cookie`](klight::Light::cookie) 指哪一层。
+    ///
+    /// 用图集而不是「每盏灯一张贴图」，理由和纹理数组那一套一样：
+    /// 换贴图要换绑定组，而光照是在**一个** pass 里一次算完的，
+    /// 中途换不了绑定组。
+    ///
+    /// 传 [`None`] 摘掉整个图集，所有 cookie 随之失效。
+    ///
+    /// [`Texture::from_layers`]: ktexture::Texture::from_layers
+    pub fn set_cookie_atlas(&mut self, atlas: Option<ktexture::Texture>) {
+        self.cookie_atlas = atlas;
+    }
+
+    /// 当前的 cookie 图集。
+    pub fn cookie_atlas(&self) -> Option<&ktexture::Texture> {
+        self.cookie_atlas.as_ref()
+    }
+
     /// 用一张 HDR 全景图当环境光，漫反射与镜面都换掉。
     ///
     /// 这一步会做**两次离线计算**：球谐投影（漫反射）和 GGX 预滤波
@@ -1381,9 +1413,14 @@ impl Scene {
         self.prefiltered_environment.as_ref()?;
 
         let levels = kpbr::prefilter::prefilter(image, self.probe_settings);
+        // 采样数和全局环境保持一致（见 `kpbr::Environment::from_hdr`）：
+        // 探针和全局环境会在同一个画面里同时出现，两边用不同的精度
+        // 会在交界处留下一道亮度不连续的缝。
+        let irradiance = kpbr::ibl::SphericalHarmonics::from_hdr(image, 96);
         self.reflection_probes.push(ReflectionProbeEntry {
             probe,
             levels: std::sync::Arc::new(levels),
+            irradiance,
         });
         self.environment_version += 1;
         Some(self.reflection_probes.len() - 1)

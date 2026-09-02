@@ -43,6 +43,12 @@
 // 关掉 SSAO 时这里绑的是一张 1×1 的白图——「没有 SSAO」于是等价于
 // 「乘 1」，着色器不必为它写分支。和缺贴图时绑白图是同一个套路。
 @group(3) @binding(8) var ssao_texture: texture_2d<f32>;
+// 聚光灯的投影贴图（cookie / gobo）图集，一层一张图案。
+//
+// 没设图集时绑的是那张 1×1 白图的一层数组视图——「没有 cookie」
+// 于是等价于「乘 1」，着色器不必为它写分支。
+@group(3) @binding(9) var cookie_atlas: texture_2d_array<f32>;
+@group(3) @binding(10) var cookie_sampler: sampler;
 
 
 struct VertexOutput {
@@ -240,6 +246,20 @@ fn shade_light(
         return vec3<f32>(0.0);
     }
 
+    var radiance = light_radiance(light, sample.w);
+
+    // ── cookie：把一张图案投出去 ──
+    //
+    // 用 `textureSampleLevel` 而不是 `textureSample`：这一段在分支里，
+    // 而 `textureSample` 要屏幕导数，在有控制流的地方会被 naga 拒绝。
+    // 显式取第 0 层 mip 也更合适——cookie 是投影出去的，
+    // 按屏幕导数挑 mip 会让远处的图案糊成一片。
+    if (light.extra.y > 0u) {
+        let uv = light_cookie_uv(light, world_position);
+        let layer = i32(light.extra.y - 1u);
+        radiance *= textureSampleLevel(cookie_atlas, cookie_sampler, uv, layer, 0.0).rgb;
+    }
+
     var visibility = 1.0;
     // 只有第一盏光（阴影投射者）参与阴影计算。
     if (index == 0u && globals.shadow_params.w > 0.5) {
@@ -263,12 +283,29 @@ fn shade_light(
         );
     }
 
+    // 矩形面光源走另一条：漫反射用**形状因子**（矩形对着色点张成的
+    // 立体角乘余弦，闭式解），高光用代表点近似。
+    //
+    // 拿 `n·l` 去凑漫反射的话，贴着板子的表面会明显偏暗——那里半个天空
+    // 都是光源，余弦积分接近 1，而指向中心的 `n·l` 可能很小。
+    if (light.position.w == LIGHT_RECT) {
+        let form_factor = light_rect_form_factor(light, world_position, n);
+        return pbr_area_lighting(
+            n, v, sample.xyz,
+            albedo,
+            metallic,
+            roughness,
+            radiance,
+            form_factor,
+        ) * visibility;
+    }
+
     return pbr_direct_lighting(
         n, v, sample.xyz,
         albedo,
         metallic,
         roughness,
-        light_radiance(light, sample.w),
+        radiance,
     ) * visibility;
 }
 
@@ -396,7 +433,27 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let f0 = pbr_f0(albedo, metallic);
     let brdf = textureSample(brdf_lut, brdf_sampler, vec2<f32>(n_dot_v, roughness)).rg;
 
-    color += ibl_diffuse(globals.environment, n, albedo, metallic, occlusion);
+    // 漫反射环境光按物体所属的探针取，第 0 组是全局环境。
+    //
+    // 只做镜面那一半的话，室内的白墙照样被户外的天空照亮——
+    // 反射对了，环境光还是错的，而粗糙表面上后者占的比重更大，
+    // 反而更显眼。
+    let probe_layer = u32(max(object.probe_position.w, 0.0));
+    var probe_sh: array<vec4<f32>, 9>;
+    let sh_base = probe_layer * 9u;
+    for (var i = 0u; i < 9u; i = i + 1u) {
+        probe_sh[i] = probe_irradiance[sh_base + i];
+    }
+    color += ibl_diffuse_from_sh(
+        probe_sh,
+        n,
+        // 和镜面那边同一个口径：全局强度乘探针自己的强度。
+        // 两边用不同的口径，调探针强度时漫反射和反射会脱节。
+        globals.environment.sun_color.a * object.probe_max.w,
+        albedo,
+        metallic,
+        occlusion,
+    );
 
     // 有 HDR 就走预滤波的 mip 链，否则退回程序化天空的近似。
     // 保留退路是必要的：不是每个场景都会配 HDR，而没有镜面反射的

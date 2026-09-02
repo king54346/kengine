@@ -13,15 +13,19 @@ struct Light {
     color: vec4<f32>,
     // 聚光灯：x = 内锥余弦，y = 外锥余弦
     // 半球光：xyz = 地面色
+    // 矩形面光源：x = 半宽，y = 半高
     params: vec4<f32>,
-    // x = 照亮哪些层的位掩码，其余保留
+    // x = 照亮哪些层的位掩码，y = cookie 层号（0 = 没有），其余保留
     extra: vec4<u32>,
+    // xyz = 光源的世界右轴（已归一化），w = 聚光灯的 tan(外锥角)
+    right: vec4<f32>,
 };
 
 const LIGHT_DIRECTIONAL: f32 = 0.0;
 const LIGHT_POINT: f32 = 1.0;
 const LIGHT_SPOT: f32 = 2.0;
 const LIGHT_HEMISPHERE: f32 = 3.0;
+const LIGHT_RECT: f32 = 4.0;
 
 // 距离衰减：物理上的平方反比，再乘一个窗函数在 range 处平滑归零。
 //
@@ -70,6 +74,21 @@ fn light_sample_direction(light: Light, world_position: vec3<f32>) -> vec4<f32> 
 
     var attenuation = light_distance_attenuation(distance, light.direction.w);
 
+    if (light.position.w == LIGHT_RECT) {
+        // 矩形面光源的方向取「指向代表点」，而不是指向中心：
+        // 贴着板子的表面看到的是最近的那一块，不是中心。
+        let closest = light_rect_closest(light, world_position);
+        let to_closest = closest - world_position;
+        let closest_distance = length(to_closest);
+        if (closest_distance <= 1e-5) {
+            return vec4<f32>(0.0, 1.0, 0.0, 0.0);
+        }
+        return vec4<f32>(
+            to_closest / closest_distance,
+            light_distance_attenuation(closest_distance, light.direction.w),
+        );
+    }
+
     if (light.position.w == LIGHT_SPOT) {
         // 着色点相对聚光灯轴线的夹角余弦。
         let cos_angle = dot(normalize(light.direction.xyz), -l);
@@ -77,6 +96,101 @@ fn light_sample_direction(light: Light, world_position: vec3<f32>) -> vec4<f32> 
     }
 
     return vec4<f32>(l, attenuation);
+}
+
+// 聚光灯的 cookie UV：把着色点投到光的成像平面上。
+//
+// 这就是一次以光源为视点的透视投影，只是不必真的建一个矩阵——
+// 光轴、右轴、上轴三者构成一个正交基，把「从光指向着色点」的向量
+// 拆到这个基上，再除以「沿光轴的距离 × tan(外锥角)」就得到 [-1,1]。
+//
+// 上轴由 `cross(方向, 右轴)` 得到而不是单独存一个：三者正交，
+// 存两个就够，第三个是叉积。
+//
+// 返回 [0,1] 的 UV。锥外的点会落在 [0,1] 之外，但**不特判**——
+// 锥形衰减那一步已经把锥外的强度压成 0 了，这里再判一次是白花的分支。
+fn light_cookie_uv(light: Light, world_position: vec3<f32>) -> vec2<f32> {
+    let forward = normalize(light.direction.xyz);
+    let right = normalize(light.right.xyz);
+    let up = cross(forward, right);
+
+    let to_point = world_position - light.position.xyz;
+    // 沿光轴的距离。太小的话除下来会爆，夹一个下限。
+    let axial = max(dot(to_point, forward), 1e-4);
+    // 外锥在这个距离上的半径。`tan` 在 CPU 侧算好了。
+    let extent = max(axial * light.right.w, 1e-6);
+
+    let u = dot(to_point, right) / extent;
+    let v = dot(to_point, up) / extent;
+    // [-1,1] → [0,1]。v 取反：贴图的 v 向下，而上轴向上。
+    return vec2<f32>(u * 0.5 + 0.5, 0.5 - v * 0.5);
+}
+
+// ── 矩形面光源 ──
+//
+// 用的**不是** LTC（线性变换余弦）。LTC 要两张拟合出来的查找表，
+// 而那些表是离线拟合的产物，没法在引擎里生成。这里走的是另一条路：
+//
+// - **漫反射**：矩形对着色点张成的立体角，有闭式解（Lambert 1760 的
+//   多边形形状因子）。这一半是**精确的**，不是近似。
+// - **高光**：代表点近似（MRP）——在矩形上找一个离「理想反射方向」
+//   最近的点，当成一盏点光源。这一半是近似的：掠射角下高光的形状
+//   会比真实的短一点。
+//
+// 取舍写在这儿：LTC 的高光更准，但它要的那两张表这个引擎给不出来，
+// 而漫反射这一半反倒是 LTC 也只能逼近的。
+
+// 把一个点夹到矩形上，返回世界坐标。
+//
+// 高光的代表点靠它：先求出「理想反射方向和光平面的交点」，
+// 再夹进矩形的边界里。
+fn light_rect_closest(light: Light, point: vec3<f32>) -> vec3<f32> {
+    let forward = normalize(light.direction.xyz);
+    let right = normalize(light.right.xyz);
+    let up = cross(forward, right);
+
+    let offset = point - light.position.xyz;
+    let u = clamp(dot(offset, right), -light.params.x, light.params.x);
+    let v = clamp(dot(offset, up), -light.params.y, light.params.y);
+    return light.position.xyz + right * u + up * v;
+}
+
+// 矩形对着色点张成的立体角乘以余弦，也就是漫反射的形状因子。
+//
+// 做法是把矩形的四条边看成四段弧：每条边贡献
+// `acos(dot(v_i, v_j)) * dot(cross(v_i, v_j), n)`，四条加起来除以 2π。
+// 这是多边形光源的经典闭式解，**精确**而不是近似。
+fn light_rect_form_factor(light: Light, world_position: vec3<f32>, n: vec3<f32>) -> f32 {
+    let forward = normalize(light.direction.xyz);
+    let right = normalize(light.right.xyz);
+    let up = cross(forward, right);
+    let half = vec2<f32>(light.params.x, light.params.y);
+
+    // 四个角，逆时针（从正面看）。顺序反了形状因子会是负的，
+    // 结果是整块面板变成「吸光」的黑洞。
+    let center = light.position.xyz;
+    var corners = array<vec3<f32>, 4>(
+        center - right * half.x - up * half.y,
+        center + right * half.x - up * half.y,
+        center + right * half.x + up * half.y,
+        center - right * half.x + up * half.y,
+    );
+
+    // 背面不发光：着色点在板子背后时直接返回 0。
+    if (dot(world_position - center, forward) <= 0.0) {
+        return 0.0;
+    }
+
+    var sum = 0.0;
+    for (var i = 0; i < 4; i = i + 1) {
+        let a = normalize(corners[i] - world_position);
+        let b = normalize(corners[(i + 1) % 4] - world_position);
+        // `acos` 的定义域是 [-1,1]，浮点误差会越界，夹一下。
+        let angle = acos(clamp(dot(a, b), -1.0, 1.0));
+        sum += angle * dot(normalize(cross(a, b)), n);
+    }
+    // 除以 2π 归一化。负值意味着矩形整个在表面背后。
+    return max(sum / 6.2831853, 0.0);
 }
 
 // 半球光的环境项：按法线在地面色和天空色之间插值。

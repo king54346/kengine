@@ -221,6 +221,7 @@ impl Clusters {
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
         globals: &wgpu::Buffer,
+        probe_irradiance: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("kengine globals bind group"),
@@ -241,6 +242,10 @@ impl Clusters {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: self.indices.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: probe_irradiance.as_entire_binding(),
                 },
             ],
         })
@@ -752,6 +757,14 @@ pub struct Renderer {
     globals_layout: wgpu::BindGroupLayout,
     /// 聚簇前向着色：光源数组 + 每簇名单。
     clusters: Clusters,
+    /// 每个光照探针的漫反射球谐。第 0 组永远是全局环境，
+    /// 之后依次是各个反射探针——层号和 `object.probe_position.w` 是同一个。
+    probe_irradiance: wgpu::Buffer,
+    /// 上面那块缓冲能装下几组（不是几个字节）。
+    probe_irradiance_capacity: u64,
+    /// 已上传的 cookie 图集，以及它对应的源纹理 id。
+    cookie: Option<GpuTexture>,
+    cookie_id: Option<Uuid>,
 
     object_layout: wgpu::BindGroupLayout,
     object_buffer: wgpu::Buffer,
@@ -902,6 +915,12 @@ struct DefaultTextures {
 /// `min_uniform_buffer_offset_alignment` 的倍数——各家硬件普遍是 256，
 /// WebGPU 的下限保证也是 256，直接按它对齐最省事。
 const SHADOW_GLOBALS_STRIDE: u64 = 256;
+
+/// 一个探针的球谐在缓冲里占多少字节：9 个 `vec4<f32>`。
+///
+/// 用 `vec4` 而不是 `vec3` 装三个分量，是因为 WGSL 的 `vec3` 在数组里
+/// 仍按 16 字节对齐——省不下来，写成 `vec4` 反而少一处对不齐的机会。
+const PROBE_SH_STRIDE: u64 = (kpbr::ibl::SH_COEFFICIENT_COUNT * 16) as u64;
 
 /// 一份自定义材质钩子编译出来的四条管线。
 ///
@@ -1058,6 +1077,20 @@ impl Renderer {
                     },
                     count: None,
                 },
+                // 每个光照探针的漫反射球谐，9 个 vec4 一组，第 0 组是全局环境。
+                //
+                // 放存储缓冲而不是塞进 `Globals`：uniform 的大小写死在管线里，
+                // 而探针数量是场景说了算的。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -1069,7 +1102,21 @@ impl Renderer {
         });
 
         let clusters = Clusters::new(&device);
-        let globals_bind_group = clusters.bind_group(&device, &globals_layout, &globals_buffer);
+        // 一上来只给全局环境那一组。探针是加载时才有的东西，
+        // 大多数场景一个都不加，先开一大块纯属浪费。
+        let probe_irradiance_capacity = 1;
+        let probe_irradiance = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kengine probe irradiance"),
+            size: probe_irradiance_capacity * PROBE_SH_STRIDE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let globals_bind_group = clusters.bind_group(
+            &device,
+            &globals_layout,
+            &globals_buffer,
+            &probe_irradiance,
+        );
 
         // ── group(1)：每个实例一份的变换与材质参数 ──
         // 用存储缓冲而非「uniform + 动态偏移」：后者每个对象都要重新绑一次绑定组，
@@ -1271,6 +1318,28 @@ impl Renderer {
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
+                    count: None,
+                },
+                // 聚光灯的投影贴图（cookie / gobo）图集，一层一张图案。
+                //
+                // 和自定义材质的纹理数组是同一个套路：换贴图要换绑定组，
+                // 而光照是在一个 pass 里一次算完的，中途换不了。
+                // 没设图集时绑那张 1×1 白图的一层数组视图——
+                // 「没有 cookie」于是等价于「乘 1」。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
                 // 屏幕空间环境光遮蔽。关着的时候绑一张 1×1 白图。
@@ -1485,6 +1554,7 @@ impl Renderer {
             &scene_color_view,
             &placeholder_depth,
             ssao.occlusion_view(),
+            &default_textures.white,
         );
         let brdf_bind_group_transparent = create_brdf_lut(
             &device,
@@ -1495,6 +1565,7 @@ impl Renderer {
             &scene_color_view,
             &depth_view,
             ssao.occlusion_view(),
+            &default_textures.white,
         );
         let post = PostProcess::new(&device, config.width, config.height, config.format);
         // 粒子画在主 pass 里，因此目标格式与深度格式都要与主 pass 一致。
@@ -1524,7 +1595,11 @@ impl Renderer {
             globals_buffer,
             globals_bind_group,
             globals_layout,
+            probe_irradiance,
+            probe_irradiance_capacity,
             clusters,
+            cookie: None,
+            cookie_id: None,
             object_layout,
             object_buffer,
             object_bind_group,
@@ -1584,9 +1659,57 @@ impl Renderer {
         renderer
     }
 
+    /// 当前该绑的 cookie 图集。没设过就用那张 1×1 白图。
+    ///
+    /// 白图只有一层，采任何层号都得到白色——「没有 cookie」于是等价于
+    /// 「乘 1」，着色器不必为它写分支。和缺贴图时绑白图是同一个套路。
+    fn cookie_texture(&self) -> &GpuTexture {
+        self.cookie
+            .as_ref()
+            .unwrap_or(&self.default_textures.white)
+    }
+
     /// 重建 group(3) 的两份绑定组。
     ///
     /// 环境图、场景颜色、场景深度里任何一个换了都要调。
+    /// 把全局环境和各个探针的球谐写进缓冲。返回缓冲有没有被重开。
+    ///
+    /// 第 0 组是全局环境，之后依次是 [`kscene::Scene::reflection_probes`]
+    /// 里的探针——顺序必须和 `probe::select` 返回的下标一致，
+    /// 否则物体会拿到**别的房间**的环境光。这一点没有任何东西会报错，
+    /// 只是墙的颜色不对。
+    fn upload_probe_irradiance(&mut self, scene: &kscene::Scene) -> bool {
+        let probes = scene.reflection_probes();
+        let count = probes.len() as u64 + 1;
+
+        let mut data: Vec<[f32; 4]> =
+            Vec::with_capacity(count as usize * kpbr::ibl::SH_COEFFICIENT_COUNT);
+        let mut push = |harmonics: &kpbr::ibl::SphericalHarmonics| {
+            for coefficient in harmonics.coefficients() {
+                data.push([coefficient.x, coefficient.y, coefficient.z, 0.0]);
+            }
+        };
+        push(scene.environment().harmonics());
+        for entry in probes {
+            push(&entry.irradiance);
+        }
+
+        let mut regrew = false;
+        if count > self.probe_irradiance_capacity {
+            self.probe_irradiance_capacity = count.next_power_of_two();
+            self.probe_irradiance = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("kengine probe irradiance"),
+                size: self.probe_irradiance_capacity * PROBE_SH_STRIDE,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            regrew = true;
+        }
+        self.queue
+            .write_buffer(&self.probe_irradiance, 0, bytemuck::cast_slice(&data));
+        regrew
+    }
+
     fn rebuild_scene_bind_groups(&mut self) {
         self.brdf_bind_group = create_brdf_lut(
             &self.device,
@@ -1597,6 +1720,7 @@ impl Renderer {
             &self.scene_color_view,
             &self.placeholder_depth,
             self.ssao.occlusion_view(),
+            self.cookie_texture(),
         );
         self.brdf_bind_group_transparent = create_brdf_lut(
             &self.device,
@@ -1607,6 +1731,7 @@ impl Renderer {
             &self.scene_color_view,
             &self.depth_view,
             self.ssao.occlusion_view(),
+            self.cookie_texture(),
         );
     }
 
@@ -1983,6 +2108,19 @@ impl Renderer {
         lights.extend_from_slice(&clustered_lights);
         let light_count = lights.len();
 
+        // ── cookie 图集 ──
+        //
+        // 换了才重传。图集是长期资源，每帧重传一张多层纹理是实打实的浪费。
+        // 换了之后 group(3) 要重建——旧的绑定组还指着已经没人用的那块显存。
+        let atlas_id = scene.cookie_atlas().map(ktexture::Texture::id);
+        if atlas_id != self.cookie_id {
+            self.cookie = scene
+                .cookie_atlas()
+                .map(|texture| upload_texture(&self.device, &self.queue, texture));
+            self.cookie_id = atlas_id;
+            self.rebuild_scene_bind_groups();
+        }
+
         // ── HDR 环境图 ──
         // 只在版本号变了时重传：一条 256×128 的 mip 链是几兆的浮点数据，
         // 每帧重传纯属浪费，而它只在换环境图时才变。
@@ -2064,11 +2202,21 @@ impl Renderer {
             view,
             projection,
         );
-        if regrew {
+        // ── 光照探针的漫反射球谐 ──
+        //
+        // 每帧重写。一组是 144 字节，几十个探针也就几 KB——比起为了
+        // 省这点带宽而去追踪「球谐什么时候变了」（换 HDR、加探针、
+        // 改环境强度、程序化天空被改……），每帧写一次要可靠得多。
+        let probe_regrew = self.upload_probe_irradiance(scene);
+
+        if regrew || probe_regrew {
             // 缓冲重开之后旧的绑定组还指着已经没人用的那块内存。
-            self.globals_bind_group =
-                self.clusters
-                    .bind_group(&self.device, &self.globals_layout, &self.globals_buffer);
+            self.globals_bind_group = self.clusters.bind_group(
+                &self.device,
+                &self.globals_layout,
+                &self.globals_buffer,
+                &self.probe_irradiance,
+            );
         }
 
         let shadow_enabled = !cascades.is_empty() && light_count > 0;
@@ -3705,6 +3853,7 @@ fn create_brdf_lut(
     scene_color_view: &wgpu::TextureView,
     scene_depth_view: &wgpu::TextureView,
     ssao_view: &wgpu::TextureView,
+    cookie: &GpuTexture,
 ) -> wgpu::BindGroup {
     const SIZE: u32 = 64;
 
@@ -3825,6 +3974,14 @@ fn create_brdf_lut(
             wgpu::BindGroupEntry {
                 binding: 7,
                 resource: wgpu::BindingResource::TextureView(scene_depth_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: wgpu::BindingResource::TextureView(&cookie.array_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 10,
+                resource: wgpu::BindingResource::Sampler(&cookie.sampler),
             },
             wgpu::BindGroupEntry {
                 binding: 8,

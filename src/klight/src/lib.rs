@@ -72,6 +72,21 @@ pub enum LightKind {
         /// 地面反射的颜色。天空的颜色用 [`Light::color`]。
         ground_color: Vec3,
     },
+    /// 矩形面光源：一块会发光的矩形板子。
+    ///
+    /// 和点光源的区别是**它有面积**：高光会拉成一条，边缘的阴影是软的，
+    /// 而不是点光源那种针尖一样的亮点。窗户、灯箱、屏幕都是这个形状。
+    ///
+    /// 朝向是所在节点的 -Z，宽沿 +X、高沿 +Y。**只向正面发光**——
+    /// 背面是黑的，和真实的灯箱一样。
+    Rect {
+        /// 宽（沿节点的 X 轴）。
+        width: f32,
+        /// 高（沿节点的 Y 轴）。
+        height: f32,
+        /// 作用半径。
+        range: f32,
+    },
     /// 聚光灯：锥形光束。
     Spot {
         /// 作用半径。
@@ -91,6 +106,7 @@ impl LightKind {
             Self::Point { .. } => 1.0,
             Self::Spot { .. } => 2.0,
             Self::Hemisphere { .. } => 3.0,
+            Self::Rect { .. } => 4.0,
         }
     }
 
@@ -98,6 +114,7 @@ impl LightKind {
     pub fn range(&self) -> f32 {
         match self {
             Self::Directional | Self::Hemisphere { .. } => 0.0,
+            Self::Rect { range, .. } => *range,
             Self::Point { range } | Self::Spot { range, .. } => *range,
         }
     }
@@ -125,6 +142,17 @@ pub struct Light {
     ///
     /// 灯和物体**两边都得同意**：任一方把对方的层关掉就不照。
     pub mask: u32,
+    /// 投影贴图（cookie / gobo）在**场景的 cookie 图集**里的层号，**加一**。
+    ///
+    /// `0` 表示不投图案。加一是为了让「没设」和「用第 0 层」分得开——
+    /// 用 `Option<u32>` 的话每盏灯要多占 8 字节，而这是要传上显存的。
+    ///
+    /// 图集由 [`Scene::set_cookie_atlas`](kscene::Scene::set_cookie_atlas)
+    /// 登记，必须是一张多层纹理（[`Texture::from_layers`](ktexture::Texture::from_layers)）。
+    ///
+    /// **只对聚光灯有意义**。点光源没有朝向，投不出图案；
+    /// 方向光的投影是正交的，那要另一套矩阵。
+    pub cookie: u32,
 }
 
 impl Default for Light {
@@ -138,6 +166,7 @@ impl Default for Light {
             // 全 1：默认照亮一切。默认给 1 的话，
             // 「没设过掩码的灯」和「只在第 0 层的灯」就分不开了。
             mask: u32::MAX,
+            cookie: 0,
         }
     }
 }
@@ -155,6 +184,7 @@ impl LightKind {
             Self::Point { .. } => 1,
             Self::Spot { .. } => 2,
             Self::Hemisphere { .. } => 3,
+            Self::Rect { .. } => 4,
         }
     }
 }
@@ -182,6 +212,11 @@ impl kcore::visitor::Visit for LightKind {
                 3 => Self::Hemisphere {
                     ground_color: Vec3::ZERO,
                 },
+                4 => Self::Rect {
+                    width: 0.0,
+                    height: 0.0,
+                    range: 0.0,
+                },
                 other => {
                     return Err(kcore::visitor::error::VisitError::User(format!(
                         "未知的光源类型标签 {other}"
@@ -203,6 +238,15 @@ impl kcore::visitor::Visit for LightKind {
                 outer_angle.visit("OuterAngle", &mut region)?;
             }
             Self::Hemisphere { ground_color } => ground_color.visit("GroundColor", &mut region)?,
+            Self::Rect {
+                width,
+                height,
+                range,
+            } => {
+                width.visit("Width", &mut region)?;
+                height.visit("Height", &mut region)?;
+                range.visit("Range", &mut region)?;
+            }
         }
 
         Ok(())
@@ -233,6 +277,14 @@ impl kcore::visitor::Visit for Light {
         } else if region.is_reading() {
             self.mask = u32::MAX;
         }
+
+        // cookie 同理：后加的字段，老存档读不到就当没有。
+        let mut cookie = self.cookie;
+        if cookie.visit("Cookie", &mut region).is_ok() {
+            self.cookie = cookie;
+        } else if region.is_reading() {
+            self.cookie = 0;
+        }
         Ok(())
     }
 }
@@ -250,6 +302,27 @@ impl Light {
                 range: range.max(0.0),
             },
             intensity: 20.0,
+            ..Default::default()
+        }
+    }
+
+    /// 矩形面光源：一块会发光的板子。
+    ///
+    /// 朝向是所在节点的 -Z，宽沿 +X、高沿 +Y。**只向正面发光**。
+    ///
+    /// 和点光源的区别是它**有面积**：高光会拉成一条而不是一个亮点，
+    /// 这是窗户、灯箱、屏幕看起来对不对的关键。
+    ///
+    /// 强度默认给 10：面光源的能量摊在整块面积上，按点光源那个 20
+    /// 会亮得过头。
+    pub fn rect(width: f32, height: f32, range: f32) -> Self {
+        Self {
+            kind: LightKind::Rect {
+                width: width.max(1e-4),
+                height: height.max(1e-4),
+                range: range.max(0.0),
+            },
+            intensity: 10.0,
             ..Default::default()
         }
     }
@@ -287,6 +360,21 @@ impl Light {
     /// 指定颜色。
     pub fn with_color(mut self, color: Vec3) -> Self {
         self.color = color;
+        self
+    }
+
+    /// 给这盏聚光灯挂一张投影贴图（cookie / gobo）。
+    ///
+    /// `layer` 是场景 cookie 图集里的层号（从 0 数）。传 [`None`] 摘掉。
+    ///
+    /// ```
+    /// # use klight::Light;
+    /// let gobo = Light::spot(10.0, 20.0, 30.0).with_cookie(Some(2));
+    /// // 内部存的是「层号 + 1」，0 留给「没有 cookie」。
+    /// assert_eq!(gobo.cookie, 3);
+    /// ```
+    pub fn with_cookie(mut self, layer: Option<u32>) -> Self {
+        self.cookie = layer.map_or(0, |index| index + 1);
         self
     }
 
@@ -346,7 +434,25 @@ impl Light {
             LightKind::Hemisphere { ground_color } => {
                 [ground_color.x, ground_color.y, ground_color.z, 0.0]
             }
+            // 矩形面光源没有内外锥，那两个槽位正好放半宽半高。
+            // 存半边长而不是全长：着色器算四个角时用的就是半边长，
+            // 每个片元省两次除法。
+            LightKind::Rect { width, height, .. } => [width * 0.5, height * 0.5, 0.0, 0.0],
             _ => [cos_inner, cos_outer, 0.0, 0.0],
+        };
+
+        // 右轴：节点的 +X。非均匀缩放下它未必和方向正交，
+        // 但归一化之后足够——着色器那边会拿它和方向叉出上轴，
+        // 真正歪掉要等到有人给灯加剪切变换，那时该修的是那个变换。
+        let right = world_transform
+            .x_axis
+            .truncate()
+            .normalize_or(Vec3::X);
+        // 聚光灯的外锥正切，cookie 投影要它把方向转成 UV。
+        // 在这里算一次，省掉每个片元一次 `tan`。
+        let tan_outer = match self.kind {
+            LightKind::Spot { outer_angle, .. } => outer_angle.to_radians().tan(),
+            _ => 0.0,
         };
 
         GpuLight {
@@ -354,7 +460,8 @@ impl Light {
             direction: [direction.x, direction.y, direction.z, self.kind.range()],
             color: [self.color.x, self.color.y, self.color.z, self.intensity],
             params,
-            extra: [self.mask, 0, 0, 0],
+            extra: [self.mask, self.cookie, 0, 0],
+            right: [right.x, right.y, right.z, tan_outer],
         }
     }
 }
@@ -371,12 +478,24 @@ pub struct GpuLight {
     pub color: [f32; 4],
     /// x = 内锥余弦，y = 外锥余弦。
     pub params: [f32; 4],
-    /// x = 照亮哪些层的位掩码，其余保留。
+    /// x = 照亮哪些层的位掩码，y = cookie 层号（0 = 没有），其余保留。
     ///
     /// 单开一个 `u32` 的 vec4 而不是把掩码塞进 `params.w`：
-    /// 掩码是**位**，从 `f32` 里 bitcast 出来能用但读起来像在耍花招，
-    /// 而且下一个要加的东西（cookie 贴图的层号）也是整数。
+    /// 掩码和层号都是**整数**，从 `f32` 里 bitcast 出来能用但读起来像在耍花招。
     pub extra: [u32; 4],
+    /// xyz = 光源的世界右轴（已归一化），w = 聚光灯的 `tan(外锥角)`。
+    ///
+    /// # 为什么要存右轴
+    ///
+    /// 两个地方要它，而且都**没法从方向反推**：
+    ///
+    /// - **cookie 的朝向**：一张投影图案是有上下左右的，绕光轴转一下
+    ///   图案就该跟着转。只有方向的话就只能拿世界上方去凑一个基，
+    ///   而那样图案永远转不了。
+    /// - **矩形面光源的平面**：宽沿右轴、高沿上轴，上轴由方向叉右轴得到。
+    ///
+    /// 多这 16 字节 × 256 盏灯是 4 KB，可以忽略。
+    pub right: [f32; 4],
 }
 
 impl Default for GpuLight {
@@ -409,10 +528,10 @@ mod test {
 
     #[test]
     fn gpu_layout_matches_wgsl() {
-        // 5 个 vec4 = 80 字节；与 light.wgsl 的 Light 结构一致。
+        // 6 个 vec4 = 96 字节；与 light.wgsl 的 Light 结构一致。
         // 对不上不会报错，只会让着色器逐盏读到错位的字段——
         // 画面上是一堆位置乱七八糟的灯。
-        assert_eq!(size_of::<GpuLight>(), 80);
+        assert_eq!(size_of::<GpuLight>(), 96);
         assert_eq!(size_of::<GpuLight>() % 16, 0);
     }
 
@@ -424,6 +543,47 @@ mod test {
         assert_eq!(light.intensity, 1.0);
         // 没有位置也没有范围，所以不参与聚簇。
         assert_eq!(light.kind.range(), 0.0);
+    }
+
+    #[test]
+    fn a_rect_light_stores_half_extents() {
+        // 存半边长而不是全长：着色器算四个角时用的就是半边长，
+        // 每个片元省两次除法。
+        let light = Light::rect(4.0, 6.0, 20.0);
+        let gpu = light.to_gpu(Mat4::IDENTITY);
+
+        assert_eq!(gpu.params[0], 2.0);
+        assert_eq!(gpu.params[1], 3.0);
+        assert_eq!(gpu.direction[3], 20.0, "作用半径该在 direction.w 里");
+    }
+
+    #[test]
+    fn the_right_axis_follows_the_node_rotation() {
+        // cookie 的图案和矩形面光源的平面都靠它定向。
+        // 从方向反推的话，绕光轴转一下图案不会跟着转。
+        use kmath::Quat;
+        let turned = Mat4::from_quat(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        let gpu = Light::spot(10.0, 10.0, 20.0).to_gpu(turned);
+
+        // 绕 Y 转 90°：+X 轴转到 -Z。
+        assert!((gpu.right[0] - 0.0).abs() < 1e-5, "{:?}", gpu.right);
+        assert!((gpu.right[2] + 1.0).abs() < 1e-5, "{:?}", gpu.right);
+    }
+
+    #[test]
+    fn the_spot_tangent_is_precomputed() {
+        // 在 CPU 上算一次，省掉每个片元一次 `tan`。
+        let gpu = Light::spot(10.0, 10.0, 45.0).to_gpu(Mat4::IDENTITY);
+        assert!((gpu.right[3] - 1.0).abs() < 1e-4, "tan(45°) 该是 1");
+    }
+
+    #[test]
+    fn a_cookie_layer_is_stored_plus_one() {
+        // 加一是为了让「没设」和「用第 0 层」分得开。
+        assert_eq!(Light::spot(1.0, 1.0, 1.0).cookie, 0);
+        assert_eq!(Light::spot(1.0, 1.0, 1.0).with_cookie(Some(0)).cookie, 1);
+        assert_eq!(Light::spot(1.0, 1.0, 1.0).with_cookie(Some(7)).cookie, 8);
+        assert_eq!(Light::spot(1.0, 1.0, 1.0).with_cookie(None).cookie, 0);
     }
 
     #[test]
