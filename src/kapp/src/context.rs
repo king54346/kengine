@@ -183,7 +183,8 @@ impl Context<'_> {
     ) -> Option<kpbr::hdr::HdrImage> {
         // `scene` 是 `&mut`，这里降级成 `&` 借出去。两个字段互不相干，
         // 借用检查器认这一手。
-        self.renderer.capture_environment(self.scene, position, face_size)
+        self.renderer
+            .capture_environment(self.scene, position, face_size)
     }
 
     /// 请求退出程序，本帧结束后生效。

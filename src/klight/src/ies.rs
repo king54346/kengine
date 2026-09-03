@@ -322,7 +322,11 @@ impl IesProfile {
         let size = size.max(1);
         let tan_cone = cone_angle.clamp(0.1, 89.9).to_radians().tan();
         // 峰值为 0 的表（全黑的文件）会让归一化除零，退化成全黑。
-        let inverse_peak = if self.peak > 0.0 { 1.0 / self.peak } else { 0.0 };
+        let inverse_peak = if self.peak > 0.0 {
+            1.0 / self.peak
+        } else {
+            0.0
+        };
 
         let mut data = Vec::with_capacity((size * size * 4) as usize);
         for y in 0..size {
@@ -555,7 +559,11 @@ mod tests {
         let profile = IesProfile::parse_str(&simple()).unwrap();
         // 方位角怎么转都该是同一个值。
         for azimuth in [0.0, 37.0, 90.0, 180.0, 271.0, 359.0] {
-            assert_eq!(profile.sample(45.0, azimuth), 500.0, "方位角 {azimuth} 处变了");
+            assert_eq!(
+                profile.sample(45.0, azimuth),
+                500.0,
+                "方位角 {azimuth} 处变了"
+            );
         }
     }
 
@@ -643,7 +651,11 @@ mod tests {
         ]
         .join("\n");
         let profile = IesProfile::parse_str(&donut).unwrap();
-        assert_eq!(profile.cone_angle(0.1), 40.0, "从里往外找会停在 0° 那个暗斑上");
+        assert_eq!(
+            profile.cone_angle(0.1),
+            40.0,
+            "从里往外找会停在 0° 那个暗斑上"
+        );
     }
 
     #[test]
@@ -735,10 +747,7 @@ mod tests {
             );
             // 错位最典型的症状就是把角度读成了光强。角度不会超过 360，
             // 而这几份的峰值都在几百到几千坎德拉。
-            assert!(
-                profile.cone_angle(0.01) >= 1.0,
-                "第 {index} 份算不出锥角"
-            );
+            assert!(profile.cone_angle(0.01) >= 1.0, "第 {index} 份算不出锥角");
         }
     }
 

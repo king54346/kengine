@@ -190,12 +190,12 @@ pub(crate) fn f16_to_f32(bits: u16) -> f32 {
     }
     if exponent == 0x1f {
         // Inf / NaN。尾数要保留：NaN 的载荷丢了会让调试变难。
-        return f32::from_bits(
-            ((bits & 0x8000) as u32) << 16 | (0xff << 23) | (mantissa << 13),
-        );
+        return f32::from_bits(((bits & 0x8000) as u32) << 16 | (0xff << 23) | (mantissa << 13));
     }
     // 正规数：指数换个偏移，尾数左移补齐位宽。
-    f32::from_bits(((bits & 0x8000) as u32) << 16 | ((exponent + 127 - 15) << 23) | (mantissa << 13))
+    f32::from_bits(
+        ((bits & 0x8000) as u32) << 16 | ((exponent + 127 - 15) << 23) | (mantissa << 13),
+    )
 }
 
 #[cfg(test)]

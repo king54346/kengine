@@ -763,6 +763,8 @@ pub struct Renderer {
     probe_irradiance: wgpu::Buffer,
     /// 上面那块缓冲能装下几组（不是几个字节）。
     probe_irradiance_capacity: u64,
+    /// group(3) 里那些一辈子不会变的东西（BRDF 查找表 + 三个采样器）。
+    scene_statics: SceneStatics,
     /// 已上传的 cookie 图集，以及它对应的源纹理 id。
     cookie: Option<GpuTexture>,
     cookie_id: Option<Uuid>,
@@ -926,6 +928,8 @@ struct CaptureFace<'a> {
     camera_to_world: Mat4,
     camera: Camera,
     buffer: &'a wgpu::Buffer,
+    /// 这一面在缓冲里的起点。六个面共用一块缓冲，见 `capture_environment`。
+    offset: u64,
     /// 拷贝的行距，已按 wgpu 要求对齐到 256 字节的整数倍。
     bytes_per_row: u32,
 }
@@ -1555,10 +1559,12 @@ impl Renderer {
         );
 
         let placeholder_depth = particle::create_placeholder_depth(&device);
-        let brdf_bind_group = create_brdf_lut(
+        // 查找表和采样器只造这一次，之后重建绑定组时直接借用。
+        let scene_statics = create_scene_statics(&device, &queue);
+        let brdf_bind_group = create_scene_bind_group(
             &device,
-            &queue,
             &brdf_layout,
+            &scene_statics,
             &shadow.depth_view,
             &placeholder_environment,
             &scene_color_view,
@@ -1566,10 +1572,10 @@ impl Renderer {
             ssao.occlusion_view(),
             &default_textures.white,
         );
-        let brdf_bind_group_transparent = create_brdf_lut(
+        let brdf_bind_group_transparent = create_scene_bind_group(
             &device,
-            &queue,
             &brdf_layout,
+            &scene_statics,
             &shadow.depth_view,
             &placeholder_environment,
             &scene_color_view,
@@ -1607,6 +1613,7 @@ impl Renderer {
             globals_layout,
             probe_irradiance,
             probe_irradiance_capacity,
+            scene_statics,
             clusters,
             cookie: None,
             cookie_id: None,
@@ -1719,10 +1726,10 @@ impl Renderer {
     }
 
     fn rebuild_scene_bind_groups(&mut self) {
-        self.brdf_bind_group = create_brdf_lut(
+        self.brdf_bind_group = create_scene_bind_group(
             &self.device,
-            &self.queue,
             &self.brdf_layout,
+            &self.scene_statics,
             &self.shadow.depth_view,
             &self.environment_view,
             &self.scene_color_view,
@@ -1730,10 +1737,10 @@ impl Renderer {
             self.ssao.occlusion_view(),
             self.cookie_texture(),
         );
-        self.brdf_bind_group_transparent = create_brdf_lut(
+        self.brdf_bind_group_transparent = create_scene_bind_group(
             &self.device,
-            &self.queue,
             &self.brdf_layout,
+            &self.scene_statics,
             &self.shadow.depth_view,
             &self.environment_view,
             &self.scene_color_view,
@@ -2055,11 +2062,24 @@ impl Renderer {
     /// 全景图是 `4 × face_size` 宽、`2 × face_size` 高——这个比例下
     /// 全景图的角分辨率和立方体面的正好相等，再高就是白插值。
     ///
-    /// # 很慢
+    /// # 有多贵
     ///
     /// 六次完整的渲染，外加两次离屏目标的重建（缩到正方形再改回来）。
-    /// 加载时做，或者放到一个明确的「重新烘焙」按钮后面。
-    /// **不要每帧调。**
+    /// 一个简单场景在这台机器上实测（release）：
+    ///
+    /// | `face_size` | 耗时 |
+    /// |---|---|
+    /// | 64 | 约 7 ms |
+    /// | 128 | 约 17 ms |
+    /// | 256 | 约 55 ms |
+    ///
+    /// 也就是说一次捕获相当于几帧到几十帧。**不要每帧调**，
+    /// 但「换个房间就重烘一次」是完全负担得起的。
+    ///
+    /// 这个数字曾经是 **500 ms 且和 `face_size` 无关**——
+    /// 罪魁是重建 group(3) 时会顺手在 CPU 上重算一遍 BRDF 积分查找表，
+    /// 而那张表是个常量。改成只造一次之后快了七十倍，
+    /// 顺带每次改窗口大小也少卡 190 ms。
     ///
     /// # 一次弹射
     ///
@@ -2102,9 +2122,16 @@ impl Renderer {
         // 读的时候必须按行跳过，否则整张图会逐行斜着错位。
         const BYTES_PER_PIXEL: u32 = 8; // Rgba16Float
         let bytes_per_row = (face_size * BYTES_PER_PIXEL).div_ceil(256) * 256;
+        let face_bytes = (bytes_per_row * face_size) as u64;
+        // 六个面共用一块缓冲，**画完六面才回读一次**。
+        //
+        // 一面一读的话每面都要 `poll` 到底等 GPU 排空。实测这一项并不是
+        // 大头（六个面加起来 2.5 ms），但六次全流水线停顿换成一次是白捡的，
+        // 代价只是显存多占五倍——128 的面是 0.8 MB，1024 的面是 48 MB。
+        // 捕获本来就是加载期的一次性操作。
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("kengine environment capture"),
-            size: (bytes_per_row * face_size) as u64,
+            size: face_bytes * 6,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -2128,13 +2155,13 @@ impl Renderer {
         // 那一帧会拿到一个巨大的 dt，粒子会瞬移一大段。
         let last_frame = self.last_frame;
 
-        let mut faces: Vec<capture::Face> = Vec::with_capacity(6);
         let mut failed = false;
         for index in 0..6 {
             let face = CaptureFace {
                 camera_to_world: capture::face_camera_to_world(position, index),
                 camera,
                 buffer: &staging,
+                offset: face_bytes * index as u64,
                 bytes_per_row,
             };
             if !matches!(
@@ -2145,25 +2172,17 @@ impl Renderer {
                 failed = true;
                 break;
             }
-            match self.read_capture(&staging, face_size, bytes_per_row) {
-                Some(pixels) => faces.push(capture::Face {
-                    size: face_size as usize,
-                    pixels,
-                }),
-                None => {
-                    failed = true;
-                    break;
-                }
-            }
         }
+
+        let decoded = if failed {
+            None
+        } else {
+            self.read_capture(&staging, face_size, bytes_per_row, face_bytes)
+        };
 
         self.resize_offscreen(previous.0, previous.1);
         self.last_frame = last_frame;
-        if failed {
-            return None;
-        }
-
-        let faces: [capture::Face; 6] = faces.try_into().ok()?;
+        let faces = decoded?;
         Some(capture::cube_to_equirect(
             &faces,
             face_size as usize * 4,
@@ -2171,13 +2190,14 @@ impl Renderer {
         ))
     }
 
-    /// 把一面的像素从暂存缓冲读回来，顺带解掉行填充和半精度。
+    /// 把六个面从暂存缓冲一次读回来，顺带解掉行填充和半精度。
     fn read_capture(
         &self,
         staging: &wgpu::Buffer,
         face_size: u32,
         bytes_per_row: u32,
-    ) -> Option<Vec<f32>> {
+        face_bytes: u64,
+    ) -> Option<[capture::Face; 6]> {
         let (sender, receiver) = std::sync::mpsc::channel();
         staging
             .slice(..)
@@ -2205,7 +2225,7 @@ impl Renderer {
             }
         }
 
-        let pixels = {
+        let faces = {
             let view = match staging.slice(..).get_mapped_range() {
                 Ok(view) => view,
                 Err(error) => {
@@ -2214,10 +2234,18 @@ impl Renderer {
                     return None;
                 }
             };
-            capture::decode_face(&view, face_size as usize, bytes_per_row as usize)
+            let size = face_size as usize;
+            std::array::from_fn(|index| capture::Face {
+                size,
+                pixels: capture::decode_face(
+                    &view[index * face_bytes as usize..],
+                    size,
+                    bytes_per_row as usize,
+                ),
+            })
         };
         staging.unmap();
-        Some(pixels)
+        Some(faces)
     }
 
     /// 绘制一帧。
@@ -3312,7 +3340,7 @@ impl Renderer {
                 wgpu::TexelCopyBufferInfo {
                     buffer: face.buffer,
                     layout: wgpu::TexelCopyBufferLayout {
-                        offset: 0,
+                        offset: face.offset,
                         bytes_per_row: Some(face.bytes_per_row),
                         rows_per_image: Some(self.config.height),
                     },
@@ -4108,17 +4136,26 @@ fn sky_shader_source() -> String {
 ///
 /// 值域在 [0, 1]，8 位精度足够，且保证在所有后端上都可过滤。
 #[allow(clippy::too_many_arguments)]
-fn create_brdf_lut(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    layout: &wgpu::BindGroupLayout,
-    shadow_view: &wgpu::TextureView,
-    environment_view: &wgpu::TextureView,
-    scene_color_view: &wgpu::TextureView,
-    scene_depth_view: &wgpu::TextureView,
-    ssao_view: &wgpu::TextureView,
-    cookie: &GpuTexture,
-) -> wgpu::BindGroup {
+/// group(3) 里那些**一辈子不会变**的东西：BRDF 查找表和三个采样器。
+///
+/// 单独拆出来是因为查找表要在 CPU 上跑一遍蒙特卡洛积分——64×64 一次
+/// 约 95 毫秒。原来它和绑定组造在同一个函数里，于是每次重建绑定组
+/// 都会重算一遍**同一张表**，而且一次重建要造两个绑定组（不透明和
+/// 半透明各一个），也就是每次 190 毫秒。
+///
+/// 重建绑定组的时机有：改窗口大小、换环境图、换 cookie 图集、
+/// 开关 SSAO、捕获环境。也就是说拖一下窗口边框会卡将近两百毫秒，
+/// 而这件事**没有任何症状**指向查找表——它只表现为「这引擎缩放窗口好卡」。
+struct SceneStatics {
+    /// BRDF 积分查找表。持有纹理本体是为了让视图一直有效。
+    _brdf_texture: wgpu::Texture,
+    brdf_view: wgpu::TextureView,
+    brdf_sampler: wgpu::Sampler,
+    environment_sampler: wgpu::Sampler,
+    shadow_sampler: wgpu::Sampler,
+}
+
+fn create_scene_statics(device: &wgpu::Device, queue: &wgpu::Queue) -> SceneStatics {
     const SIZE: u32 = 64;
 
     let lut = kpbr::ibl::brdf_lut(SIZE);
@@ -4163,7 +4200,7 @@ fn create_brdf_lut(
         size,
     );
 
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let brdf_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     // 环境图的采样器：水平要**重复**（全景图左右连续），
     // 垂直夹取（两极），并开三线性以便在 mip 之间平滑过渡。
     let environment_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -4203,17 +4240,45 @@ fn create_brdf_lut(
         ..Default::default()
     });
 
+    SceneStatics {
+        _brdf_texture: texture,
+        brdf_view,
+        brdf_sampler: sampler,
+        environment_sampler,
+        shadow_sampler,
+    }
+}
+
+/// 组装 group(3)：场景相关的贴图与采样器。
+///
+/// 参数多是必然的——group(3) 就是由这些各不相干的视图拼起来的，
+/// 打包成一个结构体只是把同一串东西换个地方写。
+#[allow(clippy::too_many_arguments)]
+///
+/// 每帧不变，但改窗口大小、换环境图、换 cookie 图集时要重建——
+/// 里面那几个视图会被换掉，旧绑定组指着的就是已经没人用的显存。
+fn create_scene_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    statics: &SceneStatics,
+    shadow_view: &wgpu::TextureView,
+    environment_view: &wgpu::TextureView,
+    scene_color_view: &wgpu::TextureView,
+    scene_depth_view: &wgpu::TextureView,
+    ssao_view: &wgpu::TextureView,
+    cookie: &GpuTexture,
+) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("kengine brdf bind group"),
+        label: Some("kengine scene bind group"),
         layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
+                resource: wgpu::BindingResource::TextureView(&statics.brdf_view),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::Sampler(&sampler),
+                resource: wgpu::BindingResource::Sampler(&statics.brdf_sampler),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
@@ -4221,7 +4286,7 @@ fn create_brdf_lut(
             },
             wgpu::BindGroupEntry {
                 binding: 3,
-                resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                resource: wgpu::BindingResource::Sampler(&statics.shadow_sampler),
             },
             wgpu::BindGroupEntry {
                 binding: 4,
@@ -4229,7 +4294,7 @@ fn create_brdf_lut(
             },
             wgpu::BindGroupEntry {
                 binding: 5,
-                resource: wgpu::BindingResource::Sampler(&environment_sampler),
+                resource: wgpu::BindingResource::Sampler(&statics.environment_sampler),
             },
             wgpu::BindGroupEntry {
                 binding: 6,

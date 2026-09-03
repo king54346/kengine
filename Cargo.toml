@@ -305,7 +305,3 @@ path = "examples/kengine/shader/shader_prepass.rs"
 [[example]]
 name = "skinning_blending"
 path = "examples/kengine/skinning_blending.rs"
-
-[[example]]
-name = "_capture_smoke"
-path = "examples/_capture_smoke.rs"
