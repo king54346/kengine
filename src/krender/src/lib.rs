@@ -8,6 +8,7 @@
 //! - `group(1)`：每个对象的变换与材质参数，用动态偏移在一个大缓冲里寻址
 //! - `group(2)`：材质贴图与采样器，按材质缓存
 
+mod capture;
 #[cfg(test)]
 mod cascade_batch_tests;
 mod compute;
@@ -915,6 +916,19 @@ struct DefaultTextures {
 /// `min_uniform_buffer_offset_alignment` 的倍数——各家硬件普遍是 256，
 /// WebGPU 的下限保证也是 256，直接按它对齐最省事。
 const SHADOW_GLOBALS_STRIDE: u64 = 256;
+
+/// 环境捕获时，一面的朝向和它的落点。
+///
+/// 存的是「相机到世界」而不是视图矩阵：`render_frame` 里那一段本来就
+/// 按这个方向取参数（`scene.active_camera` 返回的也是它），
+/// 换个形式反而要在两处各转一次。
+struct CaptureFace<'a> {
+    camera_to_world: Mat4,
+    camera: Camera,
+    buffer: &'a wgpu::Buffer,
+    /// 拷贝的行距，已按 wgpu 要求对齐到 256 字节的整数倍。
+    bytes_per_row: u32,
+}
 
 /// 一个探针的球谐在缓冲里占多少字节：9 个 `vec4<f32>`。
 ///
@@ -1994,9 +2008,22 @@ impl Renderer {
             return;
         }
         self.size = new_size;
+        // 交换链要先看到新尺寸，所以 config 在这里就得改；
+        // `resize_offscreen` 会再写一遍同样的值，无害。
         self.config.width = new_size.width;
         self.config.height = new_size.height;
         self.surface.configure(&self.device, &self.config);
+        self.resize_offscreen(new_size.width, new_size.height);
+    }
+
+    /// 重建所有**离屏**目标，不碰交换链。
+    ///
+    /// 环境捕获要临时把渲染尺寸改成一个正方形的小图，画完再改回来。
+    /// 走 [`resize`](Self::resize) 的话会连交换链一起重配两次——
+    /// 那是一次可见的窗口闪烁，而且捕获本来就不该影响正在显示的画面。
+    fn resize_offscreen(&mut self, width: u32, height: u32) {
+        self.config.width = width.max(1);
+        self.config.height = height.max(1);
         self.depth_view = Self::create_depth_view(&self.device, &self.config);
         // 场景颜色必须和 HDR 目标同尺寸，否则拷贝会被 wgpu 拒绝。
         let (scene_color, scene_color_view) =
@@ -2015,7 +2042,182 @@ impl Renderer {
         // 不重建的话自定义材质会按旧尺寸采样，折射整体错位。
         self.rebuild_scene_bind_groups();
         self.post
-            .resize(&self.device, new_size.width, new_size.height);
+            .resize(&self.device, self.config.width, self.config.height);
+    }
+
+    /// 站在 `position` 往六个方向各渲一遍，拼成一张等距柱状 HDR。
+    ///
+    /// 拿来喂 [`kscene::Scene::set_environment_hdr`] 或
+    /// [`kscene::Scene::add_reflection_probe`]，探针就照得出场景里
+    /// **真实的**东西，而不是一张手工准备的图。
+    ///
+    /// `face_size` 是每一面的边长，会被夹到 `[16, 1024]`。拼出来的
+    /// 全景图是 `4 × face_size` 宽、`2 × face_size` 高——这个比例下
+    /// 全景图的角分辨率和立方体面的正好相等，再高就是白插值。
+    ///
+    /// # 很慢
+    ///
+    /// 六次完整的渲染，外加两次离屏目标的重建（缩到正方形再改回来）。
+    /// 加载时做，或者放到一个明确的「重新烘焙」按钮后面。
+    /// **不要每帧调。**
+    ///
+    /// # 一次弹射
+    ///
+    /// 捕获用的是**当前**的环境。所以捕出来的图里，镜面物体反射的是
+    /// 旧环境。想要多次弹射就多捕几遍，每遍比上一遍准一点。
+    ///
+    /// # 不含 UI，也不走后处理
+    ///
+    /// 界面不该出现在反射里。色调映射和 bloom 是给屏幕看的，
+    /// 过一遍再当环境用，亮部会被压掉、反射里的高光全没了——
+    /// 所以主 pass 画完就把线性的 HDR 目标拷走。
+    ///
+    /// # 探针自己那个物体
+    ///
+    /// 站在一个球心上往外看，看到的是这个球的内壁——捕出来一片黑。
+    /// 所以要先把它藏起来：
+    ///
+    /// ```ignore
+    /// scene.get_mut(ball).visible = false;
+    /// scene.update();   // 可见性是 `update` 算的，不重算这一步不生效
+    /// let image = renderer.capture_environment(scene, position, 128);
+    /// scene.get_mut(ball).visible = true;
+    /// ```
+    ///
+    /// 那句 `update` 不能省。改 `visible` 只是改了节点上的标志，
+    /// 渲染器读的是 `update` 算好的那份——不重算的话球还在，
+    /// 而捕出来的黑图不会报任何错。
+    ///
+    /// 没有可用的显卡回读路径时返回 [`None`]。
+    pub fn capture_environment(
+        &mut self,
+        scene: &Scene,
+        position: Vec3,
+        face_size: u32,
+    ) -> Option<kpbr::hdr::HdrImage> {
+        let face_size = face_size.clamp(16, 1024);
+
+        // 每行的字节数要对齐到 256——`copy_texture_to_buffer` 的硬性要求。
+        // 不对齐的话 wgpu 直接拒绝，但**对齐之后每行末尾会多出一段填充**，
+        // 读的时候必须按行跳过，否则整张图会逐行斜着错位。
+        const BYTES_PER_PIXEL: u32 = 8; // Rgba16Float
+        let bytes_per_row = (face_size * BYTES_PER_PIXEL).div_ceil(256) * 256;
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kengine environment capture"),
+            size: (bytes_per_row * face_size) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        // 90° 视场角、正方形——六个面正好无缝拼成一个完整的球面。
+        // 差一点点都会在面与面之间留下一条没画到的缝。
+        let camera = Camera {
+            projection: kcamera::Projection::Perspective {
+                fov_y_degrees: 90.0,
+            },
+            // 近平面给小一点：探针常常摆在离墙很近的地方，
+            // 用默认的 0.1 会把贴身的那面墙裁掉，反射里出现一个洞。
+            z_near: 0.02,
+            ..Camera::default()
+        };
+
+        let previous = (self.config.width, self.config.height);
+        // 只重建离屏目标，不碰交换链——否则窗口会闪一下。
+        self.resize_offscreen(face_size, face_size);
+        // 捕获会推进渲染器自己的时钟。存一下再还原，不然捕获之后的
+        // 那一帧会拿到一个巨大的 dt，粒子会瞬移一大段。
+        let last_frame = self.last_frame;
+
+        let mut faces: Vec<capture::Face> = Vec::with_capacity(6);
+        let mut failed = false;
+        for index in 0..6 {
+            let face = CaptureFace {
+                camera_to_world: capture::face_camera_to_world(position, index),
+                camera,
+                buffer: &staging,
+                bytes_per_row,
+            };
+            if !matches!(
+                self.render_frame(scene, None, &[], Some(&face)),
+                RenderOutcome::Ok
+            ) {
+                klog::error!("捕获环境的第 {index} 面渲染失败");
+                failed = true;
+                break;
+            }
+            match self.read_capture(&staging, face_size, bytes_per_row) {
+                Some(pixels) => faces.push(capture::Face {
+                    size: face_size as usize,
+                    pixels,
+                }),
+                None => {
+                    failed = true;
+                    break;
+                }
+            }
+        }
+
+        self.resize_offscreen(previous.0, previous.1);
+        self.last_frame = last_frame;
+        if failed {
+            return None;
+        }
+
+        let faces: [capture::Face; 6] = faces.try_into().ok()?;
+        Some(capture::cube_to_equirect(
+            &faces,
+            face_size as usize * 4,
+            face_size as usize * 2,
+        ))
+    }
+
+    /// 把一面的像素从暂存缓冲读回来，顺带解掉行填充和半精度。
+    fn read_capture(
+        &self,
+        staging: &wgpu::Buffer,
+        face_size: u32,
+        bytes_per_row: u32,
+    ) -> Option<Vec<f32>> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+        // 映射的回调是在 poll 里跑的，不 poll 就永远等不到。
+        if self
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .is_err()
+        {
+            klog::error!("等待 GPU 回读时设备出错");
+            return None;
+        }
+        match receiver.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                klog::error!("捕获缓冲映射失败：{error}");
+                return None;
+            }
+            Err(_) => {
+                klog::error!("捕获缓冲映射的回调没有到达");
+                return None;
+            }
+        }
+
+        let pixels = {
+            let view = match staging.slice(..).get_mapped_range() {
+                Ok(view) => view,
+                Err(error) => {
+                    klog::error!("取捕获缓冲的映射区间失败：{error}");
+                    staging.unmap();
+                    return None;
+                }
+            };
+            capture::decode_face(&view, face_size as usize, bytes_per_row as usize)
+        };
+        staging.unmap();
+        Some(pixels)
     }
 
     /// 绘制一帧。
@@ -2025,18 +2227,44 @@ impl Renderer {
         ui: &Ui,
         gpu_particles: &[GpuParticles],
     ) -> RenderOutcome {
+        self.render_frame(scene, Some(ui), gpu_particles, None)
+    }
+
+    /// 一帧的全部工作。`render` 和环境捕获共用这一条。
+    ///
+    /// 两个参数决定了它们的区别：
+    ///
+    /// | | `render` | 环境捕获 |
+    /// |---|---|---|
+    /// | `ui` | `Some` | `None`——捕获的是环境，不该有界面 |
+    /// | `capture` | `None`，走后处理输出到交换链 | `Some`，主 pass 画完就把 HDR 目标拷走 |
+    ///
+    /// 捕获时**不跑后处理**：色调映射和 bloom 是给屏幕看的，
+    /// 而环境图要的是线性辐射亮度。过一遍色调映射再当环境用，
+    /// 亮部会被压掉，反射里的高光全没了。
+    fn render_frame(
+        &mut self,
+        scene: &Scene,
+        ui: Option<&Ui>,
+        gpu_particles: &[GpuParticles],
+        capture: Option<&CaptureFace<'_>>,
+    ) -> RenderOutcome {
         let now = std::time::Instant::now();
         let frame_delta = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
 
-        // 相机：取场景里第一个启用的；没有就用一个看向原点的默认视角。
-        let (camera_to_world, camera) = scene.active_camera().unwrap_or_else(|| {
-            let eye = Vec3::new(0.0, 1.5, 3.0);
-            (
-                Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y).inverse(),
-                Camera::default(),
-            )
-        });
+        // 相机：捕获时由调用方指定那一面的朝向；否则取场景里第一个
+        // 启用的，没有就用一个看向原点的默认视角。
+        let (camera_to_world, camera) = match capture {
+            Some(face) => (face.camera_to_world, face.camera),
+            None => scene.active_camera().unwrap_or_else(|| {
+                let eye = Vec3::new(0.0, 1.5, 3.0);
+                (
+                    Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y).inverse(),
+                    Camera::default(),
+                )
+            }),
+        };
 
         let view = camera_to_world.inverse();
         let camera_position = camera_to_world.to_scale_rotation_translation().2;
@@ -2571,7 +2799,7 @@ impl Renderer {
             self.sprites.upload(&self.device, &self.queue, texture);
         }
         // 界面贴图同理。`upload_image` 内部也会跳过已经见过的。
-        for texture in ui.textures() {
+        for texture in ui.map(Ui::textures).unwrap_or_default() {
             self.ui.upload_image(&self.device, &self.queue, texture);
         }
         // 排序必须在 CPU 上做：精灵全在同一平面，深度缓冲帮不上忙。
@@ -2589,20 +2817,25 @@ impl Renderer {
         // ── UI：几何与图集 ──
         // 图集只在版本号变了之后才重传：1024² 展开成 RGBA 是 4 MB，
         // 而绝大多数帧里图集是不动的。
-        let ui_list = ui.draw_list();
-        if ui.atlas_version() != self.ui_atlas_version {
-            let texture = ui.atlas_texture();
-            self.ui.prepare_atlas(&self.device, &self.queue, &texture);
-            self.ui_atlas_version = ui.atlas_version();
+        let ui_list = ui.map(|ui| {
+            let list = ui.draw_list();
+            if ui.atlas_version() != self.ui_atlas_version {
+                let texture = ui.atlas_texture();
+                self.ui.prepare_atlas(&self.device, &self.queue, &texture);
+                self.ui_atlas_version = ui.atlas_version();
+            }
+            self.ui.prepare(
+                &self.device,
+                &self.queue,
+                list,
+                [ui.screen().x, ui.screen().y],
+            );
+            list
+        });
+        if let Some(list) = ui_list {
+            stats.ui_vertices = list.vertices().len() as u32;
+            stats.draw_calls += list.batches().len() as u32;
         }
-        self.ui.prepare(
-            &self.device,
-            &self.queue,
-            ui_list,
-            [ui.screen().x, ui.screen().y],
-        );
-        stats.ui_vertices = ui_list.vertices().len() as u32;
-        stats.draw_calls += ui_list.batches().len() as u32;
 
         // ── 调试线：整帧攒下来的线段一次传上去 ──
         let gizmo_draw = self
@@ -2619,20 +2852,29 @@ impl Renderer {
         let morph_weight_count = morph_weights.len();
         self.morph_weight_scratch = morph_weights;
 
-        let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return RenderOutcome::Skip;
+        // 捕获时压根不碰交换链：那张纹理是给窗口的，而捕获的结果
+        // 要拷回内存。顺带也就不会因为窗口最小化（`Occluded`）
+        // 而跳过一次捕获——捕获是加载期的一次性操作，跳过就没了。
+        let output = if capture.is_some() {
+            None
+        } else {
+            match self.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(t)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(t) => Some(t),
+                wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                    return RenderOutcome::Skip;
+                }
+                wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                    return RenderOutcome::Reconfigure;
+                }
+                wgpu::CurrentSurfaceTexture::Validation => return RenderOutcome::Fatal,
             }
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                return RenderOutcome::Reconfigure;
-            }
-            wgpu::CurrentSurfaceTexture::Validation => return RenderOutcome::Fatal,
         };
-        let surface_view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let surface_view = output.as_ref().map(|output| {
+            output
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        });
         // 主 pass 与天空都画到 HDR 离屏目标，后处理链再输出到屏幕。
         let target = self.post.hdr_target();
 
@@ -3063,13 +3305,39 @@ impl Renderer {
             self.gizmos.draw(&mut pass, &gizmo_draw);
         }
 
+        // ── 捕获：主 pass 画完就把 HDR 目标拷走 ──
+        if let Some(face) = capture {
+            encoder.copy_texture_to_buffer(
+                self.post.hdr_texture().as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: face.buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(face.bytes_per_row),
+                        rows_per_image: Some(self.config.height),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: self.config.width,
+                    height: self.config.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            self.queue.submit(std::iter::once(encoder.finish()));
+            return RenderOutcome::Ok;
+        }
+
+        let surface_view = surface_view.expect("非捕获路径一定拿到了交换链纹理");
+
         // 后处理：Bloom + 色调映射，最终写入交换链。
         self.post.run(&self.queue, &mut encoder, &surface_view);
 
         // ── UI ──
         // 画在后处理之后：UI 的颜色是设计好的，过一遍色调映射会被整体压暗，
         // 白色不再是白色。代价是 UI 拿不到 bloom。
-        if !ui_list.is_empty() {
+        if let Some((ui, ui_list)) = ui.zip(ui_list)
+            && !ui_list.is_empty()
+        {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("kengine ui pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -3096,7 +3364,9 @@ impl Renderer {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        self.queue.present(output);
+        if let Some(output) = output {
+            self.queue.present(output);
+        }
 
         RenderOutcome::Ok
     }
@@ -4384,7 +4654,7 @@ mod test {
     fn the_light_buffer_is_no_longer_capped_at_sixteen() {
         // 这一条钉住的是这次改动的**目的**。上限退回去的话，
         // 「几百盏灯」那个例子会静默丢掉绝大多数灯。
-        assert!(MAX_LIGHTS >= 256);
+        const { assert!(MAX_LIGHTS >= 256) };
     }
 
     #[test]

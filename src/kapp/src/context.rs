@@ -143,10 +143,49 @@ pub struct Context<'a> {
     /// 开了之后遮蔽只削弱**环境光**：墙角、物体和地面的交线会自然变暗，
     /// 但被太阳直射的地方不受影响。
     pub ssao: &'a mut krender::SsaoSettings,
+    /// 渲染器本体。
+    ///
+    /// 不公开：这一层的设计是把**设置**镜像成上面那些字段
+    /// （`post`、`shadow`、`ssao`…），而不是把整个渲染器摊开——
+    /// 摊开之后插件能在 `update` 里直接改绑定组和管线，
+    /// 那些改动和引擎每帧自己的重建会互相覆盖，且不报错。
+    ///
+    /// 留这个字段是为了那些**必须真的用一次渲染器**的操作，
+    /// 目前只有 [`capture_environment`](Context::capture_environment)。
+    pub(crate) renderer: &'a mut krender::Renderer,
     pub(crate) exit_requested: &'a mut bool,
 }
 
 impl Context<'_> {
+    /// 站在 `position` 把场景往六个方向各渲一遍，拼成一张等距柱状 HDR。
+    ///
+    /// 拿它去喂 [`Scene::set_environment_hdr`](kscene::Scene::set_environment_hdr)
+    /// 或 [`Scene::add_reflection_probe`](kscene::Scene::add_reflection_probe)，
+    /// 探针就照得出场景里**真实的**东西，而不是一张手工准备的图。
+    ///
+    /// ```ignore
+    /// if let Some(image) = ctx.capture_environment(probe_position, 128) {
+    ///     ctx.scene.add_reflection_probe(probe, &image);
+    /// }
+    /// ```
+    ///
+    /// # 很慢
+    ///
+    /// 六次完整渲染。加载时做，或者放到一个明确的「重新烘焙」按钮后面。
+    /// **不要每帧调**——那是六倍的帧时间。
+    ///
+    /// 细节（一次弹射、不含 UI、不走后处理）见
+    /// [`krender::Renderer::capture_environment`]。
+    pub fn capture_environment(
+        &mut self,
+        position: kmath::Vec3,
+        face_size: u32,
+    ) -> Option<kpbr::hdr::HdrImage> {
+        // `scene` 是 `&mut`，这里降级成 `&` 借出去。两个字段互不相干，
+        // 借用检查器认这一手。
+        self.renderer.capture_environment(self.scene, position, face_size)
+    }
+
     /// 请求退出程序，本帧结束后生效。
     pub fn request_exit(&mut self) {
         *self.exit_requested = true;

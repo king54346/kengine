@@ -1704,6 +1704,7 @@ dependencies = [
  "kinput",
  "klog",
  "kmath",
+ "kpbr",
  "krender",
  "kscene",
  "kscript",
@@ -1883,7 +1884,9 @@ name = "klight"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "kasset",
  "kcore",
+ "klog",
  "kmath",
  "kshader",
 ]

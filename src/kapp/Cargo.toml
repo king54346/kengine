@@ -10,6 +10,8 @@ kinput = { path = "../kinput" }
 klog = { path = "../klog" }
 krender = { path = "../krender" }
 kmath = { path = "../kmath" }
+# 环境捕获的产物是一张 HDR 全景图。
+kpbr = { path = "../kpbr" }
 kscene = { path = "../kscene" }
 kui = { path = "../kui" }
 kscript = { path = "../kscript" }

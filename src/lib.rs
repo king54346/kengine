@@ -122,6 +122,9 @@ pub mod prelude {
     pub use kfont::{Align as TextAlign, Font, TextStyle, Wrap as TextWrap};
     pub use klight::cascade::{Cascade, CascadeSettings};
     pub use klight::{Light, LightKind};
+    // IES 配光曲线：和 `HdrImage` / `HdrLoader` 同一个待遇——
+    // 一个数据类型加一个加载器，摆灯时要用。
+    pub use klight::ies::{IesLoader, IesProfile};
     pub use kmesh::{Mesh, SkinVertex, Vertex};
     pub use kparticle::{
         BlendMode, Collision, CollisionResponse, ColorGradient, Curve, Emitter, EmitterShape,

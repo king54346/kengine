@@ -283,6 +283,10 @@ name = "lights_spotlight"
 path = "examples/kengine/new/lights_spotlight.rs"
 
 [[example]]
+name = "lights_ies_spotlight"
+path = "examples/kengine/new/lights_ies_spotlight.rs"
+
+[[example]]
 name = "lights_rectarealight"
 path = "examples/kengine/new/lights_rectarealight.rs"
 
@@ -291,9 +295,17 @@ name = "lightprobe"
 path = "examples/kengine/new/lightprobe.rs"
 
 [[example]]
+name = "lightprobe_cubecamera"
+path = "examples/kengine/new/lightprobe_cubecamera.rs"
+
+[[example]]
 name = "shader_prepass"
 path = "examples/kengine/shader/shader_prepass.rs"
 
 [[example]]
 name = "skinning_blending"
 path = "examples/kengine/skinning_blending.rs"
+
+[[example]]
+name = "_capture_smoke"
+path = "examples/_capture_smoke.rs"

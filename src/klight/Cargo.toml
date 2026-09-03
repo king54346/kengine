@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# `.ies` 走资源系统那条路，和 `.hdr`、贴图一样。
+kasset = { path = "../kasset" }
 kcore = { path = "../kcore" }
+klog = { path = "../klog" }
 kmath = { path = "../kmath" }
 # 光源要打包成 GPU uniform 数组。
 bytemuck = { version = "1.25.2", features = ["derive"] }

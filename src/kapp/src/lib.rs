@@ -392,6 +392,7 @@ impl App {
             if *system_stage != stage {
                 continue;
             }
+            let compute = krender::ComputeContext::from_renderer(&runtime.renderer);
             let mut context = Context {
                 scene: &mut runtime.scene,
                 input: &mut runtime.input,
@@ -407,11 +408,14 @@ impl App {
                 ui: &mut runtime.ui,
                 ui_input: &runtime.ui_input,
                 post: &mut post,
-                compute: krender::ComputeContext::from_renderer(&runtime.renderer),
+                // 先算好再进结构体：字面量里同时 `&runtime.renderer` 和
+                // `&mut runtime.renderer` 会被借用检查器拒绝。
+                compute,
                 gpu_particles: &mut runtime.gpu_particles,
                 shadow: &mut shadow,
                 clusters: &mut clusters,
                 ssao: &mut ssao,
+                renderer: &mut runtime.renderer,
                 exit_requested: &mut exit_requested,
             };
             system(&mut context);
@@ -467,6 +471,7 @@ impl App {
 
         let mut exit_requested = false;
         for plugin in &mut self.plugins {
+            let compute = krender::ComputeContext::from_renderer(&runtime.renderer);
             let mut context = Context {
                 scene: &mut runtime.scene,
                 input: &mut runtime.input,
@@ -482,11 +487,14 @@ impl App {
                 ui: &mut runtime.ui,
                 ui_input: &runtime.ui_input,
                 post: &mut post,
-                compute: krender::ComputeContext::from_renderer(&runtime.renderer),
+                // 先算好再进结构体：字面量里同时 `&runtime.renderer` 和
+                // `&mut runtime.renderer` 会被借用检查器拒绝。
+                compute,
                 gpu_particles: &mut runtime.gpu_particles,
                 shadow: &mut shadow,
                 clusters: &mut clusters,
                 ssao: &mut ssao,
+                renderer: &mut runtime.renderer,
                 exit_requested: &mut exit_requested,
             };
             callback(plugin, &mut context);

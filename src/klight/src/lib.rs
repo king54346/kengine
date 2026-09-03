@@ -20,6 +20,8 @@
 pub mod attenuation;
 pub mod cascade;
 pub mod cluster;
+/// IES 配光曲线：读灯具厂给的角度-光强表，烘成一张 cookie 贴图。
+pub mod ies;
 pub mod shadow;
 
 use bytemuck::{Pod, Zeroable};
