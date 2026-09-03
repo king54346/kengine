@@ -1893,6 +1893,32 @@ impl Scene {
         };
         (resolve(event.user_data1), resolve(event.user_data2))
     }
+
+    /// 同上，但解的是**接触力**事件的两个碰撞体。
+    ///
+    /// 单独一个方法而不是让两种事件共用：两个事件类型没有公共 trait，
+    /// 而为这件事引一个 trait 比多写四行更重。
+    pub fn contact_force_nodes(
+        &self,
+        event: &kphysics::ContactForceEvent,
+    ) -> (Option<Handle<Node>>, Option<Handle<Node>>) {
+        (
+            self.node_of_physics_user_data(event.user_data1),
+            self.node_of_physics_user_data(event.user_data2),
+        )
+    }
+
+    /// 把物理层的用户数据解回节点句柄。
+    ///
+    /// 场景把节点句柄编码进了每个碰撞体和刚体的用户数据，所以任何拿得到
+    /// `user_data` 的地方（射线命中、形状扫掠、各种事件）都能用它反查。
+    ///
+    /// 已经被删掉的节点会得到 [`None`]——「因为对方被销毁而结束接触」
+    /// 这类事件里这是常态，不是错误。
+    pub fn node_of_physics_user_data(&self, data: u128) -> Option<Handle<Node>> {
+        let handle = Handle::<Node>::decode_from_u128(data);
+        self.nodes.is_valid_handle(handle).then_some(handle)
+    }
 }
 
 impl Index<Handle<Node>> for Scene {

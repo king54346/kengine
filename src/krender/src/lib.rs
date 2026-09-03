@@ -485,6 +485,7 @@ struct GpuMesh {
 }
 
 /// 本帧一个待绘制对象。
+#[derive(Clone)]
 struct DrawCall {
     mesh_id: Uuid,
     /// 自定义材质钩子的 id；[`Uuid::nil`] 表示用标准着色器。
@@ -496,6 +497,11 @@ struct DrawCall {
     texture_key: [Uuid; TEXTURE_KEY_SLOTS],
     /// 是否走蒙皮管线。蒙皮与静态的顶点布局不同，不能混在一批里。
     skinned: bool,
+    /// 两面都画（关背面剔除）。
+    ///
+    /// 参与批次键：剔除模式是**管线状态**，一条绘制调用只能有一个，
+    /// 所以单面和双面的对象没法合在一批里。
+    double_sided: bool,
     /// 到相机的距离平方，半透明物体按它从远到近排序。
     ///
     /// 存平方而不是距离：只用来比大小，开方是白花的。
@@ -517,6 +523,8 @@ struct Batch {
     texture_key: [Uuid; TEXTURE_KEY_SLOTS],
     /// 是否走蒙皮管线。
     skinned: bool,
+    /// 两面都画。
+    double_sided: bool,
     /// 本批第一个实例在存储缓冲中的下标。
     first: u32,
     /// 实例数量。
@@ -668,6 +676,7 @@ fn build_batches_into(
                     if last.mesh_id == draw.mesh_id
                         && last.texture_key == draw.texture_key
                         && last.skinned == draw.skinned
+                        && last.double_sided == draw.double_sided
                         && last.shader_id == draw.shader_id =>
                 {
                     last.count += 1;
@@ -677,6 +686,7 @@ fn build_batches_into(
                     shader_id: draw.shader_id,
                     texture_key: draw.texture_key,
                     skinned: draw.skinned,
+                    double_sided: draw.double_sided,
                     first: instances.len() as u32 - 1,
                     count: 1,
                 }),
@@ -699,6 +709,8 @@ fn build_opaque_batches(
         // 先按它分开能把管线切换降到一次。
         a.skinned
             .cmp(&b.skinned)
+            // 剔除模式同样是管线状态，和蒙皮一个量级。
+            .then_with(|| a.double_sided.cmp(&b.double_sided))
             // 着色器排在网格之前：换管线比换顶点缓冲贵。
             .then_with(|| a.shader_id.cmp(&b.shader_id))
             .then_with(|| a.mesh_id.cmp(&b.mesh_id))
@@ -718,6 +730,7 @@ fn build_opaque_batches(
                 if last.mesh_id == draw.mesh_id
                     && last.texture_key == draw.texture_key
                     && last.skinned == draw.skinned
+                    && last.double_sided == draw.double_sided
                     && last.shader_id == draw.shader_id =>
             {
                 last.count += 1;
@@ -727,6 +740,7 @@ fn build_opaque_batches(
                 shader_id: draw.shader_id,
                 texture_key: draw.texture_key,
                 skinned: draw.skinned,
+                double_sided: draw.double_sided,
                 first: instances.len() as u32 - 1,
                 count: 1,
             }),
@@ -753,7 +767,6 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
-    pipeline: wgpu::RenderPipeline,
     depth_view: wgpu::TextureView,
     /// 深度／法线预通道 + SSAO。默认关着，关着时两个 pass 都不跑。
     ssao: ssao::Ssao,
@@ -780,9 +793,20 @@ pub struct Renderer {
     /// 当前对象缓冲能容纳的实例数。
     object_capacity: u64,
     /// 蒙皮管线。顶点布局多一路，只能单独开一条。
-    skinned_pipeline: wgpu::RenderPipeline,
-    transparent_pipeline: wgpu::RenderPipeline,
-    skinned_transparent_pipeline: wgpu::RenderPipeline,
+    /// 标准着色器的四条管线（蒙皮 × 半透明）。
+    standard_pipelines: MaterialPipelines,
+    /// 双面版本的管线，按钩子 id 索引（[`Uuid::nil`] 是标准着色器）。
+    ///
+    /// **懒建**：用到双面材质才会有条目。
+    double_sided_pipelines: FxHashMap<Uuid, MaterialPipelines>,
+    /// 标准着色器的模块，懒建双面管线时要用。
+    standard_module: wgpu::ShaderModule,
+    /// 自定义材质钩子编译出来的模块与它的 `override` 取值。
+    ///
+    /// 留着是为了**之后**还能拿它建双面变体——不留的话，一份钩子只有
+    /// 在「第一次用到它的那个材质恰好是双面的」时才建得出双面管线，
+    /// 而同一份钩子的另一个材质改成双面时就会静默退回单面。
+    material_modules: FxHashMap<Uuid, (wgpu::ShaderModule, Vec<(String, f64)>)>,
     /// 所有蒙皮实例的骨骼矩阵，拼在一个缓冲里。
     joint_buffer: wgpu::Buffer,
     joint_capacity: u64,
@@ -954,6 +978,67 @@ struct MaterialPipelines {
     skinned: wgpu::RenderPipeline,
     transparent: wgpu::RenderPipeline,
     skinned_transparent: wgpu::RenderPipeline,
+}
+
+/// 建一整套（蒙皮 × 半透明）四条管线。
+///
+/// 抽出来是因为这一套要建**三遍以上**：标准着色器一遍、每个自定义材质
+/// 钩子一遍，双面材质各再来一遍。抄三遍的话加一条管线状态就要改三处，
+/// 而漏改的那一处只表现为「某些材质的某个变体行为不一样」。
+fn build_material_pipelines(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    module: &wgpu::ShaderModule,
+    constants: &[(&str, f64)],
+    double_sided: bool,
+) -> MaterialPipelines {
+    let side = if double_sided { "双面" } else { "单面" };
+    MaterialPipelines {
+        opaque: create_standard_pipeline(
+            device,
+            layout,
+            module,
+            "vs_main",
+            &[Option::from(vertex_layout())],
+            &format!("kengine pipeline {side}"),
+            kmaterial::BlendMode::Opaque,
+            constants,
+            double_sided,
+        ),
+        skinned: create_standard_pipeline(
+            device,
+            layout,
+            module,
+            "vs_skinned",
+            &[Option::from(vertex_layout()), Option::from(skin_layout())],
+            &format!("kengine skinned pipeline {side}"),
+            kmaterial::BlendMode::Opaque,
+            constants,
+            double_sided,
+        ),
+        transparent: create_standard_pipeline(
+            device,
+            layout,
+            module,
+            "vs_main",
+            &[Option::from(vertex_layout())],
+            &format!("kengine transparent pipeline {side}"),
+            kmaterial::BlendMode::Alpha,
+            constants,
+            double_sided,
+        ),
+        skinned_transparent: create_standard_pipeline(
+            device,
+            layout,
+            module,
+            "vs_skinned",
+            &[Option::from(vertex_layout()), Option::from(skin_layout())],
+            &format!("kengine skinned transparent pipeline {side}"),
+            kmaterial::BlendMode::Alpha,
+            constants,
+            double_sided,
+        ),
+    }
 }
 
 impl MaterialPipelines {
@@ -1394,47 +1479,12 @@ impl Renderer {
 
         // 静态与蒙皮各一条管线：两者的顶点布局不同（蒙皮多一路顶点缓冲），
         // 而顶点布局是管线状态的一部分，没法在一条管线里切换。
-        let pipeline = create_standard_pipeline(
-            &device,
-            &pipeline_layout,
-            &shader,
-            "vs_main",
-            &[Option::from(vertex_layout())],
-            "kengine render pipeline",
-            kmaterial::BlendMode::Opaque,
-            &[],
-        );
-        let skinned_pipeline = create_standard_pipeline(
-            &device,
-            &pipeline_layout,
-            &shader,
-            "vs_skinned",
-            &[Option::from(vertex_layout()), Option::from(skin_layout())],
-            "kengine skinned pipeline",
-            kmaterial::BlendMode::Opaque,
-            &[],
-        );
-        // 半透明版本：只有混合方式和深度写入不同，着色器完全一样。
-        let transparent_pipeline = create_standard_pipeline(
-            &device,
-            &pipeline_layout,
-            &shader,
-            "vs_main",
-            &[Option::from(vertex_layout())],
-            "kengine transparent pipeline",
-            kmaterial::BlendMode::Alpha,
-            &[],
-        );
-        let skinned_transparent_pipeline = create_standard_pipeline(
-            &device,
-            &pipeline_layout,
-            &shader,
-            "vs_skinned",
-            &[Option::from(vertex_layout()), Option::from(skin_layout())],
-            "kengine skinned transparent pipeline",
-            kmaterial::BlendMode::Alpha,
-            &[],
-        );
+        //
+        // 双面那一套**不在这里建**：绝大多数项目一个双面材质都没有，
+        // 而四条管线的编译不是免费的。用到了再建（见
+        // `ensure_material_pipelines`）。
+        let standard_pipelines =
+            build_material_pipelines(&device, &pipeline_layout, &shader, &[], false);
 
         // ── 阴影 pass ──
         let shadow = create_shadow_resources(&device, ShadowSettings::default());
@@ -1611,7 +1661,6 @@ impl Renderer {
             queue,
             config,
             size,
-            pipeline,
             depth_view,
             globals_buffer,
             globals_bind_group,
@@ -1626,9 +1675,10 @@ impl Renderer {
             object_buffer,
             object_bind_group,
             object_capacity: Self::INITIAL_CAPACITY,
-            skinned_pipeline,
-            transparent_pipeline,
-            skinned_transparent_pipeline,
+            standard_pipelines,
+            double_sided_pipelines: FxHashMap::default(),
+            material_modules: FxHashMap::default(),
+            standard_module: shader,
             joint_buffer,
             joint_capacity: Self::INITIAL_JOINTS,
             joint_scratch: Vec::new(),
@@ -1764,6 +1814,50 @@ impl Renderer {
     /// 记一条错误日志并**退回标准管线**，同时把这个 id 记进缓存，
     /// 于是不会每帧重试一次编译——一个写错的着色器不该让帧率掉到个位数。
     fn ensure_material_pipelines(&mut self, material: &Material) -> Uuid {
+        let id = self.ensure_culled_pipelines(material);
+        // 双面那一套是**懒建**的：绝大多数项目一个双面材质都没有，
+        // 而四条管线的编译不是免费的。
+        if material.double_sided() {
+            self.ensure_double_sided_pipelines(id);
+        }
+        id
+    }
+
+    /// 建（或复用）双面那一套。`id` 是钩子 id，[`Uuid::nil`] 表示标准着色器。
+    fn ensure_double_sided_pipelines(&mut self, id: Uuid) {
+        if self.double_sided_pipelines.contains_key(&id) {
+            return;
+        }
+        let pipelines = if id.is_nil() {
+            build_material_pipelines(
+                &self.device,
+                &self.pipeline_layout,
+                &self.standard_module,
+                &[],
+                true,
+            )
+        } else {
+            let Some((module, constants)) = self.material_modules.get(&id) else {
+                // 钩子编译失败过，或者还没编译。这一帧退回单面。
+                return;
+            };
+            let borrowed: Vec<(&str, f64)> = constants
+                .iter()
+                .map(|(name, value)| (name.as_str(), *value))
+                .collect();
+            build_material_pipelines(
+                &self.device,
+                &self.pipeline_layout,
+                module,
+                &borrowed,
+                true,
+            )
+        };
+        klog::debug!("建了一套双面管线 {id}");
+        self.double_sided_pipelines.insert(id, pipelines);
+    }
+
+    fn ensure_culled_pipelines(&mut self, material: &Material) -> Uuid {
         let Some(shader) = material.shader() else {
             return Uuid::nil();
         };
@@ -1801,64 +1895,37 @@ impl Renderer {
         // 入口函数和混合方式，常量属于材质而不属于某条变体。
         let constants = data.constant_overrides();
 
-        let pipelines = MaterialPipelines {
-            opaque: create_standard_pipeline(
-                &self.device,
-                &self.pipeline_layout,
-                &module,
-                "vs_main",
-                &[Option::from(vertex_layout())],
-                "kengine material pipeline",
-                kmaterial::BlendMode::Opaque,
-                &constants,
-            ),
-            skinned: create_standard_pipeline(
-                &self.device,
-                &self.pipeline_layout,
-                &module,
-                "vs_skinned",
-                &[Option::from(vertex_layout()), Option::from(skin_layout())],
-                "kengine material skinned pipeline",
-                kmaterial::BlendMode::Opaque,
-                &constants,
-            ),
-            transparent: create_standard_pipeline(
-                &self.device,
-                &self.pipeline_layout,
-                &module,
-                "vs_main",
-                &[Option::from(vertex_layout())],
-                "kengine material transparent pipeline",
-                kmaterial::BlendMode::Alpha,
-                &constants,
-            ),
-            skinned_transparent: create_standard_pipeline(
-                &self.device,
-                &self.pipeline_layout,
-                &module,
-                "vs_skinned",
-                &[Option::from(vertex_layout()), Option::from(skin_layout())],
-                "kengine material skinned transparent pipeline",
-                kmaterial::BlendMode::Alpha,
-                &constants,
-            ),
-        };
+        let pipelines =
+            build_material_pipelines(&self.device, &self.pipeline_layout, &module, &constants, false);
 
         klog::debug!("编译了一份自定义材质着色器 {id}");
         self.material_pipelines.insert(id, pipelines);
+        self.material_modules.insert(
+            id,
+            (
+                module,
+                constants
+                    .iter()
+                    .map(|(name, value)| ((*name).to_string(), *value))
+                    .collect(),
+            ),
+        );
         id
     }
 
     /// 按批次选管线。
     fn pipeline_for(&self, batch: &Batch, transparent: bool) -> &wgpu::RenderPipeline {
+        if batch.double_sided
+            && let Some(pipelines) = self.double_sided_pipelines.get(&batch.shader_id)
+        {
+            return pipelines.pick(batch.skinned, transparent);
+        }
+        // 双面那一套没建出来时退回单面。画面上是「布的背面看不见」，
+        // 不是崩溃——而正常路径上 `ensure_material_pipelines` 已经建好了，
+        // 到不了这里。
         match self.material_pipelines.get(&batch.shader_id) {
             Some(pipelines) => pipelines.pick(batch.skinned, transparent),
-            None => match (batch.skinned, transparent) {
-                (false, false) => &self.pipeline,
-                (true, false) => &self.skinned_pipeline,
-                (false, true) => &self.transparent_pipeline,
-                (true, true) => &self.skinned_transparent_pipeline,
-            },
+            None => self.standard_pipelines.pick(batch.skinned, transparent),
         }
     }
 
@@ -2690,6 +2757,7 @@ impl Renderer {
                 shader_id,
                 texture_key,
                 skinned: skin_offset.is_some(),
+                double_sided: material.double_sided(),
                 depth,
                 aabb: item.aabb,
                 uniforms: ObjectUniforms {
@@ -3199,7 +3267,7 @@ impl Renderer {
                 multiview_mask: None,
             });
 
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(self.standard_pipelines.pick(false, false));
             pass.set_bind_group(0, &self.globals_bind_group, &[]);
             // 整个实例数组绑一次就够，着色器按实例号自己寻址。
             pass.set_bind_group(1, &self.object_bind_group, &[]);
@@ -3627,6 +3695,7 @@ fn create_standard_pipeline(
     label: &str,
     blend_mode: kmaterial::BlendMode,
     constants: &[(&str, f64)],
+    double_sided: bool,
 ) -> wgpu::RenderPipeline {
     let transparent = blend_mode == kmaterial::BlendMode::Alpha;
     // 顶点和片元两个阶段都要给：`override` 是模块级的声明，
@@ -3663,7 +3732,13 @@ fn create_standard_pipeline(
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
+            // 双面材质关掉剔除。布料、树叶这类只有一层三角形的东西，
+            // 剔掉背面之后从另一侧看就是透明的。
+            cull_mode: if double_sided {
+                None
+            } else {
+                Some(wgpu::Face::Back)
+            },
             polygon_mode: wgpu::PolygonMode::Fill,
             unclipped_depth: false,
             conservative: false,
@@ -5020,6 +5095,7 @@ mod test {
     /// 造一个只有网格与贴图键有意义的绘制项。
     fn draw(mesh: u128, texture: u128) -> DrawCall {
         DrawCall {
+            double_sided: false,
             mesh_id: Uuid::from_u128(mesh),
             shader_id: Uuid::nil(),
             texture_key: [Uuid::from_u128(texture); TEXTURE_KEY_SLOTS],
@@ -5028,6 +5104,56 @@ mod test {
             aabb: kmath::Aabb::new(kmath::Vec3::ZERO, kmath::Vec3::ONE),
             uniforms: ObjectUniforms::zeroed(),
         }
+    }
+
+    #[test]
+    fn double_sided_objects_cannot_share_a_batch_with_culled_ones() {
+        // 剔除模式是**管线状态**，一条绘制调用只能有一个。合批时不比它的话，
+        // 一批里第一个对象的剔除模式会套在整批上——布和地面挨在一起时，
+        // 要么布的背面没了，要么地面的背面被白画一遍。
+        //
+        // 两种症状都不报错。
+        let mut instances = Vec::new();
+        let mut bounds = Vec::new();
+        let flat = draw(1, 1);
+        let two_sided = DrawCall {
+            double_sided: true,
+            ..draw(1, 1)
+        };
+        // 其余的键完全一样，只有剔除模式不同。
+        let batches = build_batches_into(
+            &[flat.clone(), two_sided, flat],
+            &mut instances,
+            &mut bounds,
+            false,
+        );
+        assert_eq!(batches.len(), 3, "剔除模式不同的对象被合进了同一批");
+        assert!(!batches[0].double_sided);
+        assert!(batches[1].double_sided);
+        assert!(!batches[2].double_sided);
+    }
+
+    #[test]
+    fn sorting_groups_the_two_cull_modes_together() {
+        // 不透明那条路会重排。重排时把剔除模式和蒙皮放在同一优先级上，
+        // 是因为两者都是换管线——不分组的话单双面交替出现，
+        // 每个对象都要换一次管线。
+        let mut instances = Vec::new();
+        let mut bounds = Vec::new();
+        let flat = draw(1, 1);
+        let two_sided = DrawCall {
+            double_sided: true,
+            ..draw(1, 1)
+        };
+        let batches =
+            build_batches_into(
+                &[two_sided.clone(), flat.clone(), two_sided, flat],
+                &mut instances,
+                &mut bounds,
+                true,
+            );
+        assert_eq!(batches.len(), 2, "排序之后该只剩两批，实际 {}", batches.len());
+        assert_eq!(batches.iter().map(|b| b.count).sum::<u32>(), 4);
     }
 
     /// 同上，但带一个到相机的距离，用来验半透明排序。

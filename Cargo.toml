@@ -313,3 +313,27 @@ path = "examples/kengine/new/physics_instancing.rs"
 [[example]]
 name = "physics_terrain"
 path = "examples/kengine/new/physics_terrain.rs"
+
+[[example]]
+name = "physics_joints"
+path = "examples/kengine/new/physics_joints.rs"
+
+[[example]]
+name = "physics_character"
+path = "examples/kengine/new/physics_character.rs"
+
+[[example]]
+name = "physics_vehicle"
+path = "examples/kengine/new/physics_vehicle.rs"
+
+[[example]]
+name = "physics_cloth"
+path = "examples/kengine/new/physics_cloth.rs"
+
+[[example]]
+name = "physics_volume"
+path = "examples/kengine/new/physics_volume.rs"
+
+[[example]]
+name = "physics_break"
+path = "examples/kengine/new/physics_break.rs"

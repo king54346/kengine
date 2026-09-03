@@ -192,6 +192,14 @@ pub struct Material {
     /// 「没起名字」和「名字是空的」在按名字查找时是两回事。
     name: Option<String>,
     blend_mode: BlendMode,
+    /// 关掉背面剔除，两面都画。
+    ///
+    /// 布料、树叶、纸片这类**没有厚度**的东西必须开：它们只有一层三角形，
+    /// 剔掉背面之后从另一侧看就是透明的。
+    ///
+    /// 默认关着，因为它是有代价的——背面剔除本来能省掉一半的片元着色，
+    /// 而绝大多数模型是闭合的实体，背面本来就看不见。
+    double_sided: bool,
     /// 内容版本号，每次改动 +1。
     ///
     /// 用版本号而不是「改动就换新 id」：换 id 会让渲染器把管线、绑定组
@@ -233,6 +241,7 @@ impl Material {
             id: Uuid::new_v4(),
             name: None,
             blend_mode: BlendMode::Opaque,
+            double_sided: false,
             version: 0,
             shader: None,
             values: FxHashMap::default(),
@@ -333,6 +342,30 @@ impl Material {
     /// 这份材质的混合方式。
     pub fn blend_mode(&self) -> BlendMode {
         self.blend_mode
+    }
+
+    /// 两面都画还是只画正面。
+    pub fn double_sided(&self) -> bool {
+        self.double_sided
+    }
+
+    /// 设置是否两面都画。
+    ///
+    /// 开了之后**法线不会自动翻转**：背面用的仍是几何法线，所以从背面看
+    /// 光照是反的（该亮的地方暗）。布料这类薄片通常可以接受，
+    /// 要更准就得在材质钩子里按 `@builtin(front_facing)` 翻一下——
+    /// 而那个内置量目前没有传进 `Surface`。
+    pub fn set_double_sided(&mut self, double_sided: bool) {
+        if self.double_sided != double_sided {
+            self.double_sided = double_sided;
+            self.version = self.version.wrapping_add(1);
+        }
+    }
+
+    /// 建造式：两面都画。
+    pub fn with_double_sided(mut self) -> Self {
+        self.double_sided = true;
+        self
     }
 
     /// 设置混合方式。
@@ -630,6 +663,10 @@ impl Visit for Material {
                 value.visit("Value", &mut entry)?;
             }
         }
+
+        // 后加的字段，放在最后当可选区域：老存档里没有，读不到就当
+        // 「只画正面」——和加这个字段之前的行为一致。
+        let _ = self.double_sided.visit("DoubleSided", &mut region);
 
         Ok(())
     }
