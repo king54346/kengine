@@ -26,7 +26,10 @@ fn the_standard_shader_is_just_the_no_hook_case() {
     // 而且两个默认钩子确实都被补上了。
     let source = standard_shader_source();
     assert!(source.contains("fn material_surface"), "缺了默认的表面钩子");
-    assert!(source.contains("fn material_lighting"), "缺了默认的光照钩子");
+    assert!(
+        source.contains("fn material_lighting"),
+        "缺了默认的光照钩子"
+    );
 }
 
 #[test]
@@ -36,7 +39,10 @@ fn a_hook_may_define_only_the_lighting_model() {
         "fn material_lighting(s: ptr<function, Surface>, input: LightingInput) -> vec3<f32> { return input.radiance; }",
     );
     // 表面钩子由引擎补上，光照钩子不补（补了就是重复定义）。
-    assert!(source.contains(DEFAULT_SURFACE_HOOK), "没写的表面钩子该由引擎补");
+    assert!(
+        source.contains(DEFAULT_SURFACE_HOOK),
+        "没写的表面钩子该由引擎补"
+    );
     assert!(
         !source.contains(DEFAULT_LIGHTING_HOOK),
         "写了光照钩子还补默认实现，就是重复定义"
@@ -52,7 +58,10 @@ fn a_hook_may_define_only_the_surface() {
     let hook = "fn material_surface(s: Surface) -> Surface { return s; }";
     let source = material_shader_source(hook);
     assert!(!source.contains(DEFAULT_SURFACE_HOOK));
-    assert!(source.contains(DEFAULT_LIGHTING_HOOK), "没写的光照钩子该由引擎补");
+    assert!(
+        source.contains(DEFAULT_LIGHTING_HOOK),
+        "没写的光照钩子该由引擎补"
+    );
     compile(hook).expect("只写表面钩子该编译得过");
 }
 
@@ -131,7 +140,8 @@ fn a_commented_out_definition_fails_loudly_rather_than_silently() {
     // 这是个已知的粗糙之处，但后果是明确的编译错误（引擎不补默认实现，
     // naga 报 `unknown identifier`），而不是「静默用了默认实现」——
     // 后者才是真正找不出来的那种。
-    let hook = "// fn material_lighting(s: ptr<function, Surface>, i: LightingInput) -> vec3<f32> { }";
+    let hook =
+        "// fn material_lighting(s: ptr<function, Surface>, i: LightingInput) -> vec3<f32> { }";
     assert!(
         !material_shader_source(hook).contains(DEFAULT_LIGHTING_HOOK),
         "注释掉的定义该被当成「用户自己写了」，从而不补默认实现"
