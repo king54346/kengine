@@ -1845,13 +1845,7 @@ impl Renderer {
                 .iter()
                 .map(|(name, value)| (name.as_str(), *value))
                 .collect();
-            build_material_pipelines(
-                &self.device,
-                &self.pipeline_layout,
-                module,
-                &borrowed,
-                true,
-            )
+            build_material_pipelines(&self.device, &self.pipeline_layout, module, &borrowed, true)
         };
         klog::debug!("建了一套双面管线 {id}");
         self.double_sided_pipelines.insert(id, pipelines);
@@ -1895,8 +1889,13 @@ impl Renderer {
         // 入口函数和混合方式，常量属于材质而不属于某条变体。
         let constants = data.constant_overrides();
 
-        let pipelines =
-            build_material_pipelines(&self.device, &self.pipeline_layout, &module, &constants, false);
+        let pipelines = build_material_pipelines(
+            &self.device,
+            &self.pipeline_layout,
+            &module,
+            &constants,
+            false,
+        );
 
         klog::debug!("编译了一份自定义材质着色器 {id}");
         self.material_pipelines.insert(id, pipelines);
@@ -5145,14 +5144,18 @@ mod test {
             double_sided: true,
             ..draw(1, 1)
         };
-        let batches =
-            build_batches_into(
-                &[two_sided.clone(), flat.clone(), two_sided, flat],
-                &mut instances,
-                &mut bounds,
-                true,
-            );
-        assert_eq!(batches.len(), 2, "排序之后该只剩两批，实际 {}", batches.len());
+        let batches = build_batches_into(
+            &[two_sided.clone(), flat.clone(), two_sided, flat],
+            &mut instances,
+            &mut bounds,
+            true,
+        );
+        assert_eq!(
+            batches.len(),
+            2,
+            "排序之后该只剩两批，实际 {}",
+            batches.len()
+        );
         assert_eq!(batches.iter().map(|b| b.count).sum::<u32>(), 4);
     }
 

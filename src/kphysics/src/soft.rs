@@ -270,8 +270,8 @@ impl SoftBody {
             for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
                 let key = (a.min(b), a.max(b));
                 if edges.insert(key) {
-                    let rest = (particles[a as usize].position - particles[b as usize].position)
-                        .length();
+                    let rest =
+                        (particles[a as usize].position - particles[b as usize].position).length();
                     constraints.push(Distance {
                         a,
                         b,
@@ -622,11 +622,7 @@ impl SoftBody {
         if mesh.vertices().len() != self.vertex_to_particle.len() {
             return false;
         }
-        for (vertex, &particle) in mesh
-            .vertices_mut()
-            .iter_mut()
-            .zip(&self.vertex_to_particle)
-        {
+        for (vertex, &particle) in mesh.vertices_mut().iter_mut().zip(&self.vertex_to_particle) {
             vertex.position = self.particles[particle as usize].position.to_array();
         }
         // 法线必须重算：软体每帧都在变形，用旧法线的话光照会像
@@ -658,7 +654,11 @@ mod tests {
         let before = body.position(0).unwrap();
         step_for(&mut body, None, 0.5);
         let after = body.position(0).unwrap();
-        assert!(after.y < before.y - 0.5, "自由下落了 {} 米", before.y - after.y);
+        assert!(
+            after.y < before.y - 0.5,
+            "自由下落了 {} 米",
+            before.y - after.y
+        );
     }
 
     #[test]
@@ -880,15 +880,15 @@ mod tests {
 
         step_for(&mut body, Some(&world), 3.0);
 
-        let lowest = body
-            .positions()
-            .map(|p| p.y)
-            .fold(f32::INFINITY, f32::min);
+        let lowest = body.positions().map(|p| p.y).fold(f32::INFINITY, f32::min);
         assert!(
             lowest > 0.4,
             "布最低点到了 y = {lowest}，地面在 0.5 —— 它穿过去了"
         );
-        assert!(lowest < 0.7, "布停在 y = {lowest}，离地面太远，没真的落下来");
+        assert!(
+            lowest < 0.7,
+            "布停在 y = {lowest}，离地面太远，没真的落下来"
+        );
     }
 
     #[test]

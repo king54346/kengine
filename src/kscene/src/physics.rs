@@ -296,9 +296,9 @@ impl Collider {
     /// （两个网格的三角形彼此不相交时，碰撞检测认为它们没接触）。
     /// 会动的复杂物体该用 [`convex_hull`](Self::convex_hull) 或几块凸形状拼。
     pub fn trimesh(mesh: &kmesh::Mesh) -> Self {
-        Self::new(ColliderDesc::new(kphysics::ColliderShape::trimesh_from_mesh(
-            mesh,
-        )))
+        Self::new(ColliderDesc::new(
+            kphysics::ColliderShape::trimesh_from_mesh(mesh),
+        ))
     }
 
     /// 凸包碰撞体，取网格顶点的凸包。凹进去的部分会被填平。

@@ -441,7 +441,11 @@ mod tests {
         let end = world.body(vehicle.chassis()).unwrap().position();
         let travelled = (end - start).length();
         assert!(travelled > 1.0, "踩了两秒油门只走了 {travelled} 米");
-        assert!(vehicle.speed().abs() > 0.5, "车在动，速度却是 {}", vehicle.speed());
+        assert!(
+            vehicle.speed().abs() > 0.5,
+            "车在动，速度却是 {}",
+            vehicle.speed()
+        );
     }
 
     #[test]
@@ -497,14 +501,20 @@ mod tests {
         // 引擎的前方是 -Z，所以正油门该让 z 变负。
         assert!(
             position.z < -2.0,
-            "开了三秒 z = {}，该往 -Z 走两米以上", position.z
+            "开了三秒 z = {}，该往 -Z 走两米以上",
+            position.z
         );
         assert!(
             position.x.abs() < position.z.abs() * 0.3,
             "车往侧面(x = {})跑得比往前(z = {})还多 —— 四个轮子的轮轴多半不一致",
-            position.x, position.z
+            position.x,
+            position.z
         );
-        assert!(vehicle.speed() > 0.5, "往前开，速度却是 {}", vehicle.speed());
+        assert!(
+            vehicle.speed() > 0.5,
+            "往前开，速度却是 {}",
+            vehicle.speed()
+        );
     }
 
     #[test]
@@ -641,9 +651,6 @@ mod tests {
         drive(&mut world, &mut vehicle, 1.0);
         let after = vehicle.wheel(0).unwrap().rotation;
 
-        assert!(
-            before.angle_between(after) > 0.2,
-            "开了一秒轮子几乎没转"
-        );
+        assert!(before.angle_between(after) > 0.2, "开了一秒轮子几乎没转");
     }
 }

@@ -306,15 +306,18 @@ impl ComputeContext {
         Some(Self { device, queue })
     }
 
-    /// 这台设备。同一个 crate 里的测试要拿它自己建管线。
-    #[cfg(test)]
-    pub(crate) fn device(&self) -> &wgpu::Device {
+    /// 这台 wgpu 设备。
+    ///
+    /// 公开是为了那些引擎没有包装的用法：自己建渲染管线（测试里用得多）、
+    /// 接第三方的 wgpu 库、直接建纹理。用它建出来的资源和渲染器
+    /// **是同一台设备上的**（前提是这个上下文来自
+    /// [`from_renderer`](Self::from_renderer)），所以能互通。
+    pub fn device(&self) -> &wgpu::Device {
         &self.device
     }
 
     /// 这台设备的队列。
-    #[cfg(test)]
-    pub(crate) fn queue(&self) -> &wgpu::Queue {
+    pub fn queue(&self) -> &wgpu::Queue {
         &self.queue
     }
 
