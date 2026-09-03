@@ -395,6 +395,11 @@ struct ObjectUniforms {
     probe_min: [f32; 4],
     /// xyz = 视差盒最大角，w = 反射强度。
     probe_max: [f32; 4],
+    /// x = 次探针层号，y = 次探针权重，z = 次探针强度，w 保留。
+    ///
+    /// 用来抹掉「跨过探针盒边界时环境光跳一下」。权重为 0 时着色器
+    /// 直接跳过这一段，所以不在过渡带里的物体不付任何代价。
+    probe_blend: [f32; 4],
     /// 自定义材质参数，着色器钩子里是 `surface.params[i]`。
     ///
     /// 跟着**对象**走而不是单开一条材质绑定：那样同一个网格的多个实例
@@ -2638,24 +2643,38 @@ impl Renderer {
 
             // 逐对象选探针，用包围盒中心。横跨两个房间的大物体只能
             // 用一个探针——前向渲染的常规取舍，办法是把大物体拆开。
-            let (probe_position, probe_min, probe_max) =
-                match kpbr::probe::select(&probe_params, item.aabb.center()) {
-                    Some(index) => {
-                        let probe = &probe_params[index];
-                        (
-                            // 层号 +1：第 0 层是全局环境。
-                            probe.position.extend((index + 1) as f32).to_array(),
-                            probe
-                                .bounds
-                                .min
-                                .extend(if probe.parallax { 1.0 } else { 0.0 })
-                                .to_array(),
-                            probe.bounds.max.extend(probe.intensity).to_array(),
-                        )
-                    }
-                    // 没探针管它：层号 0（全局环境）、不做视差、强度 1。
-                    None => ([0.0; 4], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
-                };
+            let (primary, secondary, blend_weight) =
+                kpbr::probe::select_blend(&probe_params, item.aabb.center());
+            let (probe_position, probe_min, probe_max) = match primary {
+                Some(index) => {
+                    let probe = &probe_params[index];
+                    (
+                        // 层号 +1：第 0 层是全局环境。
+                        probe.position.extend((index + 1) as f32).to_array(),
+                        probe
+                            .bounds
+                            .min
+                            .extend(if probe.parallax { 1.0 } else { 0.0 })
+                            .to_array(),
+                        probe.bounds.max.extend(probe.intensity).to_array(),
+                    )
+                }
+                // 没探针管它：层号 0（全局环境）、不做视差、强度 1。
+                None => ([0.0; 4], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
+            };
+            // 过渡的那一半：次探针是罩住同一个点、盒子次小的那个；
+            // 没有就是全局环境（层 0，强度 1）。
+            let probe_blend = match (primary, secondary) {
+                // 压根没进任何探针，无处可过渡。
+                (None, _) => [0.0; 4],
+                (Some(_), Some(index)) => [
+                    (index + 1) as f32,
+                    blend_weight,
+                    probe_params[index].intensity,
+                    0.0,
+                ],
+                (Some(_), None) => [0.0, blend_weight, 1.0, 0.0],
+            };
 
             let model = item.transform;
             // 用包围盒中心而不是变换的平移：蒙皮网格的变换是单位阵，
@@ -2700,6 +2719,7 @@ impl Renderer {
                     flags: [item.light_mask, 0, 0, 0],
                     uv_transform: uv_transform_of(material),
                     probe_position,
+                    probe_blend,
                     probe_min,
                     probe_max,
                     params: custom_params_of(material),
@@ -4798,11 +4818,14 @@ mod test {
         assert_eq!(size_of::<Globals>() % 16, 0);
         // ObjectUniforms：mat4x4(64) × 2 + base_color(16) + f32 × 4 + emissive(16)
         //                 + 骨骼偏移(16) + 光照掩码(16) + UV 变换(16)
-        //                 + 探针 vec4 × 3(48) + 自定义参数 vec4 × 4(64)。
+        //                 + 探针 vec4 × 4(64) + 自定义参数 vec4 × 4(64)。
         // 四个 f32 恰好凑满 16 字节，emissive 才能落在 vec4 要求的对齐边界上。
+        //
+        // 探针那一组是四个而不是三个：采集点、盒子两角，再加一个
+        // 「过渡到哪个探针、权重多少」。
         assert_eq!(
             size_of::<ObjectUniforms>(),
-            64 * 2 + 16 * 3 + 16 * 3 + 16 * 3 + 16 * PARAM_SLOTS
+            64 * 2 + 16 * 3 + 16 * 3 + 16 * 4 + 16 * PARAM_SLOTS
         );
         assert_eq!(size_of::<ObjectUniforms>() % 16, 0);
     }

@@ -266,6 +266,17 @@ fn shade_light(
         // 而那一级根本没覆盖到那里——表现为屏幕四角的阴影消失。
         let view_depth = distance(world_position, globals.camera_position.xyz);
         let layer = pick_cascade(view_depth, globals.cascade_splits);
+        // 面光源的半影随「光源张开多大」变：贴着遮挡物是硬边，
+        // 远离之后糊开。张角 = 面板半尺寸 / 到面板的距离。
+        //
+        // 其他类型给 0，走原来那条固定半径的 PCF——加这个功能不改
+        // 已有场景的画面。
+        var penumbra_ratio = 0.0;
+        if (light.position.w == LIGHT_RECT) {
+            let half_size = max(light.params.x, light.params.y);
+            let to_light = length(light.position.xyz - world_position);
+            penumbra_ratio = half_size / max(to_light, 1e-3);
+        }
         visibility = shadow_factor_cascade(
             shadow_map,
             shadow_sampler,
@@ -275,6 +286,7 @@ fn shade_light(
             n_dot_l,
             globals.shadow_params.x,
             globals.shadow_params.z,
+            penumbra_ratio,
         );
     }
 
@@ -438,17 +450,35 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // 反射对了，环境光还是错的，而粗糙表面上后者占的比重更大，
     // 反而更显眼。
     let probe_layer = u32(max(object.probe_position.w, 0.0));
+    // 和镜面那边同一个口径：全局强度乘探针自己的强度。
+    // 两边用不同的口径，调探针强度时漫反射和反射会脱节。
+    let probe_intensity = globals.environment.sun_color.a * object.probe_max.w;
+    let blend_weight = object.probe_blend.y;
+
+    // 系数在这里就把强度乘进去，混完再当成强度 1 求值——
+    // 两个探针的强度可以不一样，先求值再混就得算两遍球谐。
     var probe_sh: array<vec4<f32>, 9>;
     let sh_base = probe_layer * 9u;
     for (var i = 0u; i < 9u; i = i + 1u) {
-        probe_sh[i] = probe_irradiance[sh_base + i];
+        probe_sh[i] = probe_irradiance[sh_base + i] * probe_intensity;
+    }
+    // 过渡：盒子边缘那一圈里，往「外面那个探针」（没有就是全局环境）
+    // 平滑过渡。权重为 0 的物体一个字节都不多读。
+    if (blend_weight > 0.0) {
+        let other_base = u32(max(object.probe_blend.x, 0.0)) * 9u;
+        let other_intensity = globals.environment.sun_color.a * object.probe_blend.z;
+        for (var i = 0u; i < 9u; i = i + 1u) {
+            probe_sh[i] = mix(
+                probe_sh[i],
+                probe_irradiance[other_base + i] * other_intensity,
+                blend_weight,
+            );
+        }
     }
     let ambient_diffuse = ibl_diffuse_from_sh(
         probe_sh,
         n,
-        // 和镜面那边同一个口径：全局强度乘探针自己的强度。
-        // 两边用不同的口径，调探针强度时漫反射和反射会脱节。
-        globals.environment.sun_color.a * object.probe_max.w,
+        1.0,
         albedo,
         metallic,
         occlusion,
@@ -482,8 +512,29 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             roughness,
             f0,
             brdf,
-            globals.environment.sun_color.a * object.probe_max.w,
+            probe_intensity,
         ) * occlusion;
+
+        // 镜面那一半也要过渡，否则漫反射平滑了、反射还在跳，
+        // 光滑物体上反而更扎眼。
+        //
+        // 次探针**不做视差校正**：那需要再带一个盒子（逐对象多两个
+        // vec4），而过渡带里两个探针本来就挨着，误差小且正在淡出。
+        // 这是个近似，写在这儿而不是假装没有。
+        if (blend_weight > 0.0) {
+            let other = ibl_specular_prefiltered(
+                prefiltered_env,
+                prefiltered_sampler,
+                object.probe_blend.x,
+                globals.ibl_params.x,
+                reflect(-v, n),
+                roughness,
+                f0,
+                brdf,
+                globals.environment.sun_color.a * object.probe_blend.z,
+            ) * occlusion;
+            ambient_specular = mix(ambient_specular, other, blend_weight);
+        }
     } else {
         ambient_specular = ibl_specular(globals.environment, reflection, roughness, f0, brdf) * occlusion;
     }
