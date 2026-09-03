@@ -56,6 +56,7 @@ mod debug;
 mod events;
 mod joint;
 mod query;
+mod soft;
 mod vehicle;
 mod visit;
 mod world;
@@ -70,6 +71,7 @@ pub use debug::PhysicsDebugOptions;
 pub use events::{CollisionEvent, ContactForceEvent};
 pub use joint::{JointDesc, JointKind, SphericalLimits};
 pub use query::{PointProjection, RayCastOptions, RayHit, ShapeCastOptions, ShapeHit};
+pub use soft::{SoftBody, SoftBodySettings};
 pub use vehicle::{VehicleController, WheelDesc, WheelState, WheelTuning};
 pub use world::{IntegrationParameters, PhysicsStats, PhysicsWorld};
 

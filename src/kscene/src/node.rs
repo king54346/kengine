@@ -396,7 +396,19 @@ impl Node {
         self.rigid_body.as_deref_mut()
     }
 
-    /// 碰撞体的只读引用。
+    /// 挂一个刚体，替换已有的。
+    ///
+    /// 和 [`with_rigid_body`](Self::with_rigid_body) 是同一件事的两种写法：
+    /// 建节点时用那个，之后再改用这个。
+    pub fn set_rigid_body(&mut self, body: RigidBody) {
+        self.rigid_body = Some(Box::new(body));
+    }
+
+    /// 摘掉刚体。摘掉之后这个节点的变换不再由物理写。
+    pub fn remove_rigid_body(&mut self) {
+        self.rigid_body = None;
+    }
+
     /// 挂一个碰撞体。
     pub fn set_collider(&mut self, collider: Collider) {
         self.collider = Some(Box::new(collider));

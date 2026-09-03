@@ -290,6 +290,39 @@ impl Collider {
         Self::new(ColliderDesc::capsule_y(half_height, radius))
     }
 
+    /// 三角网格碰撞体，直接拿一个渲染用的网格来建。
+    ///
+    /// **只适合静态几何**：三角网格没有「内部」，动态刚体用它会互相穿过去
+    /// （两个网格的三角形彼此不相交时，碰撞检测认为它们没接触）。
+    /// 会动的复杂物体该用 [`convex_hull`](Self::convex_hull) 或几块凸形状拼。
+    pub fn trimesh(mesh: &kmesh::Mesh) -> Self {
+        Self::new(ColliderDesc::new(kphysics::ColliderShape::trimesh_from_mesh(
+            mesh,
+        )))
+    }
+
+    /// 凸包碰撞体，取网格顶点的凸包。凹进去的部分会被填平。
+    pub fn convex_hull(mesh: &kmesh::Mesh) -> Self {
+        Self::new(ColliderDesc::new(
+            kphysics::ColliderShape::convex_hull_from_mesh(mesh),
+        ))
+    }
+
+    /// 高度场碰撞体。`heights` 行主序，`rows × cols` 个。
+    ///
+    /// `scale` 的 X/Z 是整片地形覆盖的范围，Y 是高度的倍率。
+    ///
+    /// 高度场比同样大小的三角网格省得多：碰撞检测知道它是个规则网格，
+    /// 可以直接由坐标算出落在哪一格，不用遍历三角形。地形该用这个。
+    pub fn heightfield(rows: usize, cols: usize, heights: Vec<f32>, scale: Vec3) -> Self {
+        Self::new(ColliderDesc::new(kphysics::ColliderShape::Heightfield {
+            rows,
+            cols,
+            heights: std::sync::Arc::new(heights),
+            scale,
+        }))
+    }
+
     /// 描述的只读引用。
     pub fn desc(&self) -> &ColliderDesc {
         &self.desc

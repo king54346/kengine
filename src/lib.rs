@@ -141,9 +141,10 @@ pub mod prelude {
         probe::ReflectionProbe,
     };
     pub use kphysics::{
-        BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, CollisionEvent, InteractionGroups,
-        JointDesc, JointHandle, JointKind, PhysicsDebugOptions, PhysicsWorld, RayCastOptions,
-        RayHit, RigidBodyDesc, RigidBodyType, ShapeCastOptions, SphericalLimits,
+        BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, CollisionEvent, ContactForceEvent,
+        InteractionGroups, JointDesc, JointHandle, JointKind, PhysicsDebugOptions, PhysicsWorld,
+        RayCastOptions, RayHit, RigidBodyDesc, RigidBodyType, ShapeCastOptions, SoftBody,
+        SoftBodySettings, SphericalLimits, VehicleController, WheelDesc, WheelState, WheelTuning,
     };
     pub use krender::{AntiAlias, PostSettings, RenderStats};
     pub use kscene::{

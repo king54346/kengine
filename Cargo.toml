@@ -305,3 +305,11 @@ path = "examples/kengine/shader/shader_prepass.rs"
 [[example]]
 name = "skinning_blending"
 path = "examples/kengine/skinning_blending.rs"
+
+[[example]]
+name = "physics_instancing"
+path = "examples/kengine/new/physics_instancing.rs"
+
+[[example]]
+name = "physics_terrain"
+path = "examples/kengine/new/physics_terrain.rs"
