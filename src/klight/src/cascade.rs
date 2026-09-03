@@ -310,9 +310,101 @@ pub fn shadow_visibility(matrix: Mat4, aabb: Aabb, resolution: u32, min_texels: 
     true
 }
 
+/// 从光空间矩阵反解「一个世界单位对应多少个 UV」。
+///
+/// 着色器里的软阴影要用它把半影的世界宽度换成纹素半径，而那段代码
+/// 只存在于 WGSL 里。这份 Rust 实现是它的对照——两边写的是同一个式子，
+/// 这里能测，那边不能。
+///
+/// # 为什么是「第一列作为线性型」
+///
+/// `clip.x = m[0][0]·wx + m[1][0]·wy + m[2][0]·wz + m[3][0]`，
+/// 也就是说裁剪空间的 x 是世界坐标的一个线性函数，梯度就是那三个系数
+/// 组成的向量。它的长度 = 裁剪空间 x 每走一个世界单位变化多少。
+/// 裁剪空间 x 跨越 `[-1, 1]`（宽度 2）而 UV 跨越 1，所以除以 2。
+///
+/// 只取 `m[0][0]` 是不行的：光斜着照时投影的 x 轴不与世界 x 轴对齐，
+/// 那样算出来的密度会偏小，半影跟着变窄——斜光下的软阴影会莫名其妙
+/// 变硬，而且不报任何错。
+pub fn uv_per_world_unit(matrix: Mat4) -> f32 {
+    kmath::Vec3::new(matrix.x_axis.x, matrix.y_axis.x, matrix.z_axis.x).length() * 0.5
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 光空间矩阵的密度反解必须和「实际量一遍」一致。
+    ///
+    /// 这一条守的是软阴影：半影的世界宽度要靠它换成纹素半径，
+    /// 算错了影子的糊度整体不对，而画面上只是「软了点」或「硬了点」。
+    #[test]
+    fn the_texel_density_can_be_recovered_from_the_matrix() {
+        let view_proj = Mat4::perspective_rh(60_f32.to_radians(), 16.0 / 9.0, 0.1, 200.0)
+            * Mat4::look_at_rh(Vec3::new(0.0, 3.0, 12.0), Vec3::ZERO, Vec3::Y);
+        let bounds = kmath::Aabb::new(Vec3::splat(-30.0), Vec3::splat(30.0));
+
+        // 几个方向，包括斜着照的——只取 m[0][0] 的写法正是在斜光下出错。
+        for direction in [
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(-0.4, -1.0, -0.3).normalize(),
+            Vec3::new(0.8, -0.5, 0.3).normalize(),
+        ] {
+            let cascades = compute(view_proj, direction, bounds, CascadeSettings::default());
+            assert!(!cascades.is_empty());
+            for (level, cascade) in cascades.iter().enumerate() {
+                let density = uv_per_world_unit(cascade.matrix);
+                assert!(
+                    density > 0.0 && density.is_finite(),
+                    "第 {level} 级密度是 {density}"
+                );
+
+                // 实际量一遍：沿投影自己的 x 轴走一小段，看 UV 走了多少。
+                // 投影的 x 轴就是那个线性型的方向。
+                let gradient = Vec3::new(
+                    cascade.matrix.x_axis.x,
+                    cascade.matrix.y_axis.x,
+                    cascade.matrix.z_axis.x,
+                )
+                .normalize();
+                let origin = bounds.center();
+                let step = 0.5;
+                let uv_a = to_uv_x(cascade.matrix, origin);
+                let uv_b = to_uv_x(cascade.matrix, origin + gradient * step);
+                let measured = (uv_b - uv_a).abs() / step;
+
+                assert!(
+                    (measured - density).abs() < density * 1e-3,
+                    "方向 {direction:?} 第 {level} 级：反解 {density}，实测 {measured}"
+                );
+            }
+        }
+    }
+
+    /// 世界坐标 → 光空间的 UV x 分量。
+    fn to_uv_x(matrix: Mat4, world: Vec3) -> f32 {
+        let clip = matrix * world.extend(1.0);
+        (clip.x / clip.w) * 0.5 + 0.5
+    }
+
+    #[test]
+    fn taking_only_the_diagonal_entry_would_be_wrong_for_a_slanted_light() {
+        // 这条是上面那条的「反证」：如果只取 m[0][0]，斜光下会算错。
+        // 没有它的话，上面那条测试在正下方的光下也能过，等于没测到点子上。
+        let view_proj = Mat4::perspective_rh(60_f32.to_radians(), 1.0, 0.1, 100.0)
+            * Mat4::look_at_rh(Vec3::new(0.0, 2.0, 8.0), Vec3::ZERO, Vec3::Y);
+        let bounds = kmath::Aabb::new(Vec3::splat(-20.0), Vec3::splat(20.0));
+        let direction = Vec3::new(-0.7, -0.6, -0.4).normalize();
+        let cascades = compute(view_proj, direction, bounds, CascadeSettings::default());
+
+        let matrix = cascades[0].matrix;
+        let correct = uv_per_world_unit(matrix);
+        let naive = matrix.x_axis.x.abs() * 0.5;
+        assert!(
+            (naive - correct).abs() > correct * 0.05,
+            "斜光下 m[0][0] 和正确值差不多（{naive} vs {correct}）—— 这条反证就没意义了"
+        );
+    }
 
     fn camera() -> Mat4 {
         let projection = Mat4::perspective_rh(1.0, 16.0 / 9.0, 0.1, 1000.0);

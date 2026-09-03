@@ -56,6 +56,7 @@ mod debug;
 mod events;
 mod joint;
 mod query;
+mod vehicle;
 mod visit;
 mod world;
 
@@ -69,6 +70,7 @@ pub use debug::PhysicsDebugOptions;
 pub use events::{CollisionEvent, ContactForceEvent};
 pub use joint::{JointDesc, JointKind, SphericalLimits};
 pub use query::{PointProjection, RayCastOptions, RayHit, ShapeCastOptions, ShapeHit};
+pub use vehicle::{VehicleController, WheelDesc, WheelState, WheelTuning};
 pub use world::{IntegrationParameters, PhysicsStats, PhysicsWorld};
 
 /// 从 4×4 世界变换矩阵里取出刚体位姿，返回 `(位置, 朝向)`，**丢弃缩放**。

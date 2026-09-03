@@ -195,7 +195,10 @@ pub fn select(probes: &[ReflectionProbe], point: Vec3) -> Option<usize> {
 ///
 /// 用 `smoothstep` 而不是线性：线性的话过渡带的**两端**各留一道
 /// 导数不连续的折线，在大片平坦的墙上仍然看得出两道边。
-pub fn select_blend(probes: &[ReflectionProbe], point: Vec3) -> (Option<usize>, Option<usize>, f32) {
+pub fn select_blend(
+    probes: &[ReflectionProbe],
+    point: Vec3,
+) -> (Option<usize>, Option<usize>, f32) {
     let mut inside: Vec<(usize, f32)> = probes
         .iter()
         .enumerate()
@@ -272,7 +275,10 @@ mod tests {
         let probes = [probe_at(Vec3::ZERO, 10.0, 1.0)];
         // 盒子是 -5..5，过渡带 1，所以 x = 5 处权重为 1。
         let (_, _, at_edge) = select_blend(&probes, Vec3::new(5.0, 0.0, 0.0));
-        assert!((at_edge - 1.0).abs() < 1e-5, "边界上的权重是 {at_edge}，该是 1");
+        assert!(
+            (at_edge - 1.0).abs() < 1e-5,
+            "边界上的权重是 {at_edge}，该是 1"
+        );
         // 刚进过渡带（离边 1）时权重回到 0。
         let (_, _, at_band) = select_blend(&probes, Vec3::new(4.0, 0.0, 0.0));
         assert!(at_band.abs() < 1e-5, "过渡带外沿的权重是 {at_band}，该是 0");

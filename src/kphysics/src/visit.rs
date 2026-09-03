@@ -269,6 +269,11 @@ impl Visit for ColliderDesc {
         self.emit_collision_events
             .visit("EmitCollisionEvents", &mut region)?;
         self.enabled.visit("Enabled", &mut region)?;
+        // 可选的尾部区域：老存档里没有这一项，读回来是 0（不上报），
+        // 和加这个字段之前的行为一致。
+        let _ = self
+            .contact_force_threshold
+            .visit("ContactForceThreshold", &mut region);
 
         Ok(())
     }

@@ -1867,6 +1867,18 @@ impl Scene {
         self.physics.collision_events()
     }
 
+    /// 上一次步进产生的**接触力**事件。
+    ///
+    /// 碰撞事件只说「碰上了」，说不出撞得有多狠。要判断「砸下来」还是
+    /// 「轻轻放上去」得看这里的力——碎裂、掉血、撞击音效都靠它。
+    ///
+    /// 只有设了
+    /// [`ColliderDesc::contact_force_threshold`](kphysics::ColliderDesc)
+    /// 的碰撞体才会上报。没设的话这里永远是空的，而且**不会有任何提示**。
+    pub fn contact_force_events(&self) -> &[kphysics::ContactForceEvent] {
+        self.physics.contact_force_events()
+    }
+
     /// 把一次碰撞事件里的两个碰撞体解回节点句柄。
     ///
     /// 已被删掉的碰撞体会得到 `None`——「因为对方被销毁而结束接触」的事件里

@@ -403,6 +403,17 @@ pub struct ColliderDesc {
     /// 是否上报碰撞开始 / 结束事件。默认关闭——事件是有成本的，
     /// 只给真正要监听的碰撞体打开。
     pub emit_collision_events: bool,
+    /// 上报接触力事件的阈值（牛顿）。0 表示不上报。
+    ///
+    /// 碰撞事件只说「碰上了」，说不出**撞得有多狠**——而「轻轻放上去」
+    /// 和「砸下来」在物理上是同一件事的两个极端。玻璃碎不碎、角色掉多少血、
+    /// 撞击音效多响，靠的都是这个。
+    ///
+    /// 阈值不是 0/1 开关而是一个力的下限：碰撞每帧都在发生（一摞箱子
+    /// 静止时每个接触点都有支撑力），阈值低了会被自重刷屏。
+    /// 一个 1 千克的物体静止在地上大约是 10 牛，所以想只捕捉「砸下来」
+    /// 就得给到几十上百。
+    pub contact_force_threshold: f32,
     /// 是否启用。
     pub enabled: bool,
 }
@@ -422,6 +433,7 @@ impl Default for ColliderDesc {
             friction_combine_rule: CoefficientCombineRule::Average,
             restitution_combine_rule: CoefficientCombineRule::Average,
             emit_collision_events: false,
+            contact_force_threshold: 0.0,
             enabled: true,
         }
     }
@@ -490,12 +502,25 @@ impl ColliderDesc {
         self
     }
 
+    /// 开启接触力上报，力超过 `threshold` 牛才报。
+    ///
+    /// 给 0 或负数等于关掉。
+    pub fn with_contact_force_threshold(mut self, threshold: f32) -> Self {
+        self.contact_force_threshold = threshold.max(0.0);
+        self
+    }
+
     pub(crate) fn build(&self, user_data: u128) -> Option<rg::Collider> {
         let shape = self.shape.to_shared_shape()?;
 
         let mut events = rapier3d::pipeline::ActiveEvents::empty();
         if self.emit_collision_events {
             events |= rapier3d::pipeline::ActiveEvents::COLLISION_EVENTS;
+        }
+        // 接触力事件是另一个开关。只开碰撞事件的话力事件一条都不会来，
+        // 而那正是「撞得够狠才碎」要的东西。
+        if self.contact_force_threshold > 0.0 {
+            events |= rapier3d::pipeline::ActiveEvents::CONTACT_FORCE_EVENTS;
         }
 
         Some(
@@ -510,6 +535,7 @@ impl ColliderDesc {
                 .friction_combine_rule(self.friction_combine_rule.to_rapier())
                 .restitution_combine_rule(self.restitution_combine_rule.to_rapier())
                 .active_events(events)
+                .contact_force_event_threshold(self.contact_force_threshold)
                 .enabled(self.enabled)
                 .user_data(user_data)
                 .build(),

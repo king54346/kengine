@@ -307,6 +307,23 @@ impl Collider {
         self.shape_dirty = true;
     }
 
+    /// 接触力的上报阈值（牛顿）。0 表示不上报。
+    pub fn contact_force_threshold(&self) -> f32 {
+        self.desc.contact_force_threshold
+    }
+
+    /// 改接触力的上报阈值。
+    ///
+    /// 阈值不是 0/1 开关：碰撞每帧都在发生（一摞箱子静止时每个接触点都有
+    /// 支撑力），给低了会被自重刷屏。1 千克的物体静止在地上约 10 牛。
+    pub fn set_contact_force_threshold(&mut self, threshold: f32) {
+        let threshold = threshold.max(0.0);
+        if self.desc.contact_force_threshold != threshold {
+            self.desc.contact_force_threshold = threshold;
+            self.desc_dirty = true;
+        }
+    }
+
     /// 是否是传感器。
     pub fn is_sensor(&self) -> bool {
         self.desc.is_sensor

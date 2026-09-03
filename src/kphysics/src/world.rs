@@ -618,6 +618,105 @@ mod test {
         (world, ball)
     }
 
+    /// 一个球从高处砸向地面，地面开了接触力上报。
+    ///
+    /// 返回世界和球的句柄。`threshold` 给 0 就是不上报。
+    fn ball_dropped_on_reporting_ground(threshold: f32) -> (PhysicsWorld, BodyHandle) {
+        let mut world = PhysicsWorld::new();
+
+        let ground = world.add_body(&RigidBodyDesc::fixed(), 0);
+        world
+            .add_collider(
+                &ColliderDesc::cuboid(Vec3::new(50.0, 0.5, 50.0))
+                    .with_contact_force_threshold(threshold),
+                Some(ground),
+                0,
+            )
+            .unwrap();
+
+        let ball = world.add_body(
+            &RigidBodyDesc::dynamic().with_position(Vec3::new(0.0, 8.0, 0.0)),
+            1,
+        );
+        world
+            .add_collider(&ColliderDesc::ball(0.5).with_density(20.0), Some(ball), 1)
+            .unwrap();
+
+        world.update_query_structures();
+        (world, ball)
+    }
+
+    /// 一路步进，返回途中见过的最大接触力。
+    fn peak_contact_force(world: &mut PhysicsWorld, seconds: f32) -> f32 {
+        let dt = 1.0 / 60.0;
+        let mut peak = 0.0f32;
+        for _ in 0..(seconds / dt) as usize {
+            world.step(dt);
+            for event in world.contact_force_events() {
+                peak = peak.max(event.total_force_magnitude);
+            }
+        }
+        peak
+    }
+
+    #[test]
+    fn a_contact_force_threshold_actually_produces_events() {
+        // 「设了阈值但一条事件都不来」是这类开关最典型的失败方式：
+        // 不报错、不崩、只是永远收不到——而调用方会以为「没撞够狠」。
+        let (mut world, _) = ball_dropped_on_reporting_ground(1.0);
+        let peak = peak_contact_force(&mut world, 3.0);
+        assert!(peak > 0.0, "开了阈值却一条接触力事件都没收到");
+    }
+
+    #[test]
+    fn no_threshold_means_no_contact_force_events() {
+        // 默认必须是关的：事件是有成本的，而且大多数碰撞体不需要。
+        let (mut world, _) = ball_dropped_on_reporting_ground(0.0);
+        let peak = peak_contact_force(&mut world, 3.0);
+        assert_eq!(peak, 0.0, "没设阈值也收到了接触力事件");
+    }
+
+    #[test]
+    fn a_higher_threshold_filters_out_the_gentler_contacts() {
+        // 阈值是个力的下限，不是 0/1 开关。调高之后只剩最狠的那一下——
+        // 这正是「砸下来才碎、放上去不碎」要的。
+        let (mut world, _) = ball_dropped_on_reporting_ground(1.0);
+        let peak = peak_contact_force(&mut world, 3.0);
+
+        // 用刚才那个峰值的一半当阈值：还该收得到。
+        let (mut world, _) = ball_dropped_on_reporting_ground(peak * 0.5);
+        let mid = peak_contact_force(&mut world, 3.0);
+        assert!(mid > 0.0, "阈值设在峰值一半却收不到事件");
+
+        // 设到峰值的十倍：一条都不该有。
+        let (mut world, _) = ball_dropped_on_reporting_ground(peak * 10.0);
+        let high = peak_contact_force(&mut world, 3.0);
+        assert_eq!(high, 0.0, "阈值远高于实际撞击力，却还是收到了事件");
+    }
+
+    #[test]
+    fn a_harder_impact_reports_a_bigger_force() {
+        // 力的大小要真的跟着撞击强度走，否则它只是个「碰上了」的复读机，
+        // 拿它做碎裂判定会变成「碰一下就碎」。
+        let mut gentle = {
+            let (mut world, ball) = ball_dropped_on_reporting_ground(1.0);
+            // 从很低的地方放下来。
+            if let Some(mut body) = world.body_mut(ball) {
+                body.set_position(Vec3::new(0.0, 1.2, 0.0), Quat::IDENTITY, true);
+            }
+            world
+        };
+        let soft = peak_contact_force(&mut gentle, 3.0);
+
+        let (mut world, _) = ball_dropped_on_reporting_ground(1.0);
+        let hard = peak_contact_force(&mut world, 3.0);
+
+        assert!(
+            hard > soft * 1.5,
+            "从 8 米砸下来({hard})和从 1.2 米放下来({soft})报出来的力差不多"
+        );
+    }
+
     fn step_for(world: &mut PhysicsWorld, seconds: f32) {
         let dt = 1.0 / 60.0;
         for _ in 0..(seconds / dt) as usize {

@@ -30,14 +30,16 @@ fn the_standard_shader_is_just_the_no_hook_case() {
         source.contains("fn material_lighting"),
         "缺了默认的光照钩子"
     );
-    assert!(source.contains("fn material_ambient"), "缺了默认的环境光钩子");
+    assert!(
+        source.contains("fn material_ambient"),
+        "缺了默认的环境光钩子"
+    );
 }
 
 #[test]
 fn a_hook_may_define_only_the_ambient_model() {
     // 三个钩子各自独立。只写环境光的话另外两个都该由引擎补上。
-    let hook =
-        "fn material_ambient(s: ptr<function, Surface>, i: AmbientInput) -> vec3<f32> { return i.diffuse; }";
+    let hook = "fn material_ambient(s: ptr<function, Surface>, i: AmbientInput) -> vec3<f32> { return i.diffuse; }";
     let source = material_shader_source(hook);
     assert!(source.contains(DEFAULT_SURFACE_HOOK));
     assert!(source.contains(DEFAULT_LIGHTING_HOOK));
@@ -94,8 +96,13 @@ fn hemisphere_lights_reach_the_ambient_hook_not_the_lighting_one() {
     // `shade_light` 是唯一调用光照钩子的地方。它**不该**再认识半球光——
     // 认识就说明半球光还会走到钩子里去。
     let start = body.find("fn shade_light(").expect("找不到 shade_light");
-    let end = body[start..].find("
-@fragment").expect("找不到 shade_light 的结尾") + start;
+    let end = body[start..]
+        .find(
+            "
+@fragment",
+        )
+        .expect("找不到 shade_light 的结尾")
+        + start;
     let shade_light = &body[start..end];
     assert!(
         shade_light.contains("material_lighting("),

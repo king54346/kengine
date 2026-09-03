@@ -396,8 +396,7 @@ impl IesProfile {
                     // 取轴向为 1，得到的方向再归一化。
                     let direction = kmath::Vec3::new(1.0, u * tan_cone, v * tan_cone).normalize();
                     // x = 沿光轴，y = 沿右轴，z = 沿上轴。
-                    let intensity =
-                        self.sample_direction(direction.x, direction.y, direction.z);
+                    let intensity = self.sample_direction(direction.x, direction.y, direction.z);
                     (intensity * inverse_peak).clamp(0.0, 1.0)
                 };
 
@@ -726,8 +725,10 @@ mod tests {
             "0",
             "100 400 1000 400 100",
         ]
-        .join("
-");
+        .join(
+            "
+",
+        );
         IesProfile::parse_str(&text).unwrap()
     }
 
