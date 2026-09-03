@@ -18,14 +18,139 @@ fn the_default_hook_compiles() {
 }
 
 #[test]
-fn the_default_hook_is_what_the_standard_shader_uses() {
-    // 标准着色器就是「默认钩子 + 其余部分」，两者必须是同一份源码——
+fn the_standard_shader_is_just_the_no_hook_case() {
+    // 标准着色器就是「一个钩子都没写」那条路，两者必须是同一份源码——
     // 分成两条路的话，改了一处忘了另一处，自定义材质和标准材质
     // 会在光照上出现说不清的差异。
-    assert_eq!(
-        standard_shader_source(),
-        material_shader_source(DEFAULT_SURFACE_HOOK)
+    assert_eq!(standard_shader_source(), material_shader_source(""));
+    // 而且两个默认钩子确实都被补上了。
+    let source = standard_shader_source();
+    assert!(source.contains("fn material_surface"), "缺了默认的表面钩子");
+    assert!(source.contains("fn material_lighting"), "缺了默认的光照钩子");
+}
+
+#[test]
+fn a_hook_may_define_only_the_lighting_model() {
+    // 只想换光照模型的材质不该被迫抄一段「照搬表面」。
+    let source = material_shader_source(
+        "fn material_lighting(s: ptr<function, Surface>, input: LightingInput) -> vec3<f32> { return input.radiance; }",
     );
+    // 表面钩子由引擎补上，光照钩子不补（补了就是重复定义）。
+    assert!(source.contains(DEFAULT_SURFACE_HOOK), "没写的表面钩子该由引擎补");
+    assert!(
+        !source.contains(DEFAULT_LIGHTING_HOOK),
+        "写了光照钩子还补默认实现，就是重复定义"
+    );
+    // 编译通过本身也证明了没有重复定义——那是 naga 的硬错误。
+    compile("fn material_lighting(s: ptr<function, Surface>, input: LightingInput) -> vec3<f32> { return input.radiance; }")
+        .expect("只写光照钩子该编译得过");
+}
+
+#[test]
+fn a_hook_may_define_only_the_surface() {
+    // 反过来也一样——这是这个仓库里绝大多数自定义材质的写法。
+    let hook = "fn material_surface(s: Surface) -> Surface { return s; }";
+    let source = material_shader_source(hook);
+    assert!(!source.contains(DEFAULT_SURFACE_HOOK));
+    assert!(source.contains(DEFAULT_LIGHTING_HOOK), "没写的光照钩子该由引擎补");
+    compile(hook).expect("只写表面钩子该编译得过");
+}
+
+#[test]
+fn a_hook_may_define_both() {
+    let hook = r#"
+        fn material_surface(s: Surface) -> Surface {
+            var out = s;
+            out.base_color = vec4<f32>(1.0, 0.0, 0.0, 1.0);
+            return out;
+        }
+        fn material_lighting(s: ptr<function, Surface>, input: LightingInput) -> vec3<f32> {
+            let n_dot_l = max(dot((*s).normal, input.light_direction), 0.0);
+            return (*s).base_color.rgb * input.radiance * step(0.5, n_dot_l);
+        }
+    "#;
+    let source = material_shader_source(hook);
+    assert!(!source.contains(DEFAULT_SURFACE_HOOK));
+    assert!(!source.contains(DEFAULT_LIGHTING_HOOK));
+    compile(hook).expect("两个钩子都写该编译得过");
+}
+
+#[test]
+fn the_lighting_hook_can_read_every_input_field() {
+    // 契约里写了什么就该拿得到什么。少一个字段不会有人发现——
+    // 直到有人照着文档写了一行拿不到的东西。
+    compile(
+        r#"
+        fn material_lighting(s: ptr<function, Surface>, input: LightingInput) -> vec3<f32> {
+            var sum = vec3<f32>(0.0);
+            sum += (*s).normal;
+            sum += (*s).view_direction;
+            sum += (*s).base_color.rgb;
+            sum += vec3<f32>((*s).metallic, (*s).roughness, (*s).occlusion);
+            sum += (*s).params[0].rgb;
+            sum += input.light.color.rgb * input.light.color.a;
+            sum += vec3<f32>(input.light.position.w, input.light.direction.w, f32(input.light.extra.x));
+            sum += input.light_direction;
+            sum += input.radiance;
+            sum += vec3<f32>(input.form_factor);
+            return sum;
+        }
+        "#,
+    )
+    .expect("光照钩子的每个输入字段都该拿得到");
+}
+
+#[test]
+fn the_lighting_hook_can_call_the_engine_pbr() {
+    // 「PBR 再改一点」是最常见的诉求。引擎自己的那两个函数必须够得着，
+    // 否则用户只能整个重写一遍 BRDF。
+    compile(
+        r#"
+        fn material_lighting(s: ptr<function, Surface>, input: LightingInput) -> vec3<f32> {
+            let base = pbr_direct_lighting(
+                (*s).normal,
+                (*s).view_direction,
+                input.light_direction,
+                (*s).base_color.rgb,
+                (*s).metallic,
+                (*s).roughness,
+                input.radiance,
+            );
+            // 加一圈边缘光。
+            let rim = pow(1.0 - max(dot((*s).normal, (*s).view_direction), 0.0), 4.0);
+            return base + input.radiance * rim * 0.2;
+        }
+        "#,
+    )
+    .expect("光照钩子里该调得到引擎的 PBR");
+}
+
+#[test]
+fn a_commented_out_definition_fails_loudly_rather_than_silently() {
+    // 「有没有定义」是靠扫 `fn <名字>(` 判断的，注释掉的定义**也会**被算上。
+    // 这是个已知的粗糙之处，但后果是明确的编译错误（引擎不补默认实现，
+    // naga 报 `unknown identifier`），而不是「静默用了默认实现」——
+    // 后者才是真正找不出来的那种。
+    let hook = "// fn material_lighting(s: ptr<function, Surface>, i: LightingInput) -> vec3<f32> { }";
+    assert!(
+        !material_shader_source(hook).contains(DEFAULT_LIGHTING_HOOK),
+        "注释掉的定义该被当成「用户自己写了」，从而不补默认实现"
+    );
+    assert!(compile(hook).is_err(), "该报编译错误而不是默默跑起来");
+}
+
+#[test]
+fn the_name_match_does_not_trip_on_a_longer_name() {
+    // `material_lighting_helper` 不是 `material_lighting`。判错了会
+    // 漏补默认实现，整份材质编译不过。
+    assert!(!super::hook_defines(
+        "fn material_lighting_helper(x: f32) -> f32 { return x; }",
+        "material_lighting"
+    ));
+    assert!(super::hook_defines(
+        "fn material_lighting (s: ptr<function, Surface>, i: LightingInput) -> vec3<f32> { return i.radiance; }",
+        "material_lighting"
+    ));
 }
 
 #[test]

@@ -220,6 +220,7 @@ fn cluster_of(pixel: vec2<f32>, view_depth: f32) -> u32 {
 fn shade_light(
     light: Light,
     index: u32,
+    surface: ptr<function, Surface>,
     n: vec3<f32>,
     v: vec3<f32>,
     albedo: vec3<f32>,
@@ -283,30 +284,23 @@ fn shade_light(
         );
     }
 
-    // 矩形面光源走另一条：漫反射用**形状因子**（矩形对着色点张成的
-    // 立体角乘余弦，闭式解），高光用代表点近似。
-    //
-    // 拿 `n·l` 去凑漫反射的话，贴着板子的表面会明显偏暗——那里半个天空
-    // 都是光源，余弦积分接近 1，而指向中心的 `n·l` 可能很小。
+    // 矩形面光源的形状因子：矩形对着色点张成的立体角乘余弦，闭式解。
+    // 其余类型给 0，钩子据此分辨。
+    var form_factor = 0.0;
     if (light.position.w == LIGHT_RECT) {
-        let form_factor = light_rect_form_factor(light, world_position, n);
-        return pbr_area_lighting(
-            n, v, sample.xyz,
-            albedo,
-            metallic,
-            roughness,
-            radiance,
-            form_factor,
-        ) * visibility;
+        form_factor = light_rect_form_factor(light, world_position, n);
     }
 
-    return pbr_direct_lighting(
-        n, v, sample.xyz,
-        albedo,
-        metallic,
-        roughness,
-        radiance,
-    ) * visibility;
+    var input: LightingInput;
+    input.light = light;
+    input.light_direction = sample.xyz;
+    input.radiance = radiance;
+    input.form_factor = form_factor;
+
+    // 阴影在钩子**之后**乘。放在这里而不是交给钩子，是因为「自定义光照
+    // 模型顺手把阴影搞丢了」正是这个钩子要解决的问题——能忘掉的东西
+    // 就不该让人去记。
+    return material_lighting(surface, input) * visibility;
 }
 
 @fragment
@@ -401,7 +395,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     for (var i = 0u; i < global_count; i = i + 1u) {
         color += shade_light(
-            lights[i], i, n, v, albedo, metallic, roughness, occlusion,
+            lights[i], i, &surface, n, v, albedo, metallic, roughness, occlusion,
             in.world_position, object_mask,
         );
     }
@@ -414,7 +408,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // 名单里存的是「可聚簇那一段」里的下标，要加上全局段的长度。
             let index = global_count + cluster_indices[range.x + slot];
             color += shade_light(
-                lights[index], index, n, v, albedo, metallic, roughness, occlusion,
+                lights[index], index, &surface, n, v, albedo, metallic, roughness, occlusion,
                 in.world_position, object_mask,
             );
         }
@@ -422,7 +416,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // 聚簇关着（正交相机）：老老实实全遍历。
         for (var i = global_count; i < globals.light_count.y; i = i + 1u) {
             color += shade_light(
-                lights[i], i, n, v, albedo, metallic, roughness, occlusion,
+                lights[i], i, &surface, n, v, albedo, metallic, roughness, occlusion,
                 in.world_position, object_mask,
             );
         }

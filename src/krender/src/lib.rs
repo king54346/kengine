@@ -3757,6 +3757,59 @@ fn create_morph_weight_storage(device: &wgpu::Device, capacity: u64) -> wgpu::Bu
 const DEFAULT_SURFACE_HOOK: &str =
     "fn material_surface(surface: Surface) -> Surface {\n    return surface;\n}";
 
+/// 默认的光照模型：引擎自己那套 PBR。
+///
+/// 和钩子用的是**同一个入口**——没写 `material_lighting` 的材质拼进来的
+/// 就是这一段。所以「标准材质」和「自定义光照的材质」走的是同一条路，
+/// 不存在「默认那条路悄悄多做了点什么」的可能。
+const DEFAULT_LIGHTING_HOOK: &str = r#"fn material_lighting(
+    surface: ptr<function, Surface>,
+    input: LightingInput,
+) -> vec3<f32> {
+    let n = (*surface).normal;
+    let v = (*surface).view_direction;
+    let albedo = (*surface).base_color.rgb;
+    let metallic = (*surface).metallic;
+    let roughness = (*surface).roughness;
+
+    // 矩形面光源：漫反射用形状因子代替 `n·l`，高光仍用代表点近似。
+    if (input.light.position.w == LIGHT_RECT) {
+        return pbr_area_lighting(
+            n, v, input.light_direction,
+            albedo, metallic, roughness,
+            input.radiance,
+            input.form_factor,
+        );
+    }
+    return pbr_direct_lighting(
+        n, v, input.light_direction,
+        albedo, metallic, roughness,
+        input.radiance,
+    );
+}"#;
+
+/// 这段钩子里有没有定义某个函数。
+///
+/// 只看 `fn <名字>` 后面紧跟的是不是 `(`——两个钩子都可选，而 WGSL
+/// 没有重载也没有弱符号，所以「用户写没写」只能在拼装之前由 Rust 判断。
+///
+/// 判断错了的后果是明确的、**编译期的**：漏判会重复定义，误判会缺定义，
+/// 两种 naga 都直接报错。不会出现「静默用了默认实现」那种情况。
+fn hook_defines(hook: &str, name: &str) -> bool {
+    let mut rest = hook;
+    while let Some(at) = rest.find("fn ") {
+        let after = &rest[at + 3..];
+        let trimmed = after.trim_start();
+        if let Some(tail) = trimmed.strip_prefix(name)
+            && tail.trim_start().starts_with('(')
+        {
+            return true;
+        }
+        rest = after;
+    }
+    false
+}
+
 /// 检查一段材质钩子能不能和引擎的标准着色器拼起来。
 ///
 /// 钩子本身单独解析不了——它引用引擎定义的 `Surface`、`globals`、
@@ -3788,7 +3841,7 @@ pub fn validate_material_hook(hook: &str) -> Result<(), kshader::ShaderError> {
 
 /// 标准着色器的完整源码。
 fn standard_shader_source() -> String {
-    material_shader_source(DEFAULT_SURFACE_HOOK)
+    material_shader_source("")
 }
 
 /// 把一段材质钩子拼成完整的着色器。
@@ -3797,9 +3850,23 @@ fn standard_shader_source() -> String {
 /// - klight 定义 `Light`、kpbr 的 IBL 定义 `Environment`，两者都被
 ///   `Globals` 引用，必须排在标准着色器之前；
 /// - `geometry.wgsl` 定义 `Globals` 与 `ObjectUniforms`，顶点着色器要用；
-/// - `surface.wgsl` 定义 `Surface`，钩子要用它；
+/// - `surface.wgsl` 定义 `Surface` 与 `LightingInput`，钩子要用它们；
 /// - `shader.wgsl` 调用钩子，所以钩子必须排在它之前。
+///
+/// 两个钩子（`material_surface` 与 `material_lighting`）**都是可选的**，
+/// 没写的那个在这里补上默认实现。只想改颜色的材质不必抄一段
+/// 「照搬光照」，只想换光照模型的也不必抄一段「照搬表面」。
 fn material_shader_source(hook: &str) -> String {
+    let surface_default = if hook_defines(hook, "material_surface") {
+        ""
+    } else {
+        DEFAULT_SURFACE_HOOK
+    };
+    let lighting_default = if hook_defines(hook, "material_lighting") {
+        ""
+    } else {
+        DEFAULT_LIGHTING_HOOK
+    };
     [
         klight::LIGHT_WGSL,
         // 聚簇的下标公式。和 `klight::cluster::ClusterGrid` 是同一份数学，
@@ -3811,6 +3878,8 @@ fn material_shader_source(hook: &str) -> String {
         geometry_source(),
         include_str!("surface.wgsl"),
         hook,
+        surface_default,
+        lighting_default,
         include_str!("shader.wgsl"),
     ]
     .join("\n")
