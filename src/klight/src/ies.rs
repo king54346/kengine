@@ -26,10 +26,10 @@
 //! - **TILT 的倾斜修正**：`TILT=INCLUDE` 的数据块会被正确**跳过**，
 //!   但不参与计算。它修正的是「灯具装歪了之后光输出的衰减」，
 //!   是安装参数不是光形，实时渲染里几乎没人用。
-//! - **B 型和 A 型光度学**（`photometric_type` 2 和 3）：解析出来了，
-//!   但采样按 C 型处理。这两种用在汽车前照灯和体育场投光灯上，
-//!   它们的角度定义是另一套坐标系。用错了形状会歪，所以
-//!   [`IesProfile::photometric_type`] 暴露出来让调用方自己判断。
+//! - **B 型和 A 型的实测验证**：三种光度学的角度换算都实现了
+//!   （见 [`IesProfile::sample_direction`]），但仓库里那几份样本文件
+//!   **全是 C 型**，所以 A/B 两条路只有几何不变量在守着，没有拿真文件
+//!   对过。这一点写在这儿而不是含糊过去。
 
 use std::collections::VecDeque;
 
@@ -241,6 +241,55 @@ impl IesProfile {
         lerp(low, high, h_fraction)
     }
 
+    /// 光源空间的一个方向 → 光强（坎德拉）。
+    ///
+    /// 三个参数是这个方向在光源坐标系里的投影：`axial` 沿光轴（灯瞄准的
+    /// 方向），`lateral` 沿右轴，`vertical_axis` 沿上轴。三者构成单位向量。
+    ///
+    /// # 三种光度学的角度是三套不同的坐标
+    ///
+    /// LM-63 的第 6 个字段（[`photometric_type`](Self::photometric_type)）
+    /// 说的正是「这张表的两个角度怎么解释」：
+    ///
+    /// | 类型 | 用在哪 | 极轴 | 角度对 |
+    /// |---|---|---|---|
+    /// | C（1） | 绝大多数室内外灯具 | 光轴本身 | 极角 + 绕光轴的方位角 |
+    /// | B（2） | 体育场投光灯 | 横向轴（右） | 先绕右轴俯仰，再侧向偏移 |
+    /// | A（3） | 汽车前照灯 | 纵向轴 | 先绕上轴偏航，再上下偏移 |
+    ///
+    /// C 型是「极角-方位角」，两个角的范围是 0..180 和 0..360；
+    /// A/B 是**偏航-俯仰**的方格，两个角都是 -90..90。范围不一样正是
+    /// 因为参数化方式根本不同——把 A/B 的表当 C 型采，光形会整个扭曲，
+    /// 而画面上只是「这盏灯的形状怪怪的」。
+    ///
+    /// # 没拿真文件验过
+    ///
+    /// 仓库里那几份样本全是 C 型。A/B 两条路只有几何不变量在守着
+    /// （在光轴上必为 (0, 0)；绕各自的极轴转只动其中一个角），
+    /// 没有拿厂商的 A/B 文件对过。
+    pub fn sample_direction(&self, axial: f32, lateral: f32, vertical_axis: f32) -> f32 {
+        let (vertical, horizontal) = match self.photometric_type {
+            // B 型：极轴是横向轴。先在「光轴-上轴」平面里俯仰，
+            // 剩下的侧向分量就是水平角。
+            2 => (
+                vertical_axis.atan2(axial).to_degrees(),
+                lateral.clamp(-1.0, 1.0).asin().to_degrees(),
+            ),
+            // A 型：极轴是纵向轴。先在「光轴-右轴」平面里偏航，
+            // 剩下的上下分量就是垂直角。
+            3 => (
+                vertical_axis.clamp(-1.0, 1.0).asin().to_degrees(),
+                lateral.atan2(axial).to_degrees(),
+            ),
+            // C 型（以及任何没见过的类型）：极角 + 方位角。
+            _ => (
+                axial.clamp(-1.0, 1.0).acos().to_degrees(),
+                vertical_axis.atan2(lateral).to_degrees(),
+            ),
+        };
+        self.sample(vertical, horizontal)
+    }
+
     /// 按文件声明的水平角范围做对称展开，把任意方位角折进表格里。
     ///
     /// LM-63 用**水平角的跨度**隐式声明对称性，没有单独的字段：
@@ -342,9 +391,14 @@ impl IesProfile {
                 let value = if radius > 1.0 {
                     0.0
                 } else {
-                    let vertical = (radius * tan_cone).atan().to_degrees();
-                    let horizontal = v.atan2(u).to_degrees();
-                    (self.sample(vertical, horizontal) * inverse_peak).clamp(0.0, 1.0)
+                    // 贴图上的 (u, v) 是成像平面上的偏移，除以外锥半径之后
+                    // 就是「离轴距离 / 轴向距离」的比值——也就是正切。
+                    // 取轴向为 1，得到的方向再归一化。
+                    let direction = kmath::Vec3::new(1.0, u * tan_cone, v * tan_cone).normalize();
+                    // x = 沿光轴，y = 沿右轴，z = 沿上轴。
+                    let intensity =
+                        self.sample_direction(direction.x, direction.y, direction.z);
+                    (intensity * inverse_peak).clamp(0.0, 1.0)
                 };
 
                 // 灰度：IES 只测光强不测颜色，颜色由灯自己的 `color` 给。
@@ -655,6 +709,125 @@ mod tests {
             profile.cone_angle(0.1),
             40.0,
             "从里往外找会停在 0° 那个暗斑上"
+        );
+    }
+
+    /// 一份指定光度学类型、且光强只随**垂直角**变化的表。
+    ///
+    /// 「只随垂直角变化」是为了让不变量测起来干净：水平角怎么动都不该
+    /// 影响结果，那么读到的任何变化都来自垂直角。
+    fn typed(photometric_type: i32) -> IesProfile {
+        let text = [
+            "TILT=NONE",
+            &format!("1 1000 1 5 1 {photometric_type} 1 0 0 0"),
+            "1 1 40",
+            // 垂直角故意跨负数：A/B 型的范围是 -90..90。
+            "-90 -45 0 45 90",
+            "0",
+            "100 400 1000 400 100",
+        ]
+        .join("
+");
+        IesProfile::parse_str(&text).unwrap()
+    }
+
+    /// 绕某根轴转一个方向。`axis` 必须是单位向量。
+    fn rotate(direction: kmath::Vec3, axis: kmath::Vec3, radians: f32) -> kmath::Vec3 {
+        kmath::Quat::from_axis_angle(axis, radians) * direction
+    }
+
+    #[test]
+    fn every_photometric_type_puts_the_aiming_axis_at_the_origin() {
+        // 三套坐标里，「正对着灯瞄的方向」都必须落在 (0°, 0°)。
+        // 这一条不成立的话整张表整体偏移，而画面上只是「光斑歪了」。
+        for kind in [1, 2, 3] {
+            let profile = typed(kind);
+            assert_eq!(
+                profile.sample_direction(1.0, 0.0, 0.0),
+                1000.0,
+                "第 {kind} 型没把光轴映到表格原点"
+            );
+        }
+    }
+
+    #[test]
+    fn type_b_measures_its_vertical_angle_around_the_lateral_axis() {
+        // B 型的极轴是**横向轴**：绕右轴转多少度，垂直角就变多少度，
+        // 而水平角一动不动。搞反了的话投光灯的光形会转 90°。
+        let profile = typed(2);
+        // 光源空间：x = 光轴，y = 右，z = 上。绕右轴（y）转。
+        let axis = kmath::Vec3::Y;
+        for degrees in [-45.0_f32, -20.0, 20.0, 45.0] {
+            let d = rotate(kmath::Vec3::X, axis, degrees.to_radians());
+            let expected = profile.sample(degrees, 0.0);
+            let actual = profile.sample_direction(d.x, d.y, d.z);
+            assert!(
+                (actual - expected).abs() < 1e-2,
+                "绕右轴转 {degrees}° 时 B 型读到 {actual}，该是 {expected}"
+            );
+        }
+        // 绕上轴转只该动水平角。表里水平角只有一个值，所以结果不变。
+        let d = rotate(kmath::Vec3::X, kmath::Vec3::Z, 30_f32.to_radians());
+        assert!(
+            (profile.sample_direction(d.x, d.y, d.z) - 1000.0).abs() < 1e-2,
+            "B 型绕上轴转时垂直角不该变"
+        );
+    }
+
+    #[test]
+    fn type_a_measures_its_vertical_angle_around_the_longitudinal_axis() {
+        // A 型和 B 型的两个角互换：绕**上轴**转动的是水平角，
+        // 上下偏移才是垂直角。
+        let profile = typed(3);
+        for degrees in [-45.0_f32, -20.0, 20.0, 45.0] {
+            // 绕右轴（y）转 = 上下偏移 = A 型的垂直角。
+            let d = rotate(kmath::Vec3::X, kmath::Vec3::Y, degrees.to_radians());
+            let expected = profile.sample(degrees, 0.0);
+            let actual = profile.sample_direction(d.x, d.y, d.z);
+            assert!(
+                (actual - expected).abs() < 1e-2,
+                "上下偏 {degrees}° 时 A 型读到 {actual}，该是 {expected}"
+            );
+        }
+        // 绕上轴转只动水平角，垂直角不变。
+        let d = rotate(kmath::Vec3::X, kmath::Vec3::Z, 30_f32.to_radians());
+        assert!(
+            (profile.sample_direction(d.x, d.y, d.z) - 1000.0).abs() < 1e-2,
+            "A 型绕上轴转时垂直角不该变"
+        );
+    }
+
+    #[test]
+    fn type_c_is_a_polar_grid_not_a_yaw_pitch_one() {
+        // C 型的垂直角是**离轴夹角**，和绕哪根轴转无关——这正是它和
+        // A/B 的根本区别。三个类型共用一个采样入口，混淆了就会把
+        // 一整类灯具画歪。
+        let profile = typed(1);
+        for axis in [kmath::Vec3::Y, kmath::Vec3::Z] {
+            for degrees in [20.0_f32, 45.0, 70.0] {
+                let d = rotate(kmath::Vec3::X, axis, degrees.to_radians());
+                let expected = profile.sample(degrees, 0.0);
+                let actual = profile.sample_direction(d.x, d.y, d.z);
+                assert!(
+                    (actual - expected).abs() < 1e-2,
+                    "C 型绕 {axis:?} 转 {degrees}° 读到 {actual}，该是 {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_three_types_really_disagree() {
+        // 上面几条各自成立，但如果三个分支算出来的其实是同一个东西，
+        // 那它们就都是摆设。挑一个**斜着**的方向，三者必须给出不同的答案。
+        let direction = kmath::Vec3::new(0.6, 0.5, 0.62).normalize();
+        let values: Vec<f32> = [1, 2, 3]
+            .into_iter()
+            .map(|kind| typed(kind).sample_direction(direction.x, direction.y, direction.z))
+            .collect();
+        assert!(
+            values[0] != values[1] && values[1] != values[2] && values[0] != values[2],
+            "三种光度学在斜方向上给出了相同的结果：{values:?}"
         );
     }
 

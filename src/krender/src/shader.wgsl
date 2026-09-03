@@ -235,12 +235,6 @@ fn shade_light(
         return vec3<f32>(0.0);
     }
 
-    // 半球光是环境项，不走「入射方向 + BRDF」那条路：它没有方向，
-    // 也不产生高光。金属没有漫反射，所以按金属度衰减。
-    if (light.position.w == LIGHT_HEMISPHERE) {
-        return light_hemisphere(light, n) * albedo * (1.0 - metallic) * occlusion;
-    }
-
     let sample = light_sample_direction(light, world_position);
     // 衰减为 0 说明超出作用范围或在聚光锥外。
     if (sample.w <= 0.0) {
@@ -393,7 +387,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let object_mask = object.flags.x;
     let global_count = min(globals.light_count.x, globals.light_count.y);
 
+    // 半球光单独收着：它没有方向也不产生高光，是个**环境**项，
+    // 该和 IBL 一起交给环境钩子，而不是混进直射光里。
+    var hemisphere = vec3<f32>(0.0);
     for (var i = 0u; i < global_count; i = i + 1u) {
+        let light = lights[i];
+        if (light.position.w == LIGHT_HEMISPHERE) {
+            if (light_affects(light, object_mask)) {
+                // 金属没有漫反射，所以按金属度衰减。
+                hemisphere += light_hemisphere(light, n) * albedo * (1.0 - metallic) * occlusion;
+            }
+            continue;
+        }
         color += shade_light(
             lights[i], i, &surface, n, v, albedo, metallic, roughness, occlusion,
             in.world_position, object_mask,
@@ -438,7 +443,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     for (var i = 0u; i < 9u; i = i + 1u) {
         probe_sh[i] = probe_irradiance[sh_base + i];
     }
-    color += ibl_diffuse_from_sh(
+    let ambient_diffuse = ibl_diffuse_from_sh(
         probe_sh,
         n,
         // 和镜面那边同一个口径：全局强度乘探针自己的强度。
@@ -453,6 +458,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // 保留退路是必要的：不是每个场景都会配 HDR，而没有镜面反射的
     // 金属会变成纯黑。
     var reflection = reflect(-v, n);
+    var ambient_specular = vec3<f32>(0.0);
     if (globals.ibl_params.x > 0.5) {
         // 视差校正：把反射射线和探针盒求交，用「从采集点看向交点」
         // 的方向去采样。不做的话环境被当成无穷远，室内的金属球
@@ -466,7 +472,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 object.probe_position.xyz,
             );
         }
-        color += ibl_specular_prefiltered(
+        ambient_specular = ibl_specular_prefiltered(
             prefiltered_env,
             prefiltered_sampler,
             // w = 0 时用第 0 层，也就是全局环境。
@@ -479,8 +485,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             globals.environment.sun_color.a * object.probe_max.w,
         ) * occlusion;
     } else {
-        color += ibl_specular(globals.environment, reflection, roughness, f0, brdf) * occlusion;
+        ambient_specular = ibl_specular(globals.environment, reflection, roughness, f0, brdf) * occlusion;
     }
+
+    var ambient: AmbientInput;
+    ambient.diffuse = ambient_diffuse;
+    ambient.specular = ambient_specular;
+    ambient.hemisphere = hemisphere;
+    ambient.occlusion = occlusion;
+    ambient.reflection = reflection;
+    color += material_ambient(&surface, ambient);
 
     // ── 雾 ──
     //

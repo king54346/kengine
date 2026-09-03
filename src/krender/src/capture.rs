@@ -25,11 +25,12 @@
 //!
 //! # 接缝
 //!
-//! 六个面各自双线性插值，面与面之间按方向选最近的那一面，
-//! 交界处会有一道很轻的不连续。对**球谐**（低频，9 个系数）完全无感，
-//! 对**预滤波的高粗糙度 mip**也无感；只有粗糙度接近 0 的镜面反射
-//! 才可能看得出来。真要抹掉得在采样时跨面插值，代价是每个像素多采
-//! 两个面——没做。
+//! 双线性插值要取四个相邻纹素，而落在面边缘上的那些**有一半在隔壁面里**。
+//! 夹到边上（第一版的做法）会让两个面各自把自己最外圈的值往外抹一格，
+//! 交界处就留下一道一格宽的脊。
+//!
+//! 现在越界的那个纹素会**到相邻面里去取**：把它的中心方向算出来，
+//! 交给包含这个方向的那一面。不需要邻接表——方向本身就说明了它属于谁。
 
 use kmath::{Mat4, Vec3};
 
@@ -73,41 +74,32 @@ pub(crate) struct Face {
 }
 
 impl Face {
-    /// 双线性采样。`u`、`v` 是 `[0,1]` 的贴图坐标，越界时夹取。
-    ///
-    /// 夹取而不是环绕：一个面的边缘外面是**另一个面**，环绕过去会取到
-    /// 对面的内容，接缝处会出现一道镜像的条纹。
-    fn sample(&self, u: f32, v: f32) -> Vec3 {
-        let size = self.size as f32;
-        let x = (u * size - 0.5).clamp(0.0, size - 1.0);
-        let y = (v * size - 0.5).clamp(0.0, size - 1.0);
-        let x0 = x.floor() as usize;
-        let y0 = y.floor() as usize;
-        let x1 = (x0 + 1).min(self.size - 1);
-        let y1 = (y0 + 1).min(self.size - 1);
-        let tx = x - x0 as f32;
-        let ty = y - y0 as f32;
-
-        let at = |x: usize, y: usize| -> Vec3 {
-            let index = (y * self.size + x) * 3;
-            Vec3::new(
-                self.pixels[index],
-                self.pixels[index + 1],
-                self.pixels[index + 2],
-            )
-        };
-        let top = at(x0, y0).lerp(at(x1, y0), tx);
-        let bottom = at(x0, y1).lerp(at(x1, y1), tx);
-        top.lerp(bottom, ty)
+    /// 取一个纹素。下标必须在范围内。
+    fn texel(&self, x: usize, y: usize) -> Vec3 {
+        let index = (y * self.size + x) * 3;
+        Vec3::new(
+            self.pixels[index],
+            self.pixels[index + 1],
+            self.pixels[index + 2],
+        )
     }
 }
 
-/// 沿某个方向看过去的颜色。
+/// 一个面上某个纹素中心的方向。
 ///
-/// 挑 `dot(方向, 面朝向)` 最大的那一面——那必然是方向穿出去的那一面。
-pub(crate) fn sample_cube(faces: &[Face; 6], direction: Vec3) -> Vec3 {
-    let direction = direction.normalize_or(Vec3::Y);
+/// `x`、`y` **允许越界**——越界的那个「纹素」在几何上就落在相邻面里，
+/// 这正是跨面取样要用的。
+fn texel_direction(index: usize, x: f32, y: f32, size: usize) -> Vec3 {
+    let (forward, right, up) = face_basis(index);
+    let size = size as f32;
+    let ndc_x = (x + 0.5) / size * 2.0 - 1.0;
+    // v 向下：渲染出来的图第一行在画面顶端。
+    let ndc_y = 1.0 - (y + 0.5) / size * 2.0;
+    (forward + right * ndc_x + up * ndc_y).normalize()
+}
 
+/// 某个方向穿出的是哪一面。
+fn face_of(direction: Vec3) -> usize {
     let mut best = 0usize;
     let mut best_dot = f32::NEG_INFINITY;
     for (index, (forward, _)) in FACES.iter().enumerate() {
@@ -117,19 +109,66 @@ pub(crate) fn sample_cube(faces: &[Face; 6], direction: Vec3) -> Vec3 {
             best = index;
         }
     }
+    best
+}
 
-    let (forward, right, up) = face_basis(best);
-    let axial = direction.dot(forward);
-    if axial <= 1e-6 {
-        // 六个面朝向覆盖整个球面，理论上到不了这里。真到了说明
-        // 方向是零向量之类的退化输入，返回黑比返回 NaN 强。
-        return Vec3::ZERO;
-    }
-    // 90° 视场角下 tan(半角) = 1，所以除以轴向分量就直接是 NDC。
+/// 方向 → 这一面上的连续纹素坐标（尚未取整）。
+fn face_coords(index: usize, direction: Vec3, size: usize) -> (f32, f32) {
+    let (forward, right, up) = face_basis(index);
+    // 90° 视场角下 tan(半角) = 1，除以轴向分量就直接是 NDC。
+    let axial = direction.dot(forward).max(1e-6);
     let ndc_x = direction.dot(right) / axial;
     let ndc_y = direction.dot(up) / axial;
-    // NDC → 贴图坐标。v 取反：渲染出来的图第一行在画面顶端。
-    faces[best].sample(ndc_x * 0.5 + 0.5, 0.5 - ndc_y * 0.5)
+    let size = size as f32;
+    (
+        (ndc_x * 0.5 + 0.5) * size - 0.5,
+        (0.5 - ndc_y * 0.5) * size - 0.5,
+    )
+}
+
+/// 取一个纹素；越出这一面时到相邻面里去取。
+///
+/// 越界时用**最近邻**而不是再来一次双线性：那会递归下去，而这一格
+/// 本来就只占最终结果的四分之一以下。要紧的是它取的是**隔壁面真实的
+/// 内容**而不是本面边缘的复制品——后者才是那道脊的来源。
+fn fetch(faces: &[Face; 6], index: usize, x: i32, y: i32) -> Vec3 {
+    let size = faces[index].size;
+    if x >= 0 && y >= 0 && (x as usize) < size && (y as usize) < size {
+        return faces[index].texel(x as usize, y as usize);
+    }
+    let direction = texel_direction(index, x as f32, y as f32, size);
+    let neighbour = face_of(direction);
+    let (nx, ny) = face_coords(neighbour, direction, faces[neighbour].size);
+    let limit = faces[neighbour].size as i32 - 1;
+    faces[neighbour].texel(
+        nx.round().clamp(0.0, limit as f32) as usize,
+        ny.round().clamp(0.0, limit as f32) as usize,
+    )
+}
+
+/// 沿某个方向看过去的颜色。
+///
+/// 挑 `dot(方向, 面朝向)` 最大的那一面——那必然是方向穿出去的那一面——
+/// 再在这一面上双线性插值。落在边缘上的取样点会自动跨到相邻面
+/// （见 [`fetch`]），所以面与面之间是连续的。
+pub(crate) fn sample_cube(faces: &[Face; 6], direction: Vec3) -> Vec3 {
+    let direction = direction.normalize_or(Vec3::Y);
+    let index = face_of(direction);
+    let size = faces[index].size;
+    if size == 0 {
+        return Vec3::ZERO;
+    }
+
+    let (x, y) = face_coords(index, direction, size);
+    let x0 = x.floor();
+    let y0 = y.floor();
+    let tx = x - x0;
+    let ty = y - y0;
+    let (x0, y0) = (x0 as i32, y0 as i32);
+
+    let top = fetch(faces, index, x0, y0).lerp(fetch(faces, index, x0 + 1, y0), tx);
+    let bottom = fetch(faces, index, x0, y0 + 1).lerp(fetch(faces, index, x0 + 1, y0 + 1), tx);
+    top.lerp(bottom, ty)
 }
 
 /// 六个面 → 一张等距柱状 HDR。
@@ -314,6 +353,85 @@ mod tests {
                 "方向 {direction:?} 绕一圈回来是 {actual:?}，该是 {expected:?}"
             );
         }
+    }
+
+    /// 一个方向上变化明显、但处处平滑的辐射亮度函数。
+    ///
+    /// 常量场测不出接缝（两边一样），所以要一个有梯度的。
+    fn smooth(d: Vec3) -> Vec3 {
+        Vec3::new(
+            0.5 + 0.5 * (d.x * 2.0).sin(),
+            0.5 + 0.5 * (d.y * 2.0 + 1.0).sin(),
+            0.5 + 0.5 * (d.z * 2.0 + 2.0).sin(),
+        )
+    }
+
+    /// 一批**横跨立方体棱**的方向对：两个方向只差一点点，但分属两个面。
+    fn across_the_seams() -> Vec<(Vec3, Vec3)> {
+        // 沿 +X 面和 +Y 面之间那条棱扫一圈，再取 +X / +Z 那条。
+        let mut pairs = Vec::new();
+        for step in 0..40 {
+            let t = -0.9 + step as f32 * 0.045;
+            for (a, b, along) in [
+                (Vec3::X, Vec3::Y, Vec3::Z),
+                (Vec3::X, Vec3::Z, Vec3::Y),
+                (Vec3::NEG_Y, Vec3::Z, Vec3::X),
+            ] {
+                // 棱上的方向，再往两边各偏一丁点。
+                let edge = (a + b).normalize() + along * t;
+                let tangent = (b - a).normalize();
+                let epsilon = 0.004;
+                pairs.push((
+                    (edge - tangent * epsilon).normalize(),
+                    (edge + tangent * epsilon).normalize(),
+                ));
+            }
+        }
+        pairs
+    }
+
+    #[test]
+    fn there_is_no_ridge_where_two_faces_meet() {
+        // 双线性要取四个相邻纹素，而落在面边缘上的那些有一半在隔壁面里。
+        // 夹到边上的话两个面各自把最外圈往外抹一格，交界处留下一道
+        // 一格宽的脊——在低粗糙度的镜面反射上看得见，而且没有任何报错。
+        //
+        // 这里验的是**连续性**：只差 0.008 弧度的两个方向，取回来的颜色
+        // 也该只差一点点。不需要解析参照，所以这条测的就是接缝本身。
+        let faces = bake(32, smooth);
+
+        let mut worst = 0.0f32;
+        let mut worst_at = Vec3::ZERO;
+        for (a, b) in across_the_seams() {
+            let jump = (sample_cube(&faces, a) - sample_cube(&faces, b)).length();
+            if jump > worst {
+                worst = jump;
+                worst_at = a;
+            }
+        }
+        assert!(
+            worst < 0.02,
+            "跨棱的两个相邻方向差了 {worst:.4}（在 {worst_at:?} 附近）——接缝上有一道脊"
+        );
+    }
+
+    #[test]
+    fn the_seam_samples_stay_close_to_the_function_they_came_from() {
+        // 连续不等于正确：两边都取成同一个错值也是连续的。
+        // 所以再拿解析值对一遍，确认跨面取到的是**隔壁面真实的内容**。
+        //
+        // 说清楚这条测的不是接缝：夹边的老做法在 32² 下也能过这一条
+        // （误差 0.02 出头，还在容差里）。真正抓接缝的是上面那条连续性，
+        // 换回夹边它会红。这一条守的是「跨面之后取的值仍然对」。
+        let faces = bake(32, smooth);
+        let mut worst = 0.0f32;
+        for (a, b) in across_the_seams() {
+            for direction in [a, b] {
+                let error = (sample_cube(&faces, direction) - smooth(direction)).length();
+                worst = worst.max(error);
+            }
+        }
+        assert!(worst < 0.025, "接缝附近和解析值最大差 {worst:.4}");
     }
 
     #[test]

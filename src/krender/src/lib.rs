@@ -3762,6 +3762,17 @@ const DEFAULT_SURFACE_HOOK: &str =
 /// 和钩子用的是**同一个入口**——没写 `material_lighting` 的材质拼进来的
 /// 就是这一段。所以「标准材质」和「自定义光照的材质」走的是同一条路，
 /// 不存在「默认那条路悄悄多做了点什么」的可能。
+/// 默认的环境光：三项直接相加。
+///
+/// 加法是有物理意义的——半球光、IBL 漫反射、IBL 镜面是三份互不重叠的
+/// 入射能量，各自积分完再叠加。
+const DEFAULT_AMBIENT_HOOK: &str = r#"fn material_ambient(
+    surface: ptr<function, Surface>,
+    input: AmbientInput,
+) -> vec3<f32> {
+    return input.diffuse + input.specular + input.hemisphere;
+}"#;
+
 const DEFAULT_LIGHTING_HOOK: &str = r#"fn material_lighting(
     surface: ptr<function, Surface>,
     input: LightingInput,
@@ -3839,6 +3850,12 @@ pub fn validate_material_hook(hook: &str) -> Result<(), kshader::ShaderError> {
     Shader::from_wgsl(material_shader_source(hook)).map(|_| ())
 }
 
+/// `shader.wgsl` 的正文，供测试检查拼装之外的结构。
+#[cfg(test)]
+fn shader_body_for_test() -> &'static str {
+    include_str!("shader.wgsl")
+}
+
 /// 标准着色器的完整源码。
 fn standard_shader_source() -> String {
     material_shader_source("")
@@ -3853,9 +3870,9 @@ fn standard_shader_source() -> String {
 /// - `surface.wgsl` 定义 `Surface` 与 `LightingInput`，钩子要用它们；
 /// - `shader.wgsl` 调用钩子，所以钩子必须排在它之前。
 ///
-/// 两个钩子（`material_surface` 与 `material_lighting`）**都是可选的**，
-/// 没写的那个在这里补上默认实现。只想改颜色的材质不必抄一段
-/// 「照搬光照」，只想换光照模型的也不必抄一段「照搬表面」。
+/// 三个钩子（`material_surface`、`material_lighting`、`material_ambient`）
+/// **全都是可选的**，没写的在这里补上默认实现。只想改颜色的材质不必抄
+/// 两段「照搬光照」，只想换光照模型的也不必抄一段「照搬表面」。
 fn material_shader_source(hook: &str) -> String {
     let surface_default = if hook_defines(hook, "material_surface") {
         ""
@@ -3866,6 +3883,11 @@ fn material_shader_source(hook: &str) -> String {
         ""
     } else {
         DEFAULT_LIGHTING_HOOK
+    };
+    let ambient_default = if hook_defines(hook, "material_ambient") {
+        ""
+    } else {
+        DEFAULT_AMBIENT_HOOK
     };
     [
         klight::LIGHT_WGSL,
@@ -3880,6 +3902,7 @@ fn material_shader_source(hook: &str) -> String {
         hook,
         surface_default,
         lighting_default,
+        ambient_default,
         include_str!("shader.wgsl"),
     ]
     .join("\n")

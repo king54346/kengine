@@ -23,12 +23,97 @@ fn the_standard_shader_is_just_the_no_hook_case() {
     // 分成两条路的话，改了一处忘了另一处，自定义材质和标准材质
     // 会在光照上出现说不清的差异。
     assert_eq!(standard_shader_source(), material_shader_source(""));
-    // 而且两个默认钩子确实都被补上了。
+    // 而且三个默认钩子确实都被补上了。
     let source = standard_shader_source();
     assert!(source.contains("fn material_surface"), "缺了默认的表面钩子");
     assert!(
         source.contains("fn material_lighting"),
         "缺了默认的光照钩子"
+    );
+    assert!(source.contains("fn material_ambient"), "缺了默认的环境光钩子");
+}
+
+#[test]
+fn a_hook_may_define_only_the_ambient_model() {
+    // 三个钩子各自独立。只写环境光的话另外两个都该由引擎补上。
+    let hook =
+        "fn material_ambient(s: ptr<function, Surface>, i: AmbientInput) -> vec3<f32> { return i.diffuse; }";
+    let source = material_shader_source(hook);
+    assert!(source.contains(DEFAULT_SURFACE_HOOK));
+    assert!(source.contains(DEFAULT_LIGHTING_HOOK));
+    assert!(!source.contains(DEFAULT_AMBIENT_HOOK));
+    compile(hook).expect("只写环境光钩子该编译得过");
+}
+
+#[test]
+fn the_ambient_hook_can_read_every_input_field() {
+    compile(
+        r#"
+        fn material_ambient(s: ptr<function, Surface>, input: AmbientInput) -> vec3<f32> {
+            var sum = vec3<f32>(0.0);
+            sum += input.diffuse;
+            sum += input.specular;
+            sum += input.hemisphere;
+            sum += vec3<f32>(input.occlusion);
+            sum += input.reflection;
+            sum += (*s).normal + (*s).base_color.rgb + (*s).params[2].rgb;
+            return sum;
+        }
+        "#,
+    )
+    .expect("环境光钩子的每个输入字段都该拿得到");
+}
+
+#[test]
+fn all_three_hooks_can_coexist() {
+    // 三个一起写是「完全自定义一套着色」的样子。任意两个之间的
+    // 命名或签名冲突都会在这里暴露。
+    let hook = r#"
+        fn material_surface(s: Surface) -> Surface { return s; }
+        fn material_lighting(s: ptr<function, Surface>, i: LightingInput) -> vec3<f32> {
+            return i.radiance * max(dot((*s).normal, i.light_direction), 0.0);
+        }
+        fn material_ambient(s: ptr<function, Surface>, i: AmbientInput) -> vec3<f32> {
+            return i.diffuse * 0.5 + i.hemisphere;
+        }
+    "#;
+    let source = material_shader_source(hook);
+    assert!(!source.contains(DEFAULT_SURFACE_HOOK));
+    assert!(!source.contains(DEFAULT_LIGHTING_HOOK));
+    assert!(!source.contains(DEFAULT_AMBIENT_HOOK));
+    compile(hook).expect("三个钩子都写该编译得过");
+}
+
+#[test]
+fn hemisphere_lights_reach_the_ambient_hook_not_the_lighting_one() {
+    // 半球光没有方向也不产生高光，是个环境项。要是它还走
+    // `material_lighting`，自写光照模型会拿到一个 `light_direction`
+    // 毫无意义的「灯」，算出一片乱七八糟的高光——而且不报错。
+    let body = super::shader_body_for_test();
+
+    // `shade_light` 是唯一调用光照钩子的地方。它**不该**再认识半球光——
+    // 认识就说明半球光还会走到钩子里去。
+    let start = body.find("fn shade_light(").expect("找不到 shade_light");
+    let end = body[start..].find("
+@fragment").expect("找不到 shade_light 的结尾") + start;
+    let shade_light = &body[start..end];
+    assert!(
+        shade_light.contains("material_lighting("),
+        "shade_light 该是调用光照钩子的地方"
+    );
+    assert!(
+        !shade_light.contains("LIGHT_HEMISPHERE"),
+        "shade_light 里还留着半球光的分支 —— 它会带着一个无意义的方向走进光照钩子"
+    );
+
+    // 而片元主函数里要把它分出来，交给环境光钩子。
+    assert!(
+        body.contains("light.position.w == LIGHT_HEMISPHERE"),
+        "没有把半球光分出去的那一步"
+    );
+    assert!(
+        body.contains("ambient.hemisphere = hemisphere"),
+        "半球光没有交给环境光钩子"
     );
 }
 
