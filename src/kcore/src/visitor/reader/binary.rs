@@ -237,6 +237,8 @@ impl Reader for BinaryReader<'_> {
             type_name_map: Default::default(),
             rc_map: Default::default(),
             arc_map: Default::default(),
+            rc_dedup: Default::default(),
+            arc_dedup: Default::default(),
             reading: true,
             current_node: Handle::NONE,
             root: Handle::NONE,

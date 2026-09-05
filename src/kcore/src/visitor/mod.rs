@@ -279,6 +279,13 @@ pub struct Visitor {
     rc_map: FxHashMap<u64, Rc<dyn Any>>,
     /// 每个 ID 对应的 `Arc` 值，供读取时查找 `Arc`。
     arc_map: FxHashMap<u64, Arc<dyn Any + Send + Sync>>,
+    /// 写入模式下用于 `Rc` 去重的「指针地址 → ID」映射。
+    ///
+    /// 只存地址而不持有 `Rc` 克隆：持有一份活着的克隆会在随后独占访问其内容时
+    /// 制造别名（未定义行为）。地址相同即视为同一个值。
+    rc_dedup: FxHashMap<usize, u64>,
+    /// 写入模式下用于 `Arc` 去重的「指针地址 → ID」映射（理由同上）。
+    arc_dedup: FxHashMap<usize, u64>,
     /// 读取模式为 true（加载时），写入模式为 false（保存时）。
     reading: bool,
     /// 当前正在读写的节点句柄。
@@ -453,6 +460,8 @@ impl Visitor {
             type_name_map: FxHashMap::default(),
             rc_map: FxHashMap::default(),
             arc_map: FxHashMap::default(),
+            rc_dedup: FxHashMap::default(),
+            arc_dedup: FxHashMap::default(),
             reading: false,
             current_node: root,
             root,
@@ -472,18 +481,12 @@ impl Visitor {
     where
         T: Any,
     {
-        if let Some(id) = self.rc_map.iter().find_map(|(id, ptr)| {
-            if Rc::as_ptr(ptr) as *const T == Rc::as_ptr(rc) {
-                Some(*id)
-            } else {
-                None
-            }
-        }) {
-            (id, false)
+        if let Some(id) = self.rc_dedup.get(&(Rc::as_ptr(rc) as usize)) {
+            (*id, false)
         } else {
             let id = self.gen_unique_id();
             self.type_name_map.insert(id, std::any::type_name::<T>());
-            self.rc_map.insert(id, rc.clone());
+            self.rc_dedup.insert(Rc::as_ptr(rc) as usize, id);
             (id, true)
         }
     }
@@ -492,18 +495,12 @@ impl Visitor {
     where
         T: Any + Send + Sync,
     {
-        if let Some(id) = self.arc_map.iter().find_map(|(id, ptr)| {
-            if Arc::as_ptr(ptr) as *const T == Arc::as_ptr(arc) {
-                Some(*id)
-            } else {
-                None
-            }
-        }) {
-            (id, false)
+        if let Some(id) = self.arc_dedup.get(&(Arc::as_ptr(arc) as usize)) {
+            (*id, false)
         } else {
             let id = self.gen_unique_id();
             self.type_name_map.insert(id, std::any::type_name::<T>());
-            self.arc_map.insert(id, arc.clone());
+            self.arc_dedup.insert(Arc::as_ptr(arc) as usize, id);
             (id, true)
         }
     }
@@ -945,15 +942,19 @@ mod test {
     }
 
     fn serialize() -> Visitor {
+        let mut visitor = Visitor::new();
+
+        // 共享引用只能在**独占**状态下序列化内容（`Visit` 需要 `&mut`）。
+        // 先以独占身份把内容写进去、登记进指针去重表；之后再克隆出去共享，
+        // 序列化持有共享引用的对象时只会写回一个 id，不重新序列化内容。
         let mut resource = resource();
         let mut resource_arc = resource_arc();
-        let mut objects = objects(resource.clone(), resource_arc.clone());
-
-        let mut visitor = Visitor::new();
         resource.visit("SharedResource", &mut visitor).unwrap();
         resource_arc
             .visit("SharedResourceArc", &mut visitor)
             .unwrap();
+
+        let mut objects = objects(resource.clone(), resource_arc.clone());
         objects.visit("Objects", &mut visitor).unwrap();
         visitor
     }
@@ -1030,5 +1031,22 @@ mod test {
             objects.visit("Objects", &mut visitor).unwrap();
             assert_eq!(objects, expected_objects);
         }
+    }
+
+    #[test]
+    fn serializing_a_shared_rc_or_arc_is_an_explicit_error() {
+        // 共享的 `Rc`/`Arc` 无法在不违反别名规则的情况下取得 `&mut` 访问。
+        // 旧实现用裸指针硬转（未定义行为），现在必须显式报错而不是静默越界。
+        let shared = resource();
+        let mut cloned = shared.clone();
+        let mut visitor = Visitor::new();
+        let err = cloned.visit("Shared", &mut visitor).unwrap_err();
+        assert!(matches!(err, VisitError::SharedReferenceNotUnique(_)));
+
+        let shared = resource_arc();
+        let mut cloned = shared.clone();
+        let mut visitor = Visitor::new();
+        let err = cloned.visit("Shared", &mut visitor).unwrap_err();
+        assert!(matches!(err, VisitError::SharedReferenceNotUnique(_)));
     }
 }

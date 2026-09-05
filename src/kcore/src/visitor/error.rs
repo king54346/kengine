@@ -60,6 +60,10 @@ pub enum VisitError {
     /// `Rc` 和 `Arc` 在 Visitor 数据中存储基于内部指针的 ID；
     /// 此错误表示读取时发现某个 ID 值为 0。
     UnexpectedRcNullIndex,
+    /// 尝试读写一个被多处共享的 `Rc`/`Arc` 的内容。
+    /// `Visit` 的签名要求独占（`&mut`）访问，而共享状态下无法安全取得；
+    /// 强行访问会违反别名规则（未定义行为）。先克隆/`make_mut` 成独占再序列化。
+    SharedReferenceNotUnique(&'static str),
     /// 尝试访问互斥锁时发生毒化错误。
     PoisonedMutex,
     /// 尝试从文件解码 Visitor 数据时遇到文件加载错误。
@@ -134,6 +138,10 @@ impl Display for VisitError {
             Self::RefCellAlreadyMutableBorrowed => write!(f, "RefCell 已被可变借用"),
             Self::User(msg) => write!(f, "用户自定义错误：{msg}"),
             Self::UnexpectedRcNullIndex => write!(f, "Rc 空索引（意外）"),
+            Self::SharedReferenceNotUnique(ty) => write!(
+                f,
+                "{ty} 被多处共享，无法独占访问其内容；请先克隆或 `make_mut` 成独占再序列化"
+            ),
             Self::PoisonedMutex => write!(f, "尝试锁定已毒化的互斥锁"),
             Self::FileLoadError(e) => write!(f, "文件加载错误：{e:?}"),
             Self::ParseIntError(e) => write!(f, "无法解析整数：{e:?}"),

@@ -294,22 +294,34 @@ where
                 }
             } else {
                 region.type_name_map.insert(id, std::any::type_name::<T>());
-                region.rc_map.insert(id, self.clone());
-                let result = unsafe { rc_to_raw(self).visit("RcData", &mut region) };
-                // Sometimes visiting is done experimentally, just to see if it would succeed, and visiting continues along a different
-                // path on failure. This means that the visitor must be in a valid state even after a failure, so we must remove
-                // the invalid rc_map entry if visiting failed.
+                // 先在独占状态下把内容填好，再放进共享表。放进表里意味着别处可以
+                // clone 到同一份数据，那时再取 `&mut` 就是别名访问（未定义行为）。
+                let result = match rc_to_mut(self) {
+                    Some(data) => data.visit("RcData", &mut region),
+                    None => Err(VisitError::SharedReferenceNotUnique(
+                        std::any::type_name::<T>(),
+                    )),
+                };
+                // 有些场景下 visit 只是试探性的：失败后还会换条路继续走，因此必须把
+                // 刚才登记的条目撤掉，让 Visitor 回到干净状态。
                 if result.is_err() {
                     region.type_name_map.remove(&id);
-                    region.rc_map.remove(&id);
                     return result;
                 }
+                region.rc_map.insert(id, self.clone());
             }
         } else {
             let (mut id, serialize_data) = region.rc_id(self);
             id.visit("Id", &mut region)?;
             if serialize_data {
-                unsafe { rc_to_raw(self).visit("RcData", &mut region)? };
+                match rc_to_mut(self) {
+                    Some(data) => data.visit("RcData", &mut region)?,
+                    None => {
+                        return Err(VisitError::SharedReferenceNotUnique(
+                            std::any::type_name::<T>(),
+                        ))
+                    }
+                }
             }
         }
 
@@ -353,24 +365,18 @@ where
     }
 }
 
-unsafe fn arc_to_ptr<T>(arc: &Arc<T>) -> *mut T {
-    &**arc as *const T as *mut T
+/// 安全地取得 `Rc` 内容的独占可变借用。
+///
+/// `Visit` 的签名是 `&mut self`，读写都要可变借用其内容。一旦 `Rc` 被多处共享
+/// （强引用计数 > 1），就无法在不违反别名规则的前提下取得 `&mut T`——旧实现用
+/// 裸指针硬转（未定义行为），这里改为显式返回 `None`，由调用方报错。
+fn rc_to_mut<T>(rc: &mut Rc<T>) -> Option<&mut T> {
+    Rc::get_mut(rc)
 }
 
-unsafe fn rc_to_ptr<T>(rc: &Rc<T>) -> *mut T {
-    &**rc as *const T as *mut T
-}
-
-// FIXME: Visiting an Rc/Arc is undefined behavior because it mutates the shared data.
-#[allow(clippy::mut_from_ref)]
-unsafe fn arc_to_raw<T>(arc: &Arc<T>) -> &mut T {
-    unsafe { &mut *arc_to_ptr(arc) }
-}
-
-// FIXME: Visiting an Rc/Arc is undefined behavior because it mutates the shared data.
-#[allow(clippy::mut_from_ref)]
-unsafe fn rc_to_raw<T>(rc: &Rc<T>) -> &mut T {
-    unsafe { &mut *rc_to_ptr(rc) }
+/// 安全地取得 `Arc` 内容的独占可变借用（理由见 [`rc_to_mut`]）。
+fn arc_to_mut<T>(arc: &mut Arc<T>) -> Option<&mut T> {
+    Arc::get_mut(arc)
 }
 
 impl<T> Visit for Arc<T>
@@ -397,22 +403,31 @@ where
                 }
             } else {
                 region.type_name_map.insert(id, std::any::type_name::<T>());
-                region.arc_map.insert(id, self.clone());
-                let result = unsafe { arc_to_raw(self).visit("ArcData", &mut region) };
-                // Sometimes visiting is done experimentally, just to see if it would succeed, and visiting continues along a different
-                // path on failure. This means that the visitor must be in a valid state even after a failure, so we must remove
-                // the invalid arc_map entry if visiting failed.
+                // 先在独占状态下把内容填好，再放进共享表（理由见 `Visit for Rc`）。
+                let result = match arc_to_mut(self) {
+                    Some(data) => data.visit("ArcData", &mut region),
+                    None => Err(VisitError::SharedReferenceNotUnique(
+                        std::any::type_name::<T>(),
+                    )),
+                };
                 if result.is_err() {
                     region.type_name_map.remove(&id);
-                    region.arc_map.remove(&id);
                     return result;
                 }
+                region.arc_map.insert(id, self.clone());
             }
         } else {
             let (mut id, serialize_data) = region.arc_id(self);
             id.visit("Id", &mut region)?;
             if serialize_data {
-                unsafe { arc_to_raw(self).visit("ArcData", &mut region)? };
+                match arc_to_mut(self) {
+                    Some(data) => data.visit("ArcData", &mut region)?,
+                    None => {
+                        return Err(VisitError::SharedReferenceNotUnique(
+                            std::any::type_name::<T>(),
+                        ))
+                    }
+                }
             }
         }
 
@@ -442,21 +457,20 @@ where
                         });
                     }
                 } else {
-                    // Create new value wrapped into Rc and deserialize it.
-                    let rc = Rc::new(T::default());
+                    // 新建一个独占的 `Rc`，填好内容后再放进共享表并降级成 Weak。
+                    let mut rc = Rc::new(T::default());
                     region.type_name_map.insert(id, std::any::type_name::<T>());
-                    region.rc_map.insert(id, rc.clone());
-
-                    let result = unsafe { rc_to_raw(&rc).visit("RcData", &mut region) };
-                    // Sometimes visiting is done experimentally, just to see if it would succeed, and visiting continues along a different
-                    // path on failure. This means that the visitor must be in a valid state even after a failure, so we must remove
-                    // the invalid rc_map entry if visiting failed.
+                    let result = match rc_to_mut(&mut rc) {
+                        Some(data) => data.visit("RcData", &mut region),
+                        None => Err(VisitError::SharedReferenceNotUnique(
+                            std::any::type_name::<T>(),
+                        )),
+                    };
                     if result.is_err() {
                         region.type_name_map.remove(&id);
-                        region.rc_map.remove(&id);
                         return result;
                     }
-
+                    region.rc_map.insert(id, rc.clone());
                     *self = Rc::downgrade(&rc);
                 }
             }
@@ -464,7 +478,9 @@ where
             let (mut id, serialize_data) = region.rc_id(&rc);
             id.visit("Id", &mut region)?;
             if serialize_data {
-                unsafe { rc_to_raw(&rc).visit("RcData", &mut region)? };
+                // 从 Weak 升级出来的 `Rc` 必然与数据的所有者共享（升级本身就多出一个
+                // 强引用），无法独占访问其内容，这里没有安全路径，只能报错。
+                return Err(VisitError::SharedReferenceNotUnique(std::any::type_name::<T>()));
             }
         } else {
             let mut index = 0u64;
@@ -497,18 +513,20 @@ where
                         });
                     }
                 } else {
-                    let arc = Arc::new(T::default());
+                    // 新建一个独占的 `Arc`，填好内容后再放进共享表并降级成 Weak。
+                    let mut arc = Arc::new(T::default());
                     region.type_name_map.insert(id, std::any::type_name::<T>());
-                    region.arc_map.insert(id, arc.clone());
-                    let result = unsafe { arc_to_raw(&arc).visit("ArcData", &mut region) };
-                    // Sometimes visiting is done experimentally, just to see if it would succeed, and visiting continues along a different
-                    // path on failure. This means that the visitor must be in a valid state even after a failure, so we must remove
-                    // the invalid arc_map entry if visiting failed.
+                    let result = match arc_to_mut(&mut arc) {
+                        Some(data) => data.visit("ArcData", &mut region),
+                        None => Err(VisitError::SharedReferenceNotUnique(
+                            std::any::type_name::<T>(),
+                        )),
+                    };
                     if result.is_err() {
                         region.type_name_map.remove(&id);
-                        region.arc_map.remove(&id);
                         return result;
                     }
+                    region.arc_map.insert(id, arc.clone());
                     *self = Arc::downgrade(&arc);
                 }
             }
@@ -516,7 +534,8 @@ where
             let (mut id, serialize_data) = region.arc_id(&arc);
             id.visit("Id", &mut region)?;
             if serialize_data {
-                unsafe { arc_to_raw(&arc) }.visit("ArcData", &mut region)?;
+                // 从 Weak 升级出来的 `Arc` 必然与数据的所有者共享，无法独占访问。
+                return Err(VisitError::SharedReferenceNotUnique(std::any::type_name::<T>()));
             }
         } else {
             let mut index = 0u64;
