@@ -683,7 +683,7 @@ impl Visit for char {
         let mut bytes = *self as u32;
         bytes.visit(name, visitor)?;
         if visitor.is_reading() {
-            *self = char::from_u32(bytes).unwrap();
+            *self = char::from_u32(bytes).unwrap_or(char::REPLACEMENT_CHARACTER);
         }
         Ok(())
     }

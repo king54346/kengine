@@ -283,8 +283,8 @@ impl AudioSource for StreamingSource {
             let available_frames = available_samples / ch;
             let can_write = frames_written_available(available_frames, frames_requested);
 
-            for i in 0..can_write * ch {
-                out[i] = g.ring.pop_front().unwrap_or(0.0);
+            for dst in &mut out[..can_write * ch] {
+                *dst = g.ring.pop_front().unwrap_or(0.0);
             }
             can_write
         };

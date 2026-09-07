@@ -756,10 +756,11 @@ impl Mesh {
             let v1 = vertices[i1].position();
             let v2 = vertices[i2].position();
 
-            if let Some((t, normal)) = ray_triangle(origin, dir, v0, v1, v2) {
-                if t > 0.0 && best.map_or(true, |(b, _)| t < b) {
-                    best = Some((t, normal));
-                }
+            if let Some((t, normal)) = ray_triangle(origin, dir, v0, v1, v2)
+                && t > 0.0
+                && best.is_none_or(|(b, _)| t < b)
+            {
+                best = Some((t, normal));
             }
         }
 
@@ -787,7 +788,7 @@ fn ray_triangle(origin: Vec3, dir: Vec3, v0: Vec3, v1: Vec3, v2: Vec3) -> Option
 
     // 重心坐标 u：tvec 在 edge2 法线上的投影。
     let u = tvec.dot(dir.cross(edge2)) * inv_det;
-    if u < 0.0 || u > 1.0 {
+    if !(0.0..=1.0).contains(&u) {
         return None;
     }
 

@@ -189,6 +189,8 @@ pub struct Scene {
     /// 放在场景上而不是渲染器上，是因为想画调试线的代码（游戏逻辑、
     /// 物理、脚本）拿得到的是场景，拿不到渲染器。渲染器每帧读走后清空。
     gizmos: Gizmos,
+    /// 用于 `update()` 的树遍历栈，复用分配。
+    scratch_traversal_stack: Vec<(Handle<Node>, kmath::Mat4, bool)>,
 }
 
 /// 按组件分类的节点句柄索引。
@@ -230,6 +232,7 @@ impl NodeIndex {
         self.ragdolls.clear();
         self.sounds.clear();
         self.scripts.clear();
+        self.terrains.clear();
     }
 }
 
@@ -260,6 +263,7 @@ impl Scene {
             reflection_probes: Vec::new(),
             probe_settings: kpbr::prefilter::PrefilterSettings::default(),
             environment_version: 0,
+            scratch_traversal_stack: Vec::new(),
         }
     }
 
@@ -288,6 +292,7 @@ impl Scene {
             reflection_probes: Vec::new(),
             probe_settings: kpbr::prefilter::PrefilterSettings::default(),
             environment_version: 0,
+            scratch_traversal_stack: Vec::new(),
         }
     }
 
@@ -730,7 +735,9 @@ impl Scene {
         self.index.clear();
 
         // ── 第一趟：沿树算世界变换，顺手把挂了组件的节点分类记下 ──
-        let mut stack = vec![(self.root, Mat4::IDENTITY, true)];
+        let mut stack = std::mem::take(&mut self.scratch_traversal_stack);
+        stack.clear();
+        stack.push((self.root, kmath::Mat4::IDENTITY, true));
         while let Some((handle, parent_matrix, parent_visible)) = stack.pop() {
             let (global, visible, child_count, drawable, components) = {
                 let node = &mut self.nodes[handle];
@@ -821,6 +828,8 @@ impl Scene {
                 stack.push((child, global, visible));
             }
         }
+        
+        self.scratch_traversal_stack = stack;
 
         // ── 地形 ──
         // 排在第一趟**之后**：它要靠索引找到地形节点，而索引正是第一趟建的。

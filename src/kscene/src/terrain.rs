@@ -287,6 +287,18 @@ mod tests {
     }
 
     #[test]
+    fn the_terrain_index_does_not_grow_across_frames() {
+        // `NodeIndex::clear()` 曾经漏清 `terrains`，导致树遍历每帧把同一个
+        // 地形句柄再 push 一次：索引无界增长，`update_terrains` 的
+        // `.clone()` 越跑越贵，还对同一块地形重复做 LOD 判定。
+        let (mut scene, _) = scene();
+        for _ in 0..10 {
+            scene.update();
+        }
+        assert_eq!(scene.index.terrains.len(), 1);
+    }
+
+    #[test]
     fn chunk_meshes_are_rebuilt_when_the_camera_moves() {
         let (mut scene, handle) = scene();
         let child = scene.try_get(handle).unwrap().children()[3];
