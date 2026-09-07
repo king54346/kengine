@@ -8,3 +8,4 @@ kcore = { path = "../kcore" }
 kmath = { path = "../kmath" }
 kmesh = { path = "../kmesh" }
 kphysics = { path = "../kphysics" }
+ktexture = { path = "../ktexture" }

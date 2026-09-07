@@ -81,7 +81,7 @@ impl Scene {
             return Vec::new();
         };
 
-        let updates = terrain.update(local_camera);
+        let (updates, dirty) = terrain.update(local_camera);
         let mut touched = Vec::new();
         if !updates.is_empty() {
             let meshes: Vec<_> = updates
@@ -91,9 +91,35 @@ impl Scene {
             touched = self.sync_terrain_chunks(handle, meshes);
         }
 
+        let mut material_to_broadcast = None;
+        let mut children_to_update = Vec::new();
+
         if let Some(node) = self.try_get_mut(handle) {
+            // 如果地形变脏（主要是 splat map 涂刷），刷新材质里的 splat 纹理
+            if dirty {
+                let texture = terrain.splat().to_texture();
+                let resource = kasset::Resource::new_ok("splat_texture", texture);
+                
+                let mut material = node.material().cloned().unwrap_or_else(|| kmaterial::Material::new());
+                material = material.with("custom_texture0", kmaterial::MaterialValue::Texture(resource));
+                node.set_material(material.clone());
+                
+                material_to_broadcast = Some(material);
+                children_to_update = node.children().to_vec();
+            }
             node.set_terrain(terrain);
         }
+        
+        if let Some(material) = material_to_broadcast {
+            for child in children_to_update {
+                if let Some(child_node) = self.try_get_mut(child) {
+                    if child_node.name.starts_with("__chunk") {
+                        child_node.set_material(material.clone());
+                    }
+                }
+            }
+        }
+
         touched
     }
 

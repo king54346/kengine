@@ -114,7 +114,7 @@ impl Terrain {
     ///
     /// 只报告变了的块。每帧无脑重建全部块的话，一块 1024² 的地形
     /// 每帧要生成两百万个三角形，CPU 直接跑满。
-    pub fn update(&mut self, camera: Vec3) -> Vec<ChunkUpdate> {
+    pub fn update(&mut self, camera: Vec3) -> (Vec<ChunkUpdate>, bool) {
         let mut updates = Vec::new();
         let dirty = self.dirty;
 
@@ -150,7 +150,7 @@ impl Terrain {
         }
 
         self.dirty = false;
-        updates
+        (updates, dirty)
     }
 
     /// 生成某一块的网格，含边界对齐。
@@ -270,7 +270,7 @@ mod tests {
     fn the_first_update_reports_every_chunk() {
         // 一块都不报的话，地形第一帧是空的。
         let mut terrain = terrain();
-        let updates = terrain.update(Vec3::ZERO);
+        let (updates, _) = terrain.update(Vec3::ZERO);
         assert_eq!(updates.len(), 16);
     }
 
@@ -280,7 +280,7 @@ mod tests {
         // 两百万个三角形，CPU 直接跑满。
         let mut terrain = terrain();
         terrain.update(Vec3::new(160.0, 50.0, 160.0));
-        let second = terrain.update(Vec3::new(160.0, 50.0, 160.0));
+        let (second, _) = terrain.update(Vec3::new(160.0, 50.0, 160.0));
         assert!(second.is_empty(), "相机没动却报了 {} 块", second.len());
     }
 
@@ -288,7 +288,7 @@ mod tests {
     fn moving_the_camera_changes_some_lods() {
         let mut terrain = terrain();
         terrain.update(Vec3::new(0.0, 0.0, 0.0));
-        let updates = terrain.update(Vec3::new(320.0, 0.0, 320.0));
+        let (updates, _) = terrain.update(Vec3::new(320.0, 0.0, 320.0));
         assert!(!updates.is_empty(), "相机跑到对角却一块都没换 LOD");
     }
 
@@ -309,7 +309,7 @@ mod tests {
         terrain.update(Vec3::new(0.0, 0.0, 0.0));
 
         // 稍微挪一下相机，只让少数几块换档。
-        let updates = terrain.update(Vec3::new(40.0, 0.0, 0.0));
+        let (updates, _) = terrain.update(Vec3::new(40.0, 0.0, 0.0));
         if updates.is_empty() {
             return;
         }
@@ -330,11 +330,11 @@ mod tests {
     fn editing_the_heightmap_rebuilds_everything() {
         let mut terrain = terrain();
         terrain.update(Vec3::ZERO);
-        assert!(terrain.update(Vec3::ZERO).is_empty());
+        assert!(terrain.update(Vec3::ZERO).0.is_empty());
 
         terrain.heightmap_mut().set_height(5, 5, 30.0);
         assert_eq!(
-            terrain.update(Vec3::ZERO).len(),
+            terrain.update(Vec3::ZERO).0.len(),
             16,
             "改了高度图之后该整体重建"
         );
@@ -345,7 +345,7 @@ mod tests {
         let mut terrain = terrain();
         terrain.update(Vec3::ZERO);
         terrain.set_lod_distances(vec![10.0]);
-        assert_eq!(terrain.update(Vec3::ZERO).len(), 16);
+        assert_eq!(terrain.update(Vec3::ZERO).0.len(), 16);
     }
 
     #[test]

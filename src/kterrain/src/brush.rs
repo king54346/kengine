@@ -240,6 +240,30 @@ impl SplatMap {
         }
         touched
     }
+
+    /// 把混合图打包成 GPU 可以采样的纹理。
+    ///
+    /// 最多支持 4 层，包在一个 RGBA8 纹理里。
+    /// 如果实际层数不够 4 层，超出的通道填 0。
+    pub fn to_texture(&self) -> ktexture::Texture {
+        // 目前如果超过 4 层也只取前 4 层，后续如果有需求可以按 ceil(layers / 4) 做 TextureArray。
+        let width = self.cols as u32;
+        let height = self.rows as u32;
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+
+        for vertex in 0..self.cols * self.rows {
+            let start = vertex * self.layers;
+            let weights = &self.weights[start..start + self.layers];
+            for c in 0..4 {
+                if c < self.layers {
+                    pixels.push((weights[c].clamp(0.0, 1.0) * 255.0) as u8);
+                } else {
+                    pixels.push(0);
+                }
+            }
+        }
+        ktexture::Texture::new(width, height, pixels)
+    }
 }
 
 impl Visit for SplatMap {
