@@ -777,7 +777,14 @@ fn ray_triangle(origin: Vec3, dir: Vec3, v0: Vec3, v1: Vec3, v2: Vec3) -> Option
     let edge2 = v2 - v0;
     let normal = edge1.cross(edge2);
 
-    let det = dir.dot(normal);
+    // `det` 必须是 `edge1 · (dir × edge2)`，不是 `dir · (edge1 × edge2)`——
+    // 两者只差一个符号（标量三重积对调前两个参数会反号），但那个符号会经
+    // `inv_det` 一路带进 u、v、t 三个值，让它们全部反号。多数命中因此会被
+    // 「重心坐标必须落在 [0,1]」的检查误判出界，只有极少数边界情形凑巧
+    // 还在范围内——这正是这条路径长期没被测试挡住、只在两个「必然命中」
+    // 的用例上才炸出来的原因。
+    let h = dir.cross(edge2);
+    let det = edge1.dot(h);
     // det 接近零说明射线与三角形平行，无交点。
     if det.abs() < 1e-10 {
         return None;
@@ -787,19 +794,20 @@ fn ray_triangle(origin: Vec3, dir: Vec3, v0: Vec3, v1: Vec3, v2: Vec3) -> Option
     let tvec = origin - v0;
 
     // 重心坐标 u：tvec 在 edge2 法线上的投影。
-    let u = tvec.dot(dir.cross(edge2)) * inv_det;
+    let u = tvec.dot(h) * inv_det;
     if !(0.0..=1.0).contains(&u) {
         return None;
     }
 
     // 重心坐标 v。
-    let v = dir.dot(tvec.cross(edge1)) * inv_det;
+    let q = tvec.cross(edge1);
+    let v = dir.dot(q) * inv_det;
     if v < 0.0 || u + v > 1.0 {
         return None;
     }
 
     // t：沿射线方向的有符号距离。
-    let t = edge2.dot(tvec.cross(edge1)) * inv_det;
+    let t = edge2.dot(q) * inv_det;
     Some((t, normal))
 }
 

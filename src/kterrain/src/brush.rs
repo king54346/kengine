@@ -255,10 +255,9 @@ impl SplatMap {
             let start = vertex * self.layers;
             let weights = &self.weights[start..start + self.layers];
             for c in 0..4 {
-                if c < self.layers {
-                    pixels.push((weights[c].clamp(0.0, 1.0) * 255.0) as u8);
-                } else {
-                    pixels.push(0);
+                match weights.get(c) {
+                    Some(weight) => pixels.push((weight.clamp(0.0, 1.0) * 255.0) as u8),
+                    None => pixels.push(0),
                 }
             }
         }

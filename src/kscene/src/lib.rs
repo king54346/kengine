@@ -828,7 +828,7 @@ impl Scene {
                 stack.push((child, global, visible));
             }
         }
-        
+
         self.scratch_traversal_stack = stack;
 
         // ── 地形 ──
@@ -1910,7 +1910,7 @@ impl Scene {
             // local_dir 经过了缩放，world_t = local_t * |local_dir|。
             let world_t = t * local_dir.length();
 
-            if best.map_or(true, |(b, _, _)| world_t < b) {
+            if best.is_none_or(|(b, _, _)| world_t < b) {
                 // 命中点在世界空间：local_origin + local_dir * t 再变换回去。
                 let hit_world = node
                     .global_transform
@@ -2582,6 +2582,58 @@ mod test {
             items[0].transform.to_scale_rotation_translation().2,
             Vec3::new(1.0, 2.0, 3.0)
         );
+    }
+
+    #[test]
+    fn pick_finds_a_mesh_with_no_collider() {
+        // `Scene::pick` 存在的理由就是「没挂碰撞体也能选中」——
+        // 这里刻意不给节点挂 `Collider`，物理射线（`cast_ray`）拾取不到它。
+        let mut scene = Scene::new();
+        let cube = scene.add_node(
+            Node::new("Cube")
+                .with_mesh(Mesh::cube())
+                .with_position(Vec3::new(0.0, 0.0, 0.0)),
+        );
+        scene.update();
+
+        let hit = scene.pick(Vec3::new(0.0, 10.0, 0.0), Vec3::NEG_Y);
+        let (handle, point) = hit.expect("从正上方垂直打方块应当命中");
+        assert_eq!(handle, cube);
+        // 方块顶面在 Y=0.5。
+        assert!((point.y - 0.5).abs() < 0.01, "命中点 {point:?} 不在顶面上");
+    }
+
+    #[test]
+    fn pick_ignores_nodes_without_a_mesh() {
+        let mut scene = Scene::new();
+        scene.add_node(Node::new("Empty").with_position(Vec3::ZERO));
+        scene.update();
+
+        assert!(scene.pick(Vec3::new(0.0, 10.0, 0.0), Vec3::NEG_Y).is_none());
+    }
+
+    #[test]
+    fn pick_returns_the_nearest_of_two_overlapping_meshes() {
+        // 射线从 Y=10 往下打：`near` 顶面在 Y=8.5（离起点 1.5），
+        // `far` 顶面在 Y=0.5（离起点 9.5）——两者都在射线路径上，
+        // 该命中离射线**起点**更近的 `near`。
+        let mut scene = Scene::new();
+        scene.add_node(
+            Node::new("Far")
+                .with_mesh(Mesh::cube())
+                .with_position(Vec3::new(0.0, 0.0, 0.0)),
+        );
+        let near = scene.add_node(
+            Node::new("Near")
+                .with_mesh(Mesh::cube())
+                .with_position(Vec3::new(0.0, 8.0, 0.0)),
+        );
+        scene.update();
+
+        let (handle, _) = scene
+            .pick(Vec3::new(0.0, 10.0, 0.0), Vec3::NEG_Y)
+            .expect("两个方块叠在射线上，该命中离得近的那个");
+        assert_eq!(handle, near, "拾取到的不是距离更近的方块");
     }
 
     /// 一个不受力、寿命够长的粒子系统，便于观察位置。

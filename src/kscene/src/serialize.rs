@@ -1122,4 +1122,51 @@ mod test {
 
         let _ = std::fs::remove_file(&path);
     }
+
+    #[test]
+    fn terrain_survives_a_roundtrip_heightmap_and_splat_alike() {
+        use kterrain::{Brush, Heightmap, Terrain};
+
+        let mut map = Heightmap::flat(9, 9, kmath::Vec2::new(80.0, 80.0));
+        for row in 0..map.rows() {
+            for col in 0..map.cols() {
+                map.set_height(col, row, (col as f32 * 0.4).sin() * 3.0);
+            }
+        }
+        let mut terrain = Terrain::new(map, 4, 2);
+
+        // 涂一笔，确认存下来的不只是高度图——splat 权重要跟着回来，
+        // 否则读档之后地表混合会静默复位成「全是第 0 层」。
+        let heightmap = terrain.heightmap().clone();
+        terrain.splat_mut().paint(
+            &heightmap,
+            &Brush {
+                center: kmath::Vec2::new(40.0, 40.0),
+                radius: 20.0,
+                strength: 1.0,
+                falloff: 0.5,
+            },
+            1,
+        );
+
+        let expected_heights = terrain.heightmap().heights().to_vec();
+        let expected_weights = terrain.splat().weights().to_vec();
+        let expected_chunk_count = terrain.chunks().len();
+
+        let mut scene = Scene::new();
+        let node = scene.add_node(Node::new("ground").with_terrain(terrain));
+        let restored = roundtrip(&mut scene);
+
+        let restored_terrain = restored[node].terrain().expect("地形该原样回来");
+        assert_eq!(
+            restored_terrain.heightmap().heights(),
+            expected_heights.as_slice()
+        );
+        assert_eq!(
+            restored_terrain.splat().weights(),
+            expected_weights.as_slice()
+        );
+        // 分块是读档时按高度图重新切的（不存分块本身），切法要一致。
+        assert_eq!(restored_terrain.chunks().len(), expected_chunk_count);
+    }
 }

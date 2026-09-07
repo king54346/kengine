@@ -95,27 +95,39 @@ impl Scene {
         let mut children_to_update = Vec::new();
 
         if let Some(node) = self.try_get_mut(handle) {
-            // 如果地形变脏（主要是 splat map 涂刷），刷新材质里的 splat 纹理
+            // `dirty` 覆盖高度图**和** splat 图的改动，笔刷涂图层之后
+            // splat 权重变了，材质里的权重纹理（`custom_texture0`）要跟着重传，
+            // 不然画面还是涂之前的混合结果。层贴图数组（`custom_texture_array`）
+            // 不在这里管——那是静态资源，由调用方在建材质时一次性设好。
             if dirty {
                 let texture = terrain.splat().to_texture();
                 let resource = kasset::Resource::new_ok("splat_texture", texture);
-                
-                let mut material = node.material().cloned().unwrap_or_else(|| kmaterial::Material::new());
-                material = material.with("custom_texture0", kmaterial::MaterialValue::Texture(resource));
+
+                let mut material = node
+                    .material()
+                    .cloned()
+                    .unwrap_or_else(kmaterial::Material::new);
+                material = material.with(
+                    "custom_texture0",
+                    kmaterial::MaterialValue::Texture(resource),
+                );
                 node.set_material(material.clone());
-                
+
                 material_to_broadcast = Some(material);
                 children_to_update = node.children().to_vec();
             }
             node.set_terrain(terrain);
         }
-        
+
         if let Some(material) = material_to_broadcast {
+            // 块子节点按 `sync_terrain_chunks` 里定下的命名找
+            // （`__chunk{index}`）：地形节点自己没有网格，材质挂在这里
+            // 只是当模板，真正被画出来的是这些块。
             for child in children_to_update {
-                if let Some(child_node) = self.try_get_mut(child) {
-                    if child_node.name.starts_with("__chunk") {
-                        child_node.set_material(material.clone());
-                    }
+                if let Some(child_node) = self.try_get_mut(child)
+                    && child_node.name.starts_with("__chunk")
+                {
+                    child_node.set_material(material.clone());
                 }
             }
         }
@@ -238,7 +250,7 @@ mod tests {
     use super::*;
     use crate::{Camera, Transform};
     use kmath::{Vec2, Vec3};
-    use kterrain::{Heightmap, Terrain};
+    use kterrain::{Brush, Heightmap, Terrain};
 
     fn terrain() -> Terrain {
         let mut map = Heightmap::flat(17, 17, Vec2::new(160.0, 160.0));
@@ -449,5 +461,49 @@ mod tests {
                 .raycast_terrain(Vec3::new(80.0, 100.0, 80.0), Vec3::Y, 300.0)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn painting_a_splat_layer_refreshes_the_chunk_material_weight_texture() {
+        // 涂完贴图层之后，权重纹理该经由 `update_terrain` 自动写回材质
+        // ——不然画面看到的还是涂之前的混合结果，而且不会有任何报错。
+        let (mut scene, handle) = scene();
+
+        let heightmap = scene
+            .try_get(handle)
+            .and_then(Node::terrain)
+            .unwrap()
+            .heightmap()
+            .clone();
+        let brush = Brush {
+            center: Vec2::new(80.0, 80.0),
+            radius: 60.0,
+            strength: 1.0,
+            falloff: 0.5,
+        };
+        if let Some(terrain) = scene.try_get_mut(handle).and_then(Node::terrain_mut) {
+            terrain.splat_mut().paint(&heightmap, &brush, 1);
+        }
+        scene.update();
+
+        let material = scene
+            .try_get(handle)
+            .unwrap()
+            .material()
+            .expect("涂图之后地形节点该有材质了");
+        assert!(
+            material.get("custom_texture0").is_some(),
+            "权重纹理该被写进材质"
+        );
+
+        // 块子节点得跟着换，不能只有地形节点自己的材质更新了——
+        // 真正被画出来的是子节点，地形节点自己没有网格。
+        let child = scene.try_get(handle).unwrap().children()[0];
+        let child_material = scene
+            .try_get(child)
+            .unwrap()
+            .material()
+            .expect("块子节点该继承材质");
+        assert!(child_material.get("custom_texture0").is_some());
     }
 }
