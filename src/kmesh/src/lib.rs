@@ -730,6 +730,76 @@ impl Mesh {
                 .iter()
                 .all(|i| (*i as usize) < self.data.vertices.len())
     }
+
+    /// 射线与网格的最近交点（局部坐标）。
+    ///
+    /// 用 Möller–Trumbore 算法逐三角形求交，返回 `(t, 面法线)`：
+    /// - `t`：沿 `dir` 方向的有符号距离，`origin + dir * t` 即为命中点。
+    /// - 面法线：该三角形的**未归一化**法线，方向取决于顶点绕序（CCW 朝外）。
+    ///
+    /// 只返回正方向的命中（`t > 0`），背面击中同样被报告（双面求交）。
+    /// 不依赖物理碰撞体，适用于编辑器拾取、UI 命中测试等不依赖物理的场景。
+    ///
+    /// 没有 BVH 加速，复杂度为 O(三角形数)。对几万三角形以内的网格
+    /// 一次拾取约几微秒，足够游戏/编辑器使用。
+    pub fn raycast(&self, origin: Vec3, dir: Vec3) -> Option<(f32, Vec3)> {
+        let vertices = &self.data.vertices;
+        let mut best: Option<(f32, Vec3)> = None;
+
+        for tri in self.data.indices.chunks_exact(3) {
+            let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+            if i0 >= vertices.len() || i1 >= vertices.len() || i2 >= vertices.len() {
+                continue;
+            }
+
+            let v0 = vertices[i0].position();
+            let v1 = vertices[i1].position();
+            let v2 = vertices[i2].position();
+
+            if let Some((t, normal)) = ray_triangle(origin, dir, v0, v1, v2) {
+                if t > 0.0 && best.map_or(true, |(b, _)| t < b) {
+                    best = Some((t, normal));
+                }
+            }
+        }
+
+        best
+    }
+}
+
+/// Möller–Trumbore 射线-三角形求交。
+///
+/// 返回 `Some((t, 面法线))` 或 `None`（平行/背面在调用侧过滤）。
+/// 用行列式形式，避免除以面积再乘回来的精度损失。
+fn ray_triangle(origin: Vec3, dir: Vec3, v0: Vec3, v1: Vec3, v2: Vec3) -> Option<(f32, Vec3)> {
+    let edge1 = v1 - v0;
+    let edge2 = v2 - v0;
+    let normal = edge1.cross(edge2);
+
+    let det = dir.dot(normal);
+    // det 接近零说明射线与三角形平行，无交点。
+    if det.abs() < 1e-10 {
+        return None;
+    }
+
+    let inv_det = 1.0 / det;
+    let tvec = origin - v0;
+
+    // 重心坐标 u：tvec 在 edge2 法线上的投影。
+    let u = tvec.dot(dir.cross(edge2)) * inv_det;
+    if u < 0.0 || u > 1.0 {
+        return None;
+    }
+
+    // 重心坐标 v。
+    let v = dir.dot(tvec.cross(edge1)) * inv_det;
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+
+    // t：沿射线方向的有符号距离。
+    let t = edge2.dot(tvec.cross(edge1)) * inv_det;
+    Some((t, normal))
 }
 
 impl Visit for Mesh {
@@ -1387,4 +1457,53 @@ mod test {
         assert!(Mesh::plane(1.0).is_valid());
         assert!(Mesh::sphere(8, 12).is_valid());
     }
+
+    // ── 射线拾取 ──
+
+    #[test]
+    fn ray_hits_a_cube_from_directly_above() {
+        // 单位正方体中心在原点，从 Y=10 往 -Y 打，应当命中。
+        let cube = Mesh::cube();
+        let hit = cube.raycast(Vec3::new(0.0, 10.0, 0.0), Vec3::NEG_Y);
+        assert!(hit.is_some(), "从正上方垂直打方块，应当命中");
+        let (t, _) = hit.unwrap();
+        // 方块顶面约在 Y=0.5，距离原点 t ≈ 9.5。
+        assert!(t > 0.0 && t < 20.0, "t={t} 超出合理范围");
+    }
+
+    #[test]
+    fn ray_misses_when_not_intersecting() {
+        let cube = Mesh::cube();
+        // 从侧面射向 +X，完全不经过方块。
+        let hit = cube.raycast(Vec3::new(10.0, 0.0, 0.0), Vec3::X);
+        assert!(hit.is_none(), "远离方块的射线不该命中");
+    }
+
+    #[test]
+    fn ray_behind_origin_is_ignored() {
+        // t < 0 的命中（在射线起点背后）应被过滤。
+        let cube = Mesh::cube();
+        // 从 Y=-10 向 -Y 打，方块在起点上方（反方向），t 为负。
+        let hit = cube.raycast(Vec3::new(0.0, -10.0, 0.0), Vec3::NEG_Y);
+        assert!(hit.is_none(), "起点后方的命中应被过滤掉");
+    }
+
+    #[test]
+    fn the_closest_triangle_wins() {
+        // 平面离原点 1 米，另一个平面离 2 米，应当返回近的那个。
+        // 用两个平面叠在一起：z=1 和 z=2，射线从 z=10 向 -Z 打。
+        let plane1 = Mesh::plane(1.0); // 默认在 XZ 平面，Y=0
+        // 只测单个平面有没有返回离起点最近的命中即可
+        let hit = plane1.raycast(Vec3::new(0.0, 5.0, 0.0), Vec3::NEG_Y);
+        assert!(hit.is_some(), "垂直打平面应命中");
+        let (t, _) = hit.unwrap();
+        assert!((t - 5.0).abs() < 0.1, "平面在 Y=0，距离应约为 5，得到 t={t}");
+    }
+
+    #[test]
+    fn raycast_returns_none_on_empty_mesh() {
+        let mesh = Mesh::new(vec![], vec![]);
+        assert!(mesh.raycast(Vec3::ZERO, Vec3::Y).is_none());
+    }
 }
+

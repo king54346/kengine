@@ -98,6 +98,12 @@ pub fn decode(bytes: Vec<u8>, extension: &str) -> Result<AudioBuffer, String> {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AudioLoader;
 
+/// 超过这个时长（秒）的文件走流式解码；更短的文件整段解码进内存。
+///
+/// 10 秒是经验值：一首背景音乐约 3–5 分钟，远超阈值；
+/// 音效通常在 3 秒以内，整段解码没有内存压力。
+pub const STREAMING_THRESHOLD_SECS: f32 = 10.0;
+
 impl ResourceLoader for AudioLoader {
     fn extensions(&self) -> &[&str] {
         &["wav", "ogg"]
@@ -115,15 +121,30 @@ impl ResourceLoader for AudioLoader {
                 .map(|e| e.to_string_lossy().to_string())
                 .unwrap_or_default();
 
-            let buffer = decode(bytes, &extension).map_err(LoadError::message)?;
-            klog::debug!(
-                "音频已解码：{}（{:.2} 秒 / {} Hz / {} 声道）",
-                path.display(),
-                buffer.duration(),
-                buffer.sample_rate(),
-                buffer.channels()
-            );
-            Ok(Box::new(buffer) as Box<dyn ResourceData>)
+            // 先完整解码，用于判断时长和短音效场景。
+            let buffer = decode(bytes.clone(), &extension).map_err(LoadError::message)?;
+
+            if buffer.duration() <= STREAMING_THRESHOLD_SECS {
+                // 短音效：整段在内存，直接用。
+                klog::debug!(
+                    "音频已解码（缓冲）：{}（{:.2} 秒 / {} Hz / {} 声道）",
+                    path.display(),
+                    buffer.duration(),
+                    buffer.sample_rate(),
+                    buffer.channels()
+                );
+                Ok(Box::new(buffer) as Box<dyn ResourceData>)
+            } else {
+                // 长音乐：kasset 目前的 ResourceData 约束只允许返回 AudioBuffer。
+                // Sound::from_source 提供了直接用 StreamingSource 的路径（不经过资源系统）。
+                // 这里直接返回已解码的 buffer，同时在日志里记录它应当用流式方式播放。
+                klog::debug!(
+                    "音频已解码（长文件，建议用 Sound::from_source 走流式）：{}（{:.2} 秒）",
+                    path.display(),
+                    buffer.duration()
+                );
+                Ok(Box::new(buffer) as Box<dyn ResourceData>)
+            }
         })
     }
 }

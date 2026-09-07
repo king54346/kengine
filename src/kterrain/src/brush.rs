@@ -13,6 +13,7 @@
 //! 所以先算完一整套新值，再统一写回。
 
 use crate::Heightmap;
+use kcore::visitor::{BinaryBlob, Visit, VisitResult, Visitor};
 use kmath::Vec2;
 
 /// 笔刷的形状与强度。
@@ -238,6 +239,35 @@ impl SplatMap {
             }
         }
         touched
+    }
+}
+
+impl Visit for SplatMap {
+    fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
+        let mut r = visitor.enter_region(name)?;
+
+        self.cols.visit("Cols", &mut r)?;
+        self.rows.visit("Rows", &mut r)?;
+        self.layers.visit("Layers", &mut r)?;
+        BinaryBlob {
+            vec: &mut self.weights,
+        }
+        .visit("Weights", &mut r)?;
+
+        // 读回时确保层数下限，并填补长度不足的部分。
+        if r.is_reading() {
+            self.layers = self.layers.max(1);
+            let expected = self.cols * self.rows * self.layers;
+            if self.weights.len() != expected {
+                self.weights.resize(expected, 0.0);
+                // 退化成全在第 0 层，比全零的着色结果（黑）好。
+                for vertex in 0..self.cols * self.rows {
+                    self.weights[vertex * self.layers] = 1.0;
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

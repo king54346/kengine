@@ -205,6 +205,13 @@ impl Visit for Node {
         visit_optional("Script", &mut self.script, &mut region, || {
             Box::new(crate::ScriptSlot::default())
         })?;
+        visit_optional("Terrain", &mut self.terrain, &mut region, || {
+            Box::new(kterrain::Terrain::new(
+                kterrain::Heightmap::flat(2, 2, kmath::Vec2::new(1.0, 1.0)),
+                16,
+                1,
+            ))
+        })?;
 
         self.parent.visit("Parent", &mut region)?;
         self.children.visit("Children", &mut region)?;

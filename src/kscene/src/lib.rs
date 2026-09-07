@@ -1862,6 +1862,57 @@ impl Scene {
         })
     }
 
+    /// 纯网格拾取：把射线与所有可见且带网格的节点做求交，返回最近命中节点及
+    /// **世界坐标**命中点。
+    ///
+    /// 与 [`cast_ray`](Self::cast_ray) 的区别：
+    /// - 不依赖物理碰撞体——没挂碰撞体的节点（编辑器物件、UI 元素）同样可以被拾取。
+    /// - 对每个节点的网格三角形做 Möller–Trumbore 求交（见 [`Mesh::raycast`]），
+    ///   不借助任何物理加速结构。
+    ///
+    /// `ray_origin` / `ray_dir` 都是**世界坐标**，`ray_dir` 不要求归一化。
+    /// 返回 `(命中节点句柄, 世界空间命中点)`，没有任何命中时返回 `None`。
+    pub fn pick(&self, ray_origin: Vec3, ray_dir: Vec3) -> Option<(Handle<Node>, Vec3)> {
+        let mut best: Option<(f32, Handle<Node>, Vec3)> = None;
+
+        for &handle in &self.index.drawables {
+            let Some(node) = self.nodes.try_borrow(handle).ok() else {
+                continue;
+            };
+            let Some(mesh) = node.mesh() else {
+                continue;
+            };
+
+            // 把射线从世界坐标变换到节点的局部坐标。
+            // 节点可能带有非均匀缩放，方向也要经过相同变换（用逆矩阵的转置）。
+            let to_local = node.global_transform.inverse();
+            let local_origin = to_local.transform_point3(ray_origin);
+            let local_dir = to_local.transform_vector3(ray_dir);
+
+            let Some((t, _normal)) = mesh.raycast(local_origin, local_dir) else {
+                continue;
+            };
+
+            if t <= 0.0 {
+                continue;
+            }
+
+            // 把 t 换算回世界坐标的距离，用于跨节点比大小。
+            // local_dir 经过了缩放，world_t = local_t * |local_dir|。
+            let world_t = t * local_dir.length();
+
+            if best.map_or(true, |(b, _, _)| world_t < b) {
+                // 命中点在世界空间：local_origin + local_dir * t 再变换回去。
+                let hit_world = node
+                    .global_transform
+                    .transform_point3(local_origin + local_dir * t);
+                best = Some((world_t, handle, hit_world));
+            }
+        }
+
+        best.map(|(_, handle, point)| (handle, point))
+    }
+
     /// 上一次 [`step_physics`](Self::step_physics) 产生的碰撞事件。
     pub fn collision_events(&self) -> &[CollisionEvent] {
         self.physics.collision_events()

@@ -5,6 +5,7 @@
 //! 每帧无脑重建全部块会把 CPU 吃光。
 
 use crate::{Chunk, Heightmap, NeighborLods, SplatMap, lod_for, split};
+use kcore::visitor::{Visit, VisitResult, Visitor};
 use kmath::{Aabb, Vec3};
 use kmesh::Mesh;
 
@@ -219,6 +220,26 @@ impl Terrain {
     pub fn collider_offset(&self) -> Vec3 {
         let size = self.heightmap.size();
         Vec3::new(size.x * 0.5, 0.0, size.y * 0.5)
+    }
+}
+
+impl Visit for Terrain {
+    fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
+        let mut r = visitor.enter_region(name)?;
+
+        self.heightmap.visit("Heightmap", &mut r)?;
+        self.splat.visit("Splat", &mut r)?;
+        self.cells_per_chunk.visit("CellsPerChunk", &mut r)?;
+        self.lod_distances.visit("LodDistances", &mut r)?;
+
+        // 读回时根据新的高度图重建分块；lods 初始化为 MAX 触发第一帧全量更新。
+        if r.is_reading() {
+            self.chunks = split(&self.heightmap, self.cells_per_chunk);
+            self.lods = vec![u32::MAX; self.chunks.len()];
+            self.dirty = true;
+        }
+
+        Ok(())
     }
 }
 

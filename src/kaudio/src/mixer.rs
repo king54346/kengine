@@ -13,6 +13,7 @@
 
 use crate::{
     buffer::AudioBuffer,
+    source::AudioSource,
     spatial::{Listener, Spatial, equal_power_pan},
 };
 use kcore::pool::{Handle, Pool};
@@ -31,9 +32,11 @@ pub enum Status {
 }
 
 /// 一个正在播放的声源。
-#[derive(Debug, Clone)]
 pub struct Sound {
+    /// 已解码的缓冲。短音效直接用，流式声音则在 render 前从 `stream` 里补充。
     buffer: AudioBuffer,
+    /// 可选的流式来源。`Some` 时每次渲染前从这里拉取新数据追加到 `buffer`。
+    stream: Option<Box<dyn AudioSource>>,
     /// 世界空间位置。只有开了 [`spatial`](Self::spatial) 才有意义。
     pub position: Vec3,
     /// 音量倍率。
@@ -54,11 +57,49 @@ pub struct Sound {
     previous_gains: Option<[f32; 2]>,
 }
 
+impl std::fmt::Debug for Sound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sound")
+            .field("buffer", &self.buffer)
+            .field("streaming", &self.stream.is_some())
+            .field("position", &self.position)
+            .field("gain", &self.gain)
+            .field("pitch", &self.pitch)
+            .field("looping", &self.looping)
+            .field("status", &self.status)
+            .field("playhead", &self.playhead)
+            .finish()
+    }
+}
+
 impl Sound {
+    /// 用流式来源创建声源。
+    ///
+    /// 适合 BGM：流式来源在后台线程按块解码，不会把整首歌搬进内存。
+    /// `stream.channels()` 和 `stream.sample_rate()` 用于初始化空缓冲。
+    pub fn from_source(stream: Box<dyn AudioSource>) -> Self {
+        // 用一个空缓冲作为占位，第一次 render 时会从 stream 填入数据。
+        let ch = stream.channels();
+        let sr = stream.sample_rate();
+        Self {
+            buffer: AudioBuffer::new(vec![], ch, sr),
+            stream: Some(stream),
+            position: Vec3::ZERO,
+            gain: 1.0,
+            pitch: 1.0,
+            looping: false,
+            spatial: None,
+            status: Status::Playing,
+            playhead: 0.0,
+            previous_gains: None,
+        }
+    }
+
     /// 用一段缓冲创建声源，默认是不循环的 2D 声音。
     pub fn new(buffer: AudioBuffer) -> Self {
         Self {
             buffer,
+            stream: None,
             position: Vec3::ZERO,
             gain: 1.0,
             pitch: 1.0,
@@ -267,7 +308,36 @@ impl Mixer {
         let mut finished = Vec::new();
 
         for (handle, sound) in self.sounds.pair_iter_mut() {
-            if sound.status != Status::Playing || sound.buffer.is_empty() {
+            if sound.status != Status::Playing {
+                continue;
+            }
+
+            // 流式声音：每块 render 前从流里拉取本块所需的帧数，覆盖 buffer。
+            // playhead 在流式模式下始终从 0 开始（因为 buffer 每次都是全新的一块）。
+            if let Some(stream) = sound.stream.as_mut() {
+                let ch = stream.channels() as usize;
+                let sr = stream.sample_rate();
+                // 需要多少源帧：考虑 pitch 的重采样。
+                let step = sr as f64 / output_rate * sound.pitch.max(0.0) as f64;
+                let source_frames_needed = ((frames as f64 * step) as usize + 4).min(sr as usize);
+                let sample_count = source_frames_needed * ch;
+
+                let mut raw = vec![0.0f32; sample_count];
+                stream.fill(&mut raw);
+
+                // 用这块原始样本替换 buffer，playhead 归零。
+                sound.buffer = AudioBuffer::new(raw, ch as u16, sr);
+                sound.playhead = 0.0;
+
+                // 流结束后：非循环声源标记为停止。
+                if stream.is_finished() && !sound.looping {
+                    sound.status = Status::Stopped;
+                    finished.push(handle);
+                    continue;
+                }
+            }
+
+            if sound.buffer.is_empty() {
                 continue;
             }
 
@@ -329,6 +399,7 @@ impl Mixer {
                 finished.push(handle);
             }
         }
+
 
         // 播完的非循环声源就地回收，调用方不必自己收尸。
         for handle in finished {

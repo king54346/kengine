@@ -10,6 +10,7 @@
 //! 最后一行会越界。所有换算都走 [`Heightmap::cell_size`] 与
 //! [`Heightmap::size`]，不在调用点手算。
 
+use kcore::visitor::{BinaryBlob, Visit, VisitResult, Visitor};
 use kmath::{Vec2, Vec3};
 
 /// 一张高度图。
@@ -205,6 +206,33 @@ impl Heightmap {
             }
         }
         (a + b) * 0.5
+    }
+}
+
+impl Visit for Heightmap {
+    fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
+        let mut r = visitor.enter_region(name)?;
+
+        self.cols.visit("Cols", &mut r)?;
+        self.rows.visit("Rows", &mut r)?;
+        self.size.visit("Size", &mut r)?;
+        BinaryBlob {
+            vec: &mut self.heights,
+        }
+        .visit("Heights", &mut r)?;
+
+        // 读回时验证长度一致性；不一致则把高度图缩到全平，避免越界。
+        if r.is_reading() {
+            let expected = self.cols * self.rows;
+            if self.heights.len() != expected {
+                self.heights.resize(expected, 0.0);
+            }
+            // 保证 cols/rows 的下限，与构造函数一致。
+            self.cols = self.cols.max(2);
+            self.rows = self.rows.max(2);
+        }
+
+        Ok(())
     }
 }
 
