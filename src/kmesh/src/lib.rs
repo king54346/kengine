@@ -30,7 +30,7 @@ pub const MESH_TYPE_UUID: Uuid = uuid!("5d7e9a32-1c48-4f60-8b93-a2e5c740d816");
 
 /// 常用类型的集中导出。
 pub mod prelude {
-    pub use crate::{Mesh, MeshSource, MorphDelta, MorphTarget, SkinVertex, Vertex};
+    pub use crate::{Mesh, MeshGroup, MeshSource, MorphDelta, MorphTarget, SkinVertex, Vertex};
     pub use kmath::Aabb;
 }
 
@@ -52,6 +52,17 @@ pub struct Vertex {
     ///
     /// 法线贴图需要它来构建切线空间；没有法线贴图时该字段不参与计算。
     pub tangent: [f32; 4],
+    /// 第二套纹理坐标。
+    ///
+    /// 材质贴图（`uv`）和光照贴图/lightmap（`uv1`）通常不是同一份展开——
+    /// 材质 UV 可以重叠平铺（一张砖墙纹理贴遍整栋房子），lightmap UV
+    /// 必须每个三角形占一块不重叠的独立区域（烘焙的光照不能被平铺污染）。
+    /// 两者混用一套的话，材质贴图的平铺方式会限制死 lightmap 的可用性，
+    /// 反过来 lightmap 的不重叠约束也会限制材质贴图没法平铺。
+    ///
+    /// 排在末尾而不是紧跟着 `uv`：字段顺序即着色器 `@location`
+    /// 顺序（见结构体文档），新增字段追加到末尾不打乱已有的 4 个槽位。
+    pub uv1: [f32; 2],
 }
 
 impl Default for Vertex {
@@ -62,12 +73,14 @@ impl Default for Vertex {
             uv: [0.0; 2],
             color: [1.0; 3],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            uv1: [0.0; 2],
         }
     }
 }
 
 impl Vertex {
-    /// 便捷构造，顶点色默认为白色。
+    /// 便捷构造，顶点色默认为白色，`uv1` 默认为零
+    /// （没有第二套 UV 的网格用不上它）。
     pub fn new(position: Vec3, normal: Vec3, uv: [f32; 2]) -> Self {
         Self {
             position: position.to_array(),
@@ -75,12 +88,19 @@ impl Vertex {
             uv,
             color: [1.0; 3],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            uv1: [0.0; 2],
         }
     }
 
     /// 指定顶点色。
     pub fn with_color(mut self, color: Vec3) -> Self {
         self.color = color.to_array();
+        self
+    }
+
+    /// 指定第二套纹理坐标（lightmap UV）。
+    pub fn with_uv1(mut self, uv1: [f32; 2]) -> Self {
+        self.uv1 = uv1;
         self
     }
 
@@ -246,6 +266,36 @@ impl Visit for MorphTarget {
     }
 }
 
+/// 子网格材质组：索引缓冲里的一段连续区间，配一个材质槽位号。
+///
+/// 对应 three.js/glTF 的「geometry groups」——一个 [`Mesh`] 不再只有
+/// 一个材质，而是按三角形分成几段，每段各查一个材质。
+///
+/// # 为什么是索引区间而不是材质列表本身
+///
+/// `MeshGroup` 只存**区间 + 槽位号**，材质本身存在 `kscene::Node` 上
+/// （`Node::materials`）。网格是可以被多个节点共享的几何数据
+/// （[`Mesh`] 的克隆是 `Arc` 共享），材质却是逐节点的外观——同一份
+/// 多子网格的几何，两个节点完全可以配不一样的一组材质（一个刷成红队
+/// 涂装，一个刷成蓝队涂装）。把材质存进 `MeshGroup` 会让这种复用变得
+/// 不可能。
+///
+/// # 谁来保证区间不越界、不重叠
+///
+/// 不保证。`start`/`count` 越界时渲染器按空区间处理（不画，不 panic）；
+/// 区间重叠是合法的（比如半透明的贴花层叠在不透明的基础层上），
+/// 调用方自己决定要不要这样做。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Visit, Default)]
+pub struct MeshGroup {
+    /// 起始索引（不是顶点号，是 `indices` 数组里的下标）。
+    pub start: u32,
+    /// 这一段占多少个索引。三角形图元下应当是 3 的倍数。
+    pub count: u32,
+    /// 材质槽位号，对应 `kscene::Node::materials()` 数组下标。
+    /// 越界时渲染器退回节点的单一 `material()`。
+    pub material: u32,
+}
+
 /// 这份几何是从哪个资源来的。
 ///
 /// 序列化场景时有它就只写一行引用，没有它才把顶点整个内联进去——
@@ -285,6 +335,8 @@ struct MeshData {
     morph_targets: Vec<MorphTarget>,
     /// 形变权重的初始值，与 `morph_targets` 一一对应。
     morph_weights: Vec<f32>,
+    /// 子网格材质组。空表示整份网格只有一个材质（绝大多数网格）。
+    groups: Vec<MeshGroup>,
     /// 构造时算好的局部包围盒。剔除每帧都要用，不能每次重新遍历顶点。
     aabb: Aabb,
 }
@@ -315,6 +367,15 @@ impl Visit for MeshData {
 
         self.morph_targets.visit("MorphTargets", &mut region)?;
         self.morph_weights.visit("MorphWeights", &mut region)?;
+
+        // 后加的字段，老存档里没有这块区域：读不到就当「没有子网格组」，
+        // 和这个字段的默认值一致。
+        let mut groups = std::mem::take(&mut self.groups);
+        if groups.visit("Groups", &mut region).is_ok() {
+            self.groups = groups;
+        } else {
+            self.groups = Vec::new();
+        }
 
         // 包围盒不存：它完全由顶点决定，存下来只会多一处可能对不上的真相。
         if region.is_reading() {
@@ -371,6 +432,7 @@ impl Mesh {
                 skin: None,
                 morph_targets: Vec::new(),
                 morph_weights: Vec::new(),
+                groups: Vec::new(),
                 aabb,
             }),
             version: 0,
@@ -454,6 +516,25 @@ impl Mesh {
     /// 是否是蒙皮网格。
     pub fn is_skinned(&self) -> bool {
         self.data.skin.is_some()
+    }
+
+    /// 按子网格材质组切分这份几何。
+    ///
+    /// 越界或反向的区间（`start + count` 超出索引数）会被丢弃而不是
+    /// panic 或截断——一段读不出正确三角形的区间，留着不如不画。
+    pub fn with_groups(mut self, groups: Vec<MeshGroup>) -> Self {
+        let index_count = self.data.indices.len() as u32;
+        let groups = groups
+            .into_iter()
+            .filter(|g| g.count > 0 && g.start.saturating_add(g.count) <= index_count)
+            .collect();
+        self.data_mut().groups = groups;
+        self
+    }
+
+    /// 子网格材质组。空表示整份网格只有一个材质。
+    pub fn groups(&self) -> &[MeshGroup] {
+        &self.data.groups
     }
 
     /// 附上形变目标与它们的初始权重。
@@ -1038,6 +1119,67 @@ mod test {
         let mesh = Mesh::cube().with_skin(vec![SkinVertex::default(); 3]);
 
         assert!(!mesh.is_skinned());
+    }
+
+    #[test]
+    fn meshes_have_no_groups_by_default() {
+        assert!(Mesh::cube().groups().is_empty());
+    }
+
+    #[test]
+    fn valid_groups_are_kept() {
+        let mesh = Mesh::cube(); // 36 个索引，6 个面各 6 个。
+        let groups = vec![
+            MeshGroup {
+                start: 0,
+                count: 6,
+                material: 0,
+            },
+            MeshGroup {
+                start: 6,
+                count: 30,
+                material: 1,
+            },
+        ];
+        let mesh = mesh.with_groups(groups.clone());
+        assert_eq!(mesh.groups(), groups.as_slice());
+    }
+
+    #[test]
+    fn out_of_bounds_groups_are_dropped_not_panicked() {
+        let mesh = Mesh::cube(); // 36 个索引。
+        let mesh = mesh.with_groups(vec![
+            MeshGroup {
+                start: 0,
+                count: 6,
+                material: 0,
+            },
+            // 30 + 10 = 40 > 36，越界。
+            MeshGroup {
+                start: 30,
+                count: 10,
+                material: 1,
+            },
+            // count 为 0 的区间画不出任何东西，同样没有意义。
+            MeshGroup {
+                start: 6,
+                count: 0,
+                material: 2,
+            },
+        ]);
+        assert_eq!(mesh.groups().len(), 1);
+        assert_eq!(mesh.groups()[0].material, 0);
+    }
+
+    #[test]
+    fn groups_survive_a_visitor_roundtrip() {
+        let mesh = Mesh::cube().with_groups(vec![MeshGroup {
+            start: 0,
+            count: 12,
+            material: 3,
+        }]);
+        let restored = roundtrip(&mesh);
+        assert_eq!(restored.groups(), mesh.groups());
     }
 
     #[test]

@@ -23,8 +23,9 @@ fn the_standard_shader_is_just_the_no_hook_case() {
     // 分成两条路的话，改了一处忘了另一处，自定义材质和标准材质
     // 会在光照上出现说不清的差异。
     assert_eq!(standard_shader_source(), material_shader_source(""));
-    // 而且三个默认钩子确实都被补上了。
+    // 而且四个默认钩子确实都被补上了。
     let source = standard_shader_source();
+    assert!(source.contains("fn material_vertex"), "缺了默认的顶点钩子");
     assert!(source.contains("fn material_surface"), "缺了默认的表面钩子");
     assert!(
         source.contains("fn material_lighting"),
@@ -34,6 +35,36 @@ fn the_standard_shader_is_just_the_no_hook_case() {
         source.contains("fn material_ambient"),
         "缺了默认的环境光钩子"
     );
+}
+
+#[test]
+fn a_hook_may_define_only_the_vertex_displacement() {
+    // 四个钩子各自独立。只写顶点位移的话其余三个都该由引擎补上。
+    let hook = "fn material_vertex(v: VertexSurface) -> VertexSurface { var out = v; out.position += v.normal * 0.1; return out; }";
+    let source = material_shader_source(hook);
+    assert!(source.contains(DEFAULT_SURFACE_HOOK));
+    assert!(source.contains(DEFAULT_LIGHTING_HOOK));
+    assert!(source.contains(DEFAULT_AMBIENT_HOOK));
+    assert!(!source.contains(DEFAULT_VERTEX_HOOK));
+    compile(hook).expect("只写顶点位移钩子该编译得过");
+}
+
+#[test]
+fn a_vertex_hook_can_sample_a_displacement_texture() {
+    // 顶点阶段只能用 `textureSampleLevel`（没有屏幕导数，`textureSample`
+    // 编不过），且要读的是 `custom_texture0`——它现在对顶点阶段可见
+    // （group(2) 整组标成了 `VERTEX_FRAGMENT`）。
+    compile(
+        r#"
+        fn material_vertex(vertex: VertexSurface) -> VertexSurface {
+            var out = vertex;
+            let height = textureSampleLevel(custom_texture0, base_color_sampler, vertex.uv, 0.0).r;
+            out.position = vertex.position + vertex.normal * height * vertex.params[0].x;
+            return out;
+        }
+        "#,
+    )
+    .expect("在顶点阶段采样位移贴图的钩子应当通过校验");
 }
 
 #[test]

@@ -337,3 +337,56 @@ path = "examples/kengine/new/physics_volume.rs"
 [[example]]
 name = "physics_break"
 path = "examples/kengine/new/physics_break.rs"
+
+# ── three.js 的 webgpu_materials_* 移植 ──
+[[example]]
+name = "materials_toon"
+path = "examples/kengine/new/materials_toon.rs"
+
+[[example]]
+name = "materials_matcap"
+path = "examples/kengine/new/materials_matcap.rs"
+
+[[example]]
+name = "materials_basic"
+path = "examples/kengine/new/materials_basic.rs"
+
+[[example]]
+name = "materialx_noise"
+path = "examples/kengine/new/materialx_noise.rs"
+
+[[example]]
+name = "materials_alphahash"
+path = "examples/kengine/new/materials_alphahash.rs"
+
+[[example]]
+name = "materials_arrays"
+path = "examples/kengine/new/materials_arrays.rs"
+
+[[example]]
+name = "materials_envmaps"
+path = "examples/kengine/new/materials_envmaps.rs"
+
+[[example]]
+name = "materials_cubemap_mipmaps"
+path = "examples/kengine/new/materials_cubemap_mipmaps.rs"
+
+[[example]]
+name = "materials_envmaps_bpcem"
+path = "examples/kengine/new/materials_envmaps_bpcem.rs"
+
+[[example]]
+name = "materials_transmission"
+path = "examples/kengine/new/materials_transmission.rs"
+
+[[example]]
+name = "materials_sss"
+path = "examples/kengine/new/materials_sss.rs"
+
+[[example]]
+name = "materials_displacementmap"
+path = "examples/kengine/new/materials_displacementmap.rs"
+
+[[example]]
+name = "materials_lightmap"
+path = "examples/kengine/new/materials_lightmap.rs"

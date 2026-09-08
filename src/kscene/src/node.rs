@@ -42,6 +42,14 @@ pub struct Node {
 
     pub(crate) mesh: Option<Mesh>,
     pub(crate) material: Option<Material>,
+    /// 子网格材质组用的一组材质，配 `mesh` 的
+    /// [`MeshGroup`](kmesh::MeshGroup)。空表示不使用子网格材质
+    /// （绝大多数节点），这时 `material` 是唯一的材质来源。
+    ///
+    /// 不放进 `Mesh` 是因为几何是共享资源（`Arc`），材质是逐节点的
+    /// 外观——同一份带分组的几何，两个节点该能配不一样的一组材质。
+    /// 详见 `kmesh::MeshGroup` 的文档。
+    pub(crate) materials: Vec<Material>,
     pub(crate) camera: Option<Camera>,
     pub(crate) light: Option<Light>,
     pub(crate) particles: Option<Box<ParticleSystem>>,
@@ -90,6 +98,7 @@ impl Node {
             light_mask: u32::MAX,
             mesh: None,
             material: None,
+            materials: Vec::new(),
             camera: None,
             light: None,
             // 装箱：粒子系统里有九个数组，直接内联会把每个 Node 撑大一大截，
@@ -296,6 +305,32 @@ impl Node {
     /// 材质的可变引用，可在运行时改颜色、换贴图。
     pub fn material_mut(&mut self) -> Option<&mut Material> {
         self.material.as_mut()
+    }
+
+    /// 子网格材质组用的一组材质。空表示不使用子网格材质。
+    pub fn materials(&self) -> &[Material] {
+        &self.materials
+    }
+
+    /// 子网格材质组用的一组材质的可变引用。
+    pub fn materials_mut(&mut self) -> &mut Vec<Material> {
+        &mut self.materials
+    }
+
+    /// 挂上（或替换）子网格材质组用的一组材质。
+    ///
+    /// 只在 `mesh` 带 [`MeshGroup`](kmesh::MeshGroup) 时才有意义——
+    /// 没有分组的网格只认 `material`，这组材质会被忽略而不是报错
+    /// （网格随时可能被换成不带分组的另一份，静默忽略比强制报错更不容易
+    /// 把调用方绊住）。
+    pub fn with_materials(mut self, materials: Vec<Material>) -> Self {
+        self.materials = materials;
+        self
+    }
+
+    /// 挂上（或替换）子网格材质组用的一组材质，作用在已有节点上。
+    pub fn set_materials(&mut self, materials: Vec<Material>) {
+        self.materials = materials;
     }
 
     /// 相机的只读引用。

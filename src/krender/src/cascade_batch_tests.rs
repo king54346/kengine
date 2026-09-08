@@ -16,6 +16,7 @@ fn batch_of(first: u32, count: u32) -> Batch {
         skinned: false,
         first,
         count,
+        index_range: (0, 36),
     }
 }
 

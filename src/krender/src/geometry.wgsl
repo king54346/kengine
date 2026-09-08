@@ -124,6 +124,9 @@ struct VertexInput {
     @location(3) color: vec3<f32>,
     // xyz = 切线，w = 副切线手性
     @location(4) tangent: vec4<f32>,
+    // 第二套 UV（lightmap 用）。5/6 留给 `SkinInput`，见 `VERTEX_ATTRIBUTES`
+    // 的注释。
+    @location(7) uv1: vec2<f32>,
 };
 
 // 蒙皮顶点属性，作为第二个顶点缓冲送进来。只有蒙皮管线声明它。

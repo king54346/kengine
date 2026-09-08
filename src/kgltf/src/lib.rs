@@ -182,6 +182,68 @@ mod test {
         assert!(child.parts.is_empty());
     }
 
+    /// 一个自包含的最小 glTF：单个三角形，带 `TEXCOORD_1`（lightmap 用的
+    /// 第二套 UV）但没有 `TEXCOORD_0`——专门用来确认两套 UV 不会串位。
+    fn triangle_gltf_with_uv1() -> String {
+        let mut buffer = Vec::new();
+        for position in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            for component in position {
+                buffer.extend_from_slice(&component.to_le_bytes());
+            }
+        }
+        for index in [0u16, 1, 2] {
+            buffer.extend_from_slice(&index.to_le_bytes());
+        }
+        // 索引区 6 字节后垫 2 字节，让 TEXCOORD_1 的 f32 从 4 字节对齐的
+        // 偏移开始——glTF 的浮点访问器要求这个，不对齐会被 gltf crate 拒绝。
+        buffer.extend_from_slice(&[0u8; 2]);
+        let uv1_offset = buffer.len();
+        for uv in [[0.1f32, 0.2], [0.3, 0.4], [0.5, 0.6]] {
+            for component in uv {
+                buffer.extend_from_slice(&component.to_le_bytes());
+            }
+        }
+        let encoded = STANDARD.encode(&buffer);
+        let byte_length = buffer.len();
+
+        format!(
+            r#"{{
+  "asset": {{"version": "2.0"}},
+  "scene": 0,
+  "scenes": [{{"nodes": [0]}}],
+  "nodes": [{{"mesh": 0, "name": "Triangle"}}],
+  "meshes": [{{"primitives": [{{"attributes": {{"POSITION": 0, "TEXCOORD_1": 2}}, "indices": 1}}]}}],
+  "accessors": [
+    {{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+     "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]}},
+    {{"bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR"}},
+    {{"bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2"}}
+  ],
+  "bufferViews": [
+    {{"buffer": 0, "byteOffset": 0, "byteLength": 36, "target": 34962}},
+    {{"buffer": 0, "byteOffset": 36, "byteLength": 6, "target": 34963}},
+    {{"buffer": 0, "byteOffset": {uv1_offset}, "byteLength": 24, "target": 34962}}
+  ],
+  "buffers": [{{"byteLength": {byte_length},
+    "uri": "data:application/octet-stream;base64,{encoded}"}}]
+}}"#
+        )
+    }
+
+    #[test]
+    fn imports_second_uv_set() {
+        let model = load(&triangle_gltf_with_uv1(), "tri_uv1.gltf").unwrap();
+        let model = model.data_ref().unwrap();
+        let mesh = model.mesh(0).unwrap();
+
+        // 没有 TEXCOORD_0：第一套 UV 该老老实实是零，不能被 TEXCOORD_1
+        // 的读取逻辑串位污染。
+        assert_eq!(mesh.vertices()[1].uv, [0.0, 0.0]);
+        assert_eq!(mesh.vertices()[0].uv1, [0.1, 0.2]);
+        assert_eq!(mesh.vertices()[1].uv1, [0.3, 0.4]);
+        assert_eq!(mesh.vertices()[2].uv1, [0.5, 0.6]);
+    }
+
     #[test]
     fn malformed_gltf_reports_error() {
         let error = load("{ not valid json", "bad.gltf").expect_err("非法 glTF 应当加载失败");

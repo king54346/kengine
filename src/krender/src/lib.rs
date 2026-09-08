@@ -48,12 +48,16 @@ use sprite2d::SpriteResources;
 use ui::UiResources;
 
 /// 顶点属性布局。字段顺序必须与 [`Vertex`] 及着色器的 `@location` 一致。
-const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+///
+/// 位置 7：5/6 留给 [`skin_layout`] 的蒙皮属性（第二个顶点缓冲），
+/// `uv1` 排在 [`Vertex`] 末尾，接着往后编号不会撞车。
+const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
     0 => Float32x3,
     1 => Float32x3,
     2 => Float32x2,
     3 => Float32x3,
     4 => Float32x4,
+    7 => Float32x2,
 ];
 
 fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
@@ -508,6 +512,12 @@ struct DrawCall {
     depth: f32,
     /// 世界空间包围盒，阴影的逐级剔除要用。
     aabb: kmath::Aabb,
+    /// 只画索引缓冲的 `(起点, 数量)`。子网格材质组的产物；
+    /// 没有分组的网格恒为 `(0, 整份网格的索引数)`。
+    ///
+    /// 参与批次键：两个绘制项哪怕网格、材质都一样，索引区间不同就是在画
+    /// 不同的几何，合成一批会把其中一段画成另一段的样子。
+    index_range: (u32, u32),
     uniforms: ObjectUniforms,
 }
 
@@ -529,6 +539,8 @@ struct Batch {
     first: u32,
     /// 实例数量。
     count: u32,
+    /// 只画索引缓冲的 `(起点, 数量)`，见 [`DrawCall::index_range`]。
+    index_range: (u32, u32),
 }
 
 /// 一帧的渲染统计。
@@ -677,7 +689,8 @@ fn build_batches_into(
                         && last.texture_key == draw.texture_key
                         && last.skinned == draw.skinned
                         && last.double_sided == draw.double_sided
-                        && last.shader_id == draw.shader_id =>
+                        && last.shader_id == draw.shader_id
+                        && last.index_range == draw.index_range =>
                 {
                     last.count += 1;
                 }
@@ -689,6 +702,7 @@ fn build_batches_into(
                     double_sided: draw.double_sided,
                     first: instances.len() as u32 - 1,
                     count: 1,
+                    index_range: draw.index_range,
                 }),
             }
         }
@@ -714,6 +728,9 @@ fn build_opaque_batches(
             // 着色器排在网格之前：换管线比换顶点缓冲贵。
             .then_with(|| a.shader_id.cmp(&b.shader_id))
             .then_with(|| a.mesh_id.cmp(&b.mesh_id))
+            // 同一份网格的不同子网格材质组紧跟着排在一起，不会被
+            // 中间插进来的别的网格打散。
+            .then_with(|| a.index_range.cmp(&b.index_range))
             .then_with(|| a.texture_key.cmp(&b.texture_key))
     });
 
@@ -731,7 +748,8 @@ fn build_opaque_batches(
                     && last.texture_key == draw.texture_key
                     && last.skinned == draw.skinned
                     && last.double_sided == draw.double_sided
-                    && last.shader_id == draw.shader_id =>
+                    && last.shader_id == draw.shader_id
+                    && last.index_range == draw.index_range =>
             {
                 last.count += 1;
             }
@@ -743,6 +761,7 @@ fn build_opaque_batches(
                 double_sided: draw.double_sided,
                 first: instances.len() as u32 - 1,
                 count: 1,
+                index_range: draw.index_range,
             }),
         }
     }
@@ -1289,10 +1308,17 @@ impl Renderer {
 
         // ── group(2)：材质贴图 ──
         // 材质贴图：基础色 / 法线 / 金属度粗糙度 / 遮蔽 / 自发光，共用一个采样器。
+        //
+        // 全组都标成 `VERTEX_FRAGMENT` 而不是只有 `FRAGMENT`：`material_vertex`
+        // 钩子（顶点位移用）要在顶点阶段采样贴图（比如位移贴图），
+        // 而它多半复用 `custom_texture0` 这类已有槽位而不是新开一组绑定。
+        // 没在顶点阶段用到的槽位（比如 `base_color_texture`）多余这一个
+        // 可见性标记，运行时没有任何代价——wgpu 的可见性只影响管线布局
+        // 校验，不影响没被读取的绑定。
         let mut texture_entries = vec![
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
                     view_dimension: wgpu::TextureViewDimension::D2,
@@ -1302,7 +1328,7 @@ impl Renderer {
             },
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
@@ -1313,7 +1339,7 @@ impl Renderer {
         for binding in 2..=TEXTURE_SLOTS as u32 {
             texture_entries.push(wgpu::BindGroupLayoutEntry {
                 binding,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
                     view_dimension: wgpu::TextureViewDimension::D2,
@@ -1330,7 +1356,7 @@ impl Renderer {
         // 采得到，采出来是 1，和别的槽位一个道理。
         texture_entries.push(wgpu::BindGroupLayoutEntry {
             binding: ARRAY_TEXTURE_BINDING,
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
             ty: wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable: true },
                 view_dimension: wgpu::TextureViewDimension::D2Array,
@@ -2759,6 +2785,10 @@ impl Renderer {
                 double_sided: material.double_sided(),
                 depth,
                 aabb: item.aabb,
+                // 没有子网格材质组时画整份网格——用 `mesh.index_count()`
+                // 而不是缓存里的 `gpu.index_count`：两者理应相等，但网格
+                // 缓存刚好在上面才建好或刷新过，直接用来源数据更直接。
+                index_range: item.index_range.unwrap_or((0, mesh.index_count())),
                 uniforms: ObjectUniforms {
                     model: model.to_cols_array_2d(),
                     // 逆转置，保证非均匀缩放下法线方向仍然正确。
@@ -3180,7 +3210,7 @@ impl Renderer {
                         wgpu::IndexFormat::Uint32,
                     );
                     pass.draw_indexed(
-                        0..gpu_mesh.index_count,
+                        batch.index_range.0..batch.index_range.0 + batch.index_range.1,
                         0,
                         batch.first..batch.first + batch.count,
                     );
@@ -3222,7 +3252,7 @@ impl Renderer {
                         wgpu::IndexFormat::Uint32,
                     );
                     pass.draw_indexed(
-                        0..gpu_mesh.index_count,
+                        batch.index_range.0..batch.index_range.0 + batch.index_range.1,
                         0,
                         batch.first..batch.first + batch.count,
                     );
@@ -3302,7 +3332,7 @@ impl Renderer {
                 pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 // 实例范围的起点即 `@builtin(instance_index)` 的起始值。
                 pass.draw_indexed(
-                    0..gpu_mesh.index_count,
+                    batch.index_range.0..batch.index_range.0 + batch.index_range.1,
                     0,
                     batch.first..batch.first + batch.count,
                 );
@@ -3400,7 +3430,7 @@ impl Renderer {
                         wgpu::IndexFormat::Uint32,
                     );
                     pass.draw_indexed(
-                        0..gpu_mesh.index_count,
+                        batch.index_range.0..batch.index_range.0 + batch.index_range.1,
                         0,
                         batch.first..batch.first + batch.count,
                     );
@@ -3851,6 +3881,10 @@ fn create_morph_weight_storage(device: &wgpu::Device, capacity: u64) -> wgpu::Bu
 const DEFAULT_SURFACE_HOOK: &str =
     "fn material_surface(surface: Surface) -> Surface {\n    return surface;\n}";
 
+/// 什么都不改的默认顶点钩子——绝大多数材质不需要顶点位移。
+const DEFAULT_VERTEX_HOOK: &str =
+    "fn material_vertex(vertex: VertexSurface) -> VertexSurface {\n    return vertex;\n}";
+
 /// 默认的光照模型：引擎自己那套 PBR。
 ///
 /// 和钩子用的是**同一个入口**——没写 `material_lighting` 的材质拼进来的
@@ -3964,10 +3998,16 @@ fn standard_shader_source() -> String {
 /// - `surface.wgsl` 定义 `Surface` 与 `LightingInput`，钩子要用它们；
 /// - `shader.wgsl` 调用钩子，所以钩子必须排在它之前。
 ///
-/// 三个钩子（`material_surface`、`material_lighting`、`material_ambient`）
-/// **全都是可选的**，没写的在这里补上默认实现。只想改颜色的材质不必抄
-/// 两段「照搬光照」，只想换光照模型的也不必抄一段「照搬表面」。
+/// 四个钩子（`material_vertex`、`material_surface`、`material_lighting`、
+/// `material_ambient`）**全都是可选的**，没写的在这里补上默认实现。
+/// 只想改颜色的材质不必抄三段「照搬顶点/光照/环境」，只想做顶点位移的
+/// 也不必抄三段「照搬表面/光照/环境」。
 fn material_shader_source(hook: &str) -> String {
+    let vertex_default = if hook_defines(hook, "material_vertex") {
+        ""
+    } else {
+        DEFAULT_VERTEX_HOOK
+    };
     let surface_default = if hook_defines(hook, "material_surface") {
         ""
     } else {
@@ -3994,6 +4034,7 @@ fn material_shader_source(hook: &str) -> String {
         geometry_source(),
         include_str!("surface.wgsl"),
         hook,
+        vertex_default,
         surface_default,
         lighting_default,
         ambient_default,
@@ -4874,6 +4915,29 @@ mod test {
     }
 
     #[test]
+    fn vertex_attributes_cover_the_whole_struct_with_no_gaps() {
+        // `wgpu::vertex_attr_array!` 按列表顺序**顺序累加**算偏移，不看
+        // `Vertex` 结构体本身——两边必须手动对齐。偏移错了不报任何错，
+        // 只会在屏幕上看到扭曲的 UV 或抖动的法线。
+        //
+        // 位置 0/12、法线 12/12、UV 8、颜色 12、切线 16、uv1 8，
+        // 总和必须正好是 `size_of::<Vertex>()`，一个字节都不能差——
+        // 差一个字节意味着后续所有顶点都读串位了，不是「差一点点」。
+        let sizes = [12usize, 12, 8, 12, 16, 8];
+        assert_eq!(sizes.iter().sum::<usize>(), size_of::<kmesh::Vertex>());
+        assert_eq!(VERTEX_ATTRIBUTES.len(), sizes.len());
+
+        let mut expected_offset = 0u64;
+        for (attribute, size) in VERTEX_ATTRIBUTES.iter().zip(sizes) {
+            assert_eq!(
+                attribute.offset, expected_offset,
+                "属性 {:?} 的偏移对不上", attribute.shader_location
+            );
+            expected_offset += size as u64;
+        }
+    }
+
+    #[test]
     fn uniform_sizes_match_wgsl_layout() {
         // Globals：view_proj(64) + camera/ambient/light_count 三个 vec4
         //          + 级联矩阵(64 × 4) + 切分/阴影/IBL/depth/frame 五个 vec4
@@ -5101,6 +5165,7 @@ mod test {
             skinned: false,
             depth: 0.0,
             aabb: kmath::Aabb::new(kmath::Vec3::ZERO, kmath::Vec3::ONE),
+            index_range: (0, 36),
             uniforms: ObjectUniforms::zeroed(),
         }
     }
@@ -5130,6 +5195,31 @@ mod test {
         assert!(!batches[0].double_sided);
         assert!(batches[1].double_sided);
         assert!(!batches[2].double_sided);
+    }
+
+    #[test]
+    fn grouped_index_ranges_cannot_share_a_batch() {
+        // 子网格材质组：同一份网格（同 mesh_id）的两段索引区间即便材质
+        // 贴图都一样，也是两段不同的几何。合成一批的话 `draw_indexed`
+        // 只会用其中一段的区间，另一段的实例会被画成同一段的样子——
+        // 不报错，只是画面上多出一份不该在那里的三角形。
+        let mut instances = Vec::new();
+        let mut bounds = Vec::new();
+        let first_group = draw(1, 1);
+        let second_group = DrawCall {
+            index_range: (36, 12),
+            ..draw(1, 1)
+        };
+        let batches = build_batches_into(
+            &[first_group.clone(), second_group, first_group],
+            &mut instances,
+            &mut bounds,
+            false,
+        );
+        assert_eq!(batches.len(), 3, "不同的索引区间被合进了同一批");
+        assert_eq!(batches[0].index_range, (0, 36));
+        assert_eq!(batches[1].index_range, (36, 12));
+        assert_eq!(batches[2].index_range, (0, 36));
     }
 
     #[test]

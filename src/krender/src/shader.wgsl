@@ -61,6 +61,8 @@ struct VertexOutput {
     @location(5) tangent_handedness: f32,
     // 片元着色器要拿它回存储缓冲里取材质参数。同一实例内是常量，故 flat。
     @location(6) @interpolate(flat) instance: u32,
+    // 第二套 UV（lightmap 用）。
+    @location(7) uv1: vec2<f32>,
 };
 
 @vertex
@@ -82,6 +84,17 @@ fn vs_main(
         &normal,
     );
 
+    var vertex_surface: VertexSurface;
+    vertex_surface.uv = in.uv;
+    vertex_surface.uv1 = in.uv1;
+    vertex_surface.time = globals.frame_params.x;
+    vertex_surface.params = object.params;
+    vertex_surface.position = position;
+    vertex_surface.normal = normal;
+    vertex_surface = material_vertex(vertex_surface);
+    position = vertex_surface.position;
+    normal = vertex_surface.normal;
+
     let world_position = object.model * vec4<f32>(position, 1.0);
 
     var out: VertexOutput;
@@ -93,6 +106,7 @@ fn vs_main(
     out.world_tangent = (object.model * vec4<f32>(in.tangent.xyz, 0.0)).xyz;
     out.tangent_handedness = in.tangent.w;
     out.uv = in.uv;
+    out.uv1 = in.uv1;
     out.color = in.color;
     return out;
 }
@@ -118,6 +132,19 @@ fn vs_skinned(
         &normal,
     );
 
+    // 位移同样排在形变之后、蒙皮之前，理由和形变一致——见 `VertexSurface`
+    // 的文档注释。
+    var vertex_surface: VertexSurface;
+    vertex_surface.uv = in.uv;
+    vertex_surface.uv1 = in.uv1;
+    vertex_surface.time = globals.frame_params.x;
+    vertex_surface.params = object.params;
+    vertex_surface.position = position;
+    vertex_surface.normal = normal;
+    vertex_surface = material_vertex(vertex_surface);
+    position = vertex_surface.position;
+    normal = vertex_surface.normal;
+
     // 骨骼矩阵已经包含了模型在世界里的位姿，所以蒙皮网格的 model 是单位阵；
     // 这里仍然乘上它，是为了让两条路径保持同一个公式。
     let model = object.model * skin_matrix(skin.joints, skin.weights, object.skin.x);
@@ -133,6 +160,7 @@ fn vs_skinned(
     out.world_position = world_position.xyz;
     out.tangent_handedness = in.tangent.w;
     out.uv = in.uv;
+    out.uv1 = in.uv1;
     out.color = in.color;
     return out;
 }
@@ -344,6 +372,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     surface.world_position = in.world_position;
     surface.geometric_normal = geometric_normal;
     surface.uv = uv;
+    // 不经过 `uv_transform`：那是材质 UV 图集取格用的，lightmap UV
+    // 是独立的一套展开，跟贴图图集没有关系。
+    surface.uv1 = in.uv1;
     surface.view_direction = normalize(globals.camera_position.xyz - in.world_position);
     // `clip_position` 在片元阶段已经是像素坐标，除以视口尺寸得到 0..1。
     surface.screen_uv = in.clip_position.xy / max(globals.frame_params.zw, vec2<f32>(1.0));

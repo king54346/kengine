@@ -87,6 +87,67 @@ pub struct RenderItem<'a> {
     pub morph_weights: &'a [f32],
     /// 接受哪些层的光照。见 [`Node::light_mask`]。
     pub light_mask: u32,
+    /// 只画索引缓冲的这一段 `(start, count)`；[`None`] 表示整份网格。
+    ///
+    /// 子网格材质组（[`kmesh::MeshGroup`]）的产物——网格带分组时，
+    /// 每组各产出一个 [`RenderItem`]，这个字段告诉渲染器只画自己那一段。
+    pub index_range: Option<(u32, u32)>,
+}
+
+/// 把一个节点转成一个或多个绘制项。
+///
+/// 没有网格的节点产出空列表。网格没有子网格材质组时（绝大多数）产出
+/// 恰好一项，`index_range` 是 `None`——这条路径和「子网格材质组」这个
+/// 功能加入之前逐字节一致。带分组时每组各产出一项，材质按组里的
+/// `material` 下标去 `node.materials()` 里找，越界或者节点压根没设
+/// `materials` 时退回节点的单一 `material()`——「涂错色」总比
+/// 「莫名其妙不画」更容易发现也更容易忍受。
+///
+/// 独立成自由函数而不是 `Scene` 的方法，是因为两个调用点
+/// （[`Scene::cull`]、[`Scene::visible_meshes`]）拿到 `&Node` 的方式不同
+/// （前者先按句柄查，后者已经在遍历 `Node` 本身），共同点只在“节点转
+/// 绘制项”这一步。
+fn render_items_for_node(node: &Node) -> Vec<RenderItem<'_>> {
+    let Some(mesh) = node.mesh() else {
+        return Vec::new();
+    };
+
+    let transform = skinned_transform(node);
+    let aabb = node.global_aabb;
+    let skin = node.skin().map(Skin::matrices);
+    let morph_weights = node.morph_weights();
+    let light_mask = node.light_mask;
+
+    let groups = mesh.groups();
+    if groups.is_empty() {
+        return vec![RenderItem {
+            mesh,
+            material: node.material(),
+            transform,
+            aabb,
+            skin,
+            morph_weights,
+            light_mask,
+            index_range: None,
+        }];
+    }
+
+    let materials = node.materials();
+    groups
+        .iter()
+        .map(|group| RenderItem {
+            mesh,
+            material: materials
+                .get(group.material as usize)
+                .or(node.material()),
+            transform,
+            aabb,
+            skin,
+            morph_weights,
+            light_mask,
+            index_range: Some((group.start, group.count)),
+        })
+        .collect()
 }
 
 /// 渲染器每帧收集到的一个粒子系统。
@@ -1170,22 +1231,9 @@ impl Scene {
 
         indices
             .into_iter()
-            .filter_map(|index| self.render_item(self.culling.handle(index)))
+            .filter_map(|index| self.try_get(self.culling.handle(index)))
+            .flat_map(render_items_for_node)
             .collect()
-    }
-
-    /// 把一个节点转成绘制项；节点没有网格时返回 [`None`]。
-    fn render_item(&self, handle: Handle<Node>) -> Option<RenderItem<'_>> {
-        let node = self.try_get(handle)?;
-        node.mesh().map(|mesh| RenderItem {
-            mesh,
-            material: node.material(),
-            transform: skinned_transform(node),
-            aabb: node.global_aabb,
-            skin: node.skin().map(Skin::matrices),
-            morph_weights: node.morph_weights(),
-            light_mask: node.light_mask,
-        })
     }
 
     /// 场景中第一个启用且可见的相机，返回（世界变换, 相机参数）。
@@ -1230,19 +1278,10 @@ impl Scene {
     ///
     /// 需要视锥剔除时用 [`Scene::cull`]，它走 BVH，对象多时快得多。
     pub fn visible_meshes(&self) -> impl Iterator<Item = RenderItem<'_>> {
-        self.nodes.iter().filter_map(|node| {
-            node.mesh()
-                .filter(|_| node.global_visible)
-                .map(|mesh| RenderItem {
-                    mesh,
-                    material: node.material(),
-                    transform: skinned_transform(node),
-                    aabb: node.global_aabb,
-                    skin: node.skin().map(Skin::matrices),
-                    morph_weights: node.morph_weights(),
-                    light_mask: node.light_mask,
-                })
-        })
+        self.nodes
+            .iter()
+            .filter(|node| node.global_visible)
+            .flat_map(render_items_for_node)
     }
 
     /// `ancestor` 是否为 `node` 的祖先。
@@ -2582,6 +2621,85 @@ mod test {
             items[0].transform.to_scale_rotation_translation().2,
             Vec3::new(1.0, 2.0, 3.0)
         );
+    }
+
+    #[test]
+    fn cull_expands_a_grouped_mesh_into_one_item_per_group() {
+        let mesh = Mesh::cube().with_groups(vec![
+            kmesh::MeshGroup {
+                start: 0,
+                count: 6,
+                material: 0,
+            },
+            kmesh::MeshGroup {
+                start: 6,
+                count: 30,
+                material: 1,
+            },
+        ]);
+        let red = Material::standard().with_base_color(kmath::Vec4::new(1.0, 0.0, 0.0, 1.0));
+        let blue = Material::standard().with_base_color(kmath::Vec4::new(0.0, 0.0, 1.0, 1.0));
+
+        let mut scene = Scene::new();
+        scene.add_node(
+            Node::new("Grouped")
+                .with_mesh(mesh)
+                .with_materials(vec![red.clone(), blue.clone()]),
+        );
+        scene.update();
+
+        let mut items = scene.cull(&test_frustum());
+        items.sort_by_key(|item| item.index_range);
+
+        assert_eq!(items.len(), 2, "两个组该各产出一个绘制项");
+        assert_eq!(items[0].index_range, Some((0, 6)));
+        assert_eq!(
+            items[0].material.map(Material::base_color),
+            Some(red.base_color())
+        );
+        assert_eq!(items[1].index_range, Some((6, 30)));
+        assert_eq!(
+            items[1].material.map(Material::base_color),
+            Some(blue.base_color())
+        );
+    }
+
+    #[test]
+    fn a_group_with_no_matching_material_falls_back_to_the_single_material() {
+        // 只给了一份材质，但网格的第二组要求下标 1——越界。
+        // 宁可退回单一材质画出来，也不要那一段什么都不画。
+        let mesh = Mesh::cube().with_groups(vec![kmesh::MeshGroup {
+            start: 0,
+            count: 6,
+            material: 1,
+        }]);
+        let fallback = Material::standard().with_base_color(kmath::Vec4::new(0.2, 0.9, 0.3, 1.0));
+
+        let mut scene = Scene::new();
+        scene.add_node(
+            Node::new("Grouped")
+                .with_mesh(mesh)
+                .with_material(fallback.clone()),
+        );
+        scene.update();
+
+        let items = scene.cull(&test_frustum());
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].material.map(Material::base_color),
+            Some(fallback.base_color())
+        );
+    }
+
+    #[test]
+    fn ungrouped_meshes_still_produce_exactly_one_item_with_no_range() {
+        let mut scene = Scene::new();
+        scene.add_node(Node::new("Plain").with_mesh(Mesh::cube()));
+        scene.update();
+
+        let items = scene.cull(&test_frustum());
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].index_range, None);
     }
 
     #[test]

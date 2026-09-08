@@ -24,6 +24,67 @@
 // 分成 in / out 两个结构体的话，用户每写一个材质都得手抄一遍
 // 「其余字段照搬」，抄漏一个就是那项功能静默失效。
 
+// ── 第零个钩子：顶点位移 ──
+//
+// 三个表面/光照钩子都在片元阶段，改不了顶点的位置——贴图位移
+// （displacement map）、程序化的顶点动画都做不到。`material_vertex`
+// 补上这一环：
+//
+// ```wgsl
+// fn material_vertex(vertex: VertexSurface) -> VertexSurface {
+//     var out = vertex;
+//     let height = textureSampleLevel(custom_texture0, base_color_sampler, vertex.uv, 0.0).r;
+//     out.position += vertex.normal * height * vertex.params[0].x;
+//     return out;
+// }
+// ```
+//
+// # 排在形变和蒙皮之间
+//
+// 调用时机是「形变（morph target）已经应用、蒙皮（骨骼变换）还没应用」
+// ——和形变本身的顺序理由一样：位移改的是绑定姿态下的形状，骨骼再把
+// 这个形状带到世界里。顺序反了，位移的幅度会被骨骼的缩放放大。
+//
+// # 顶点阶段能采样贴图，但只能用 `textureSampleLevel`
+//
+// 顶点着色器没有屏幕空间导数，`textureSample` 在这里编不过——这不是
+// 引擎的限制，是 WGSL 的规则。`textureSampleLevel` 需要显式给 mip
+// level（一般写 `0.0`，位移贴图不太需要 mip）。
+//
+// # 只在主色彩 pass 生效——这是当前版本的一个已知限制
+//
+// 阴影深度 pass 和 SSAO 用的深度／法线预通道**不会**跑这个钩子，
+// 它们仍然按未位移的几何画。后果是：位移出来的凸起没有影子、
+// 也不参与 SSAO 遮蔽计算。要修就要把这个钩子也接进
+// `shadow_pass.wgsl` 和预通道——那两条通道目前只读顶点的 `position`
+// 一个属性（且不绑材质贴图的绑定组），接位移进去等于给它们各开一整套
+// UV／贴图访问的通道，是比这次改动大一圈的工作量，留给下一次。
+//
+// # 不重算法线
+//
+// 位移会改变表面的真实法线（凸起的地方法线该往外偏），这个钩子不自动
+// 重算——那需要对高度场求偏导（有限差分采样贴图至少 3 次），成本和
+// 「要不要重算」都该由调用方决定。不重算的后果是位移幅度较大时，
+// 光照看起来比几何形状更「平」，这是实时位移贴图的通行取舍
+// （three.js 的 `MeshStandardMaterial.displacementMap` 也是这样）。
+struct VertexSurface {
+    // ── 只读 ──
+    /// 材质纹理坐标（未经 `uv_transform`，和顶点属性里的原始 `uv` 一致）。
+    uv: vec2<f32>,
+    /// 第二套纹理坐标（lightmap 用的那一套）。
+    uv1: vec2<f32>,
+    /// 引擎启动至今的秒数。
+    time: f32,
+    /// 自定义材质参数，四个 `vec4` 槽位，与 `Surface.params` 同一份数据。
+    params: array<vec4<f32>, 4>,
+
+    // ── 可写 ──
+    /// 模型空间坐标（形变之后、蒙皮之前）。
+    position: vec3<f32>,
+    /// 模型空间法线（同上）。
+    normal: vec3<f32>,
+};
+
 struct Surface {
     // ── 只读：几何与环境 ──
     //
@@ -35,6 +96,9 @@ struct Surface {
     geometric_normal: vec3<f32>,
     /// 已经过 `uv_transform` 的纹理坐标。
     uv: vec2<f32>,
+    /// 第二套纹理坐标（lightmap 用），**不**经过 `uv_transform`——
+    /// 那是材质贴图图集取格用的变换，跟 lightmap 的展开无关。
+    uv1: vec2<f32>,
     /// 从表面指向相机的单位向量。
     view_direction: vec3<f32>,
     /// 屏幕空间坐标，左上角 (0,0)、右下角 (1,1)。

@@ -425,6 +425,10 @@ fn import_meshes(
             let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(Iterator::collect);
             let uvs: Option<Vec<[f32; 2]>> =
                 reader.read_tex_coords(0).map(|tc| tc.into_f32().collect());
+            // 第二套 UV（`TEXCOORD_1`）：lightmap 用的那一套，没有就留零——
+            // 零对没读 `uv1` 的着色器/材质没有任何影响。
+            let uv1s: Option<Vec<[f32; 2]>> =
+                reader.read_tex_coords(1).map(|tc| tc.into_f32().collect());
             let colors: Option<Vec<[f32; 4]>> =
                 reader.read_colors(0).map(|c| c.into_rgba_f32().collect());
             let tangents: Option<Vec<[f32; 4]>> = reader.read_tangents().map(Iterator::collect);
@@ -451,6 +455,10 @@ fn import_meshes(
                         .as_ref()
                         .and_then(|t| t.get(index).copied())
                         .unwrap_or([1.0, 0.0, 0.0, 1.0]),
+                    uv1: uv1s
+                        .as_ref()
+                        .and_then(|u| u.get(index).copied())
+                        .unwrap_or([0.0, 0.0]),
                 })
                 .collect();
 
