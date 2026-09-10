@@ -2798,7 +2798,7 @@ impl Renderer {
                     roughness: material.roughness(),
                     // 没挂法线贴图时置 0，着色器据此完全跳过切线空间计算。
                     normal_scale: if material.get(kpbr::standard::NORMAL_TEXTURE).is_some() {
-                        1.0
+                        material.get("normal_scale").and_then(kmaterial::MaterialValue::as_float).unwrap_or(1.0)
                     } else {
                         0.0
                     },

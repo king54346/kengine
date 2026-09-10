@@ -13,7 +13,7 @@ pub struct TextureLoader;
 
 impl ResourceLoader for TextureLoader {
     fn extensions(&self) -> &[&str] {
-        &["png", "jpg", "jpeg"]
+        &["png", "jpg", "jpeg", "tga", "tif", "tiff", "dds", "pvr", "ktx"]
     }
 
     fn data_type_uuid(&self) -> Uuid {
@@ -24,7 +24,12 @@ impl ResourceLoader for TextureLoader {
         Box::pin(async move {
             let bytes = io.load_file(&path).await?;
 
-            let texture = Texture::from_encoded(&bytes).map_err(LoadError::custom)?;
+            let texture = if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("tga")) {
+                // TGA has no reliable magic number, so use the registered extension.
+                let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Tga)
+                    .map_err(LoadError::custom)?.to_rgba8();
+                Texture::new(image.width(), image.height(), image.into_raw())
+            } else { Texture::from_encoded(&bytes).map_err(LoadError::custom)? };
 
             klog::debug!(
                 "纹理已解码：{} ({}×{})",

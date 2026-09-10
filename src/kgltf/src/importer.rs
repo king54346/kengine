@@ -360,6 +360,30 @@ async fn load_textures(
 }
 
 fn import_materials(gltf: &gltf::Gltf, textures: &[Option<Resource<Texture>>]) -> Vec<Material> {
+    // One image may be both sRGB color and linear data, or use different samplers.
+    // Cache each texture/role separately; Texture clones share immutable pixel storage.
+    let mut cache = std::collections::HashMap::new();
+    let mut texture_for = |source: gltf::Texture<'_>, linear: bool| -> Option<Resource<Texture>> {
+        let key = (source.index(), linear);
+        if let Some(texture) = cache.get(&key) { return Some(Resource::clone(texture)); }
+        let resource = textures.get(source.source().index())?.as_ref()?;
+        let image = resource.data_ref()?;
+        let wrap = |mode| match mode {
+            gltf::texture::WrappingMode::ClampToEdge => ktexture::WrapMode::ClampToEdge,
+            gltf::texture::WrappingMode::MirroredRepeat => ktexture::WrapMode::MirrorRepeat,
+            gltf::texture::WrappingMode::Repeat => ktexture::WrapMode::Repeat,
+        };
+        let s = source.sampler();
+        let sampler = ktexture::Sampler {
+            wrap_u: wrap(s.wrap_s()), wrap_v: wrap(s.wrap_t()),
+            mag_filter: if s.mag_filter()==Some(gltf::texture::MagFilter::Nearest) {ktexture::FilterMode::Nearest}else{ktexture::FilterMode::Linear},
+            min_filter: if matches!(s.min_filter(), Some(gltf::texture::MinFilter::Nearest | gltf::texture::MinFilter::NearestMipmapNearest | gltf::texture::MinFilter::NearestMipmapLinear)) {ktexture::FilterMode::Nearest}else{ktexture::FilterMode::Linear},
+        };
+        let image = (*image).clone().with_format(if linear {ktexture::TextureFormat::Linear}else{ktexture::TextureFormat::Srgb}).with_sampler(sampler);
+        let resource = Resource::new_ok(format!("gltf#texture{}:{linear}", source.index()), image);
+        cache.insert(key,resource.clone());
+        Some(resource)
+    };
     gltf.materials()
         .map(|source| {
             let pbr = source.pbr_metallic_roughness();
@@ -371,11 +395,42 @@ fn import_materials(gltf: &gltf::Gltf, textures: &[Option<Resource<Texture>>]) -
                 .with_roughness(pbr.roughness_factor());
 
             if let Some(info) = pbr.base_color_texture() {
-                let index = info.texture().source().index();
-                if let Some(Some(texture)) = textures.get(index) {
-                    material = material.with_base_color_texture(texture.clone());
+                if let Some(texture) = texture_for(info.texture(), false) {
+                    material = material.with_base_color_texture(texture);
                 }
             }
+            if let Some(info) = pbr.metallic_roughness_texture() && let Some(texture) = texture_for(info.texture(), true) {
+                material.set(kpbr::standard::METALLIC_ROUGHNESS_TEXTURE, texture);
+            }
+            if let Some(info) = source.normal_texture() && let Some(texture) = texture_for(info.texture(), true) {
+                material.set(kpbr::standard::NORMAL_TEXTURE, texture);
+                material.set("normal_scale", info.scale());
+            }
+            if let Some(info) = source.occlusion_texture() && let Some(texture) = texture_for(info.texture(), true) {
+                material.set(kpbr::standard::OCCLUSION_TEXTURE, texture);
+                material.set(kpbr::standard::OCCLUSION, info.strength());
+            }
+            if let Some(info) = source.emissive_texture() && let Some(texture) = texture_for(info.texture(), false) {
+                material.set(kpbr::standard::EMISSIVE_TEXTURE, texture);
+            }
+            material.set(kpbr::standard::EMISSIVE, Vec3::from_array(source.emissive_factor()) * source.emissive_strength().unwrap_or(1.0));
+            material.set_double_sided(source.double_sided());
+            if source.alpha_mode()==gltf::material::AlphaMode::Blend { material.set_blend_mode(kmaterial::BlendMode::Alpha); }
+            let mut physical = kpbr::physical::Physical::default();
+            physical.unlit=source.unlit();
+            physical.alpha_cutoff=if source.alpha_mode()==gltf::material::AlphaMode::Mask {source.alpha_cutoff().unwrap_or(0.5)}else{0.0};
+            physical.transmission=source.transmission().map_or(0.0,|t|t.transmission_factor());
+            physical.ior=source.ior().unwrap_or(1.5);
+            physical.thickness=source.volume().map_or(0.0,|v|v.thickness_factor());
+            let number=|extension:&str,key:&str,default:f32|source.extension_value(extension).and_then(|e|e.get(key)).and_then(|v|v.as_f64()).map_or(default,|v|v as f32);
+            physical.dispersion=number("KHR_materials_dispersion","dispersion",0.0);
+            physical.iridescence=number("KHR_materials_iridescence","iridescenceFactor",0.0);
+            physical.film_thickness=number("KHR_materials_iridescence","iridescenceThicknessMaximum",400.0);
+            physical.sheen_roughness=number("KHR_materials_sheen","sheenRoughnessFactor",0.0);
+            if let Some(color)=source.extension_value("KHR_materials_sheen").and_then(|e|e.get("sheenColorFactor")).and_then(|v|v.as_array()) && color.len()==3 {
+                physical.sheen=Vec3::new(color[0].as_f64().unwrap_or(0.0) as f32,color[1].as_f64().unwrap_or(0.0) as f32,color[2].as_f64().unwrap_or(0.0) as f32);
+            }
+            if physical.transmission>0.0 || physical.iridescence>0.0 || physical.sheen!=Vec3::ZERO || physical.unlit || physical.alpha_cutoff>0.0 {physical.apply(&mut material);}
 
             // 名字留着：游戏侧要按「LeatherPartsMat」这种美术起的名字找到
             // 具体某一块去改颜色。用序号找的话，美术重新导出一次就全错位了。

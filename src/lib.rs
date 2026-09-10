@@ -65,6 +65,7 @@ pub use kfont;
 pub use kgizmo;
 pub use kgltf;
 pub use kinput;
+pub use kimport;
 pub use klight;
 pub use klog;
 pub use kmaterial;

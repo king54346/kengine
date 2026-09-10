@@ -30,6 +30,7 @@ members = [
     "src/ktask",
     "src/kterrain",
     "src/ktexture",
+    "src/kimport",
 ]
 
 [package]
@@ -48,6 +49,7 @@ kfont = { path = "src/kfont" }
 kgizmo = { path = "src/kgizmo" }
 kgltf = { path = "src/kgltf" }
 kinput = { path = "src/kinput" }
+kimport = { path = "src/kimport" }
 klight = { path = "src/klight" }
 klog = { path = "src/klog" }
 kmaterial = { path = "src/kmaterial" }
@@ -390,3 +392,143 @@ path = "examples/kengine/new/materials_displacementmap.rs"
 [[example]]
 name = "materials_lightmap"
 path = "examples/kengine/new/materials_lightmap.rs"
+
+[[example]]
+name = "loader_gltf_compressed"
+path = "examples/kengine/new/loader_gltf_compressed.rs"
+
+[[example]]
+name = "loader_gltf_dispersion"
+path = "examples/kengine/new/loader_gltf_dispersion.rs"
+
+[[example]]
+name = "loader_gltf_instancing"
+path = "examples/kengine/new/loader_gltf_instancing.rs"
+
+[[example]]
+name = "loader_gltf_iridescence"
+path = "examples/kengine/new/loader_gltf_iridescence.rs"
+
+[[example]]
+name = "loader_gltf_progressive_lod"
+path = "examples/kengine/new/loader_gltf_progressive_lod.rs"
+
+[[example]]
+name = "loader_gltf_sheen"
+path = "examples/kengine/new/loader_gltf_sheen.rs"
+
+[[example]]
+name = "loader_gltf_transmission"
+path = "examples/kengine/new/loader_gltf_transmission.rs"
+
+[[example]]
+name = "loader_gltf_variants"
+path = "examples/kengine/new/loader_gltf_variants.rs"
+
+[[example]]
+name = "loader_ifc"
+path = "examples/kengine/new/loader_ifc.rs"
+
+[[example]]
+name = "loader_imagebitmap"
+path = "examples/kengine/new/loader_imagebitmap.rs"
+
+[[example]]
+name = "loader_kmz"
+path = "examples/kengine/new/loader_kmz.rs"
+
+[[example]]
+name = "loader_ldraw"
+path = "examples/kengine/new/loader_ldraw.rs"
+
+[[example]]
+name = "loader_md2"
+path = "examples/kengine/new/loader_md2.rs"
+
+[[example]]
+name = "loader_md2_control"
+path = "examples/kengine/new/loader_md2_control.rs"
+
+[[example]]
+name = "loader_mdd"
+path = "examples/kengine/new/loader_mdd.rs"
+
+[[example]]
+name = "loader_nrrd"
+path = "examples/kengine/new/loader_nrrd.rs"
+
+[[example]]
+name = "loader_obj"
+path = "examples/kengine/new/loader_obj.rs"
+
+[[example]]
+name = "loader_pcd"
+path = "examples/kengine/new/loader_pcd.rs"
+
+[[example]]
+name = "loader_pdb"
+path = "examples/kengine/new/loader_pdb.rs"
+
+[[example]]
+name = "loader_ply"
+path = "examples/kengine/new/loader_ply.rs"
+
+[[example]]
+name = "loader_stl"
+path = "examples/kengine/new/loader_stl.rs"
+
+[[example]]
+name = "loader_svg"
+path = "examples/kengine/new/loader_svg.rs"
+
+[[example]]
+name = "loader_texture_dds"
+path = "examples/kengine/new/loader_texture_dds.rs"
+
+[[example]]
+name = "loader_texture_exr"
+path = "examples/kengine/new/loader_texture_exr.rs"
+
+[[example]]
+name = "loader_texture_hdr"
+path = "examples/kengine/new/loader_texture_hdr.rs"
+
+[[example]]
+name = "loader_texture_ktx"
+path = "examples/kengine/new/loader_texture_ktx.rs"
+
+[[example]]
+name = "loader_texture_ktx2"
+path = "examples/kengine/new/loader_texture_ktx2.rs"
+
+[[example]]
+name = "loader_texture_lottie"
+path = "examples/kengine/new/loader_texture_lottie.rs"
+
+[[example]]
+name = "loader_texture_pvrtc"
+path = "examples/kengine/new/loader_texture_pvrtc.rs"
+
+[[example]]
+name = "loader_texture_tga"
+path = "examples/kengine/new/loader_texture_tga.rs"
+
+[[example]]
+name = "loader_texture_tiff"
+path = "examples/kengine/new/loader_texture_tiff.rs"
+
+[[example]]
+name = "loader_texture_ultrahdr"
+path = "examples/kengine/new/loader_texture_ultrahdr.rs"
+
+[[example]]
+name = "loader_ttf"
+path = "examples/kengine/new/loader_ttf.rs"
+
+[[example]]
+name = "loader_usdz"
+path = "examples/kengine/new/loader_usdz.rs"
+
+[[example]]
+name = "loader_vox"
+path = "examples/kengine/new/loader_vox.rs"

@@ -177,7 +177,7 @@ fn vs_skinned(
 // 屏幕导数而报错。
 fn scene_color(uv: vec2<f32>) -> vec3<f32> {
     let size = vec2<f32>(textureDimensions(scene_color_texture));
-    let coord = vec2<i32>(clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * size);
+    let coord = min(vec2<i32>(clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * size), vec2<i32>(size) - vec2<i32>(1));
     return textureLoad(scene_color_texture, coord, 0).rgb;
 }
 
@@ -187,7 +187,7 @@ fn scene_color(uv: vec2<f32>) -> vec3<f32> {
 // 玻璃的厚度、软边缘都靠这个差值。
 fn scene_depth(uv: vec2<f32>) -> f32 {
     let size = vec2<f32>(textureDimensions(scene_depth_texture));
-    let coord = vec2<i32>(clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * size);
+    let coord = min(vec2<i32>(clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * size), vec2<i32>(size) - vec2<i32>(1));
     return linearize_depth(textureLoad(scene_depth_texture, coord, 0));
 }
 

@@ -18,6 +18,8 @@
 
 #![warn(missing_docs)]
 
+pub mod physical;
+
 pub mod brdf;
 pub mod hdr;
 pub mod ibl;
