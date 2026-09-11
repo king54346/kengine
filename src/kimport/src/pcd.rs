@@ -18,7 +18,7 @@
 use crate::{bad, limits};
 use kasset::LoadError;
 use kmath::Vec3;
-use kmesh::{Mesh, Vertex};
+use kmesh::Mesh;
 
 /// 一朵点云：位置与颜色，可选法线。
 #[derive(Debug, Clone, Default)]

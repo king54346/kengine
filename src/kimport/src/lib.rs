@@ -36,10 +36,15 @@
 
 #![warn(missing_docs)]
 
-pub mod pcd;
+pub mod md2;
+pub mod mdd;
+pub mod nrrd;
 pub mod obj;
+pub mod pcd;
+pub mod pdb;
 pub mod ply;
 pub mod stl;
+pub mod vox;
 
 use kasset::{LoadError, ResourceIo};
 use kgltf::{MeshPart, Model, ModelNode, NodeTransform};
@@ -50,13 +55,18 @@ use std::{
     sync::Arc,
 };
 
+pub use md2::Md2Loader;
 pub use obj::ObjLoader;
 pub use ply::PlyLoader;
 pub use stl::StlLoader;
+pub use vox::VoxLoader;
 
 /// 常用类型的集中导出。
 pub mod prelude {
-    pub use crate::{ObjLoader, PlyLoader, StlLoader};
+    pub use crate::{
+        Md2Loader, ObjLoader, PlyLoader, StlLoader, VoxLoader, md2::Md2, mdd::PointCache,
+        nrrd::Volume, pcd::PointCloud, pdb::Molecule,
+    };
 }
 
 /// 这批导入器共用的上限。

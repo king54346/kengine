@@ -304,7 +304,7 @@ mod tests {
 
     /// 拼一个最小的 VOX：一个 `sx×sy×sz` 的盒子，指定哪些体素是实的。
     fn file(size: [u32; 3], voxels: &[[u8; 4]]) -> Vec<u8> {
-        let mut chunk = |id: &[u8; 4], body: Vec<u8>| {
+        let chunk = |id: &[u8; 4], body: Vec<u8>| {
             let mut out = id.to_vec();
             out.extend_from_slice(&(body.len() as u32).to_le_bytes());
             out.extend_from_slice(&0u32.to_le_bytes());
@@ -367,9 +367,10 @@ mod tests {
     #[test]
     fn palette_colours_land_on_vertices() {
         let model = load(file([1, 1, 1], &[[0, 0, 0, 2]])).unwrap();
-        // 调色板第 2 项（下标 2）是 (2, 0, 0)。
+        // 体素里的下标 i 取的是 RGBA 块里的第 i−1 项——这个偏移是格式
+        // 规定的，写成 i 的话整个模型的颜色会整体错开一格。
         let color = model.mesh(0).unwrap().vertices()[0].color;
-        assert!((color[0] - 2.0 / 255.0).abs() < 1e-6, "取到的是 {color:?}");
+        assert!((color[0] - 1.0 / 255.0).abs() < 1e-6, "取到的是 {color:?}");
     }
 
     #[test]

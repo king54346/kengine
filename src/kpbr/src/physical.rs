@@ -9,10 +9,26 @@ use std::sync::OnceLock;
 /// Parameters of the extended material shader. Defaults preserve ordinary PBR.
 #[derive(Debug, Clone)]
 pub struct Physical {
-    pub transmission: f32, pub ior: f32, pub thickness: f32, pub dispersion: f32,
-    pub iridescence: f32, pub film_thickness: f32,
-    pub sheen: Vec3, pub sheen_roughness: f32,
-    pub alpha_cutoff: f32, pub unlit: bool,
+    /// 透射比例。大于 0 时走屏幕空间折射，材质自动转成半透明。
+    pub transmission: f32,
+    /// 折射率。玻璃约 1.5，水约 1.33。
+    pub ior: f32,
+    /// 介质厚度，用于按 Beer–Lambert 衰减透过的光。
+    pub thickness: f32,
+    /// 色散强度（KHR_materials_dispersion 的 `dispersion`）。
+    pub dispersion: f32,
+    /// 薄膜干涉的强度（KHR_materials_iridescence 的 `iridescenceFactor`）。
+    pub iridescence: f32,
+    /// 薄膜厚度，单位纳米。决定虹彩的颜色循环。
+    pub film_thickness: f32,
+    /// 绒感颜色（KHR_materials_sheen 的 `sheenColorFactor`）。
+    pub sheen: Vec3,
+    /// 绒感粗糙度。越大越像天鹅绒，越小越像丝绸。
+    pub sheen_roughness: f32,
+    /// alpha 裁切阈值。大于 0 时低于阈值的片元不参与着色。
+    pub alpha_cutoff: f32,
+    /// 不受光照，基础色直接输出。
+    pub unlit: bool,
 }
 impl Default for Physical {
     fn default()->Self { Self{transmission:0.0,ior:1.5,thickness:0.0,dispersion:0.0,iridescence:0.0,film_thickness:400.0,sheen:Vec3::ZERO,sheen_roughness:0.5,alpha_cutoff:0.0,unlit:false} }
