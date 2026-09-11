@@ -15,8 +15,8 @@
 
 #![warn(missing_docs)]
 
-mod loader;
 mod compressed;
+mod loader;
 
 pub use loader::TextureLoader;
 
@@ -224,7 +224,9 @@ impl Texture {
     ///
     /// glTF 的内嵌贴图走这条路径，无需经过文件系统。
     pub fn from_encoded(bytes: &[u8]) -> Result<Self, TextureError> {
-        if let Some(result) = compressed::decode(bytes) { return result; }
+        if let Some(result) = compressed::decode(bytes) {
+            return result;
+        }
         let image = image::load_from_memory(bytes).map_err(|e| TextureError(e.to_string()))?;
         let rgba = image.to_rgba8();
         let (width, height) = rgba.dimensions();
@@ -311,14 +313,18 @@ impl Texture {
 
     /// 指定像素格式。
     pub fn with_format(mut self, format: TextureFormat) -> Self {
-        if self.format != format { self.id = Uuid::new_v4(); }
+        if self.format != format {
+            self.id = Uuid::new_v4();
+        }
         self.format = format;
         self
     }
 
     /// 指定采样设置。
     pub fn with_sampler(mut self, sampler: Sampler) -> Self {
-        if self.sampler != sampler { self.id = Uuid::new_v4(); }
+        if self.sampler != sampler {
+            self.id = Uuid::new_v4();
+        }
         self.sampler = sampler;
         self
     }
