@@ -68,6 +68,58 @@ pub(crate) async fn import(
         .with_extras(import_extras(&gltf)))
 }
 
+/// 读 `KHR_texture_transform`：贴图的偏移 / 旋转 / 缩放。
+///
+/// # 引擎这边只有一套 UV 变换
+///
+/// [`kpbr::standard::UV_SCALE`] / `UV_OFFSET` 是**逐材质**的，所有贴图槽
+/// 共用——这是有意的，否则法线贴图和基础色会错位。而
+/// `KHR_texture_transform` 是**逐贴图**的，同一个材质里的两张贴图可以各
+/// 变各的。
+///
+/// 取舍：只认基础色贴图上的那份变换，用它设整个材质的 UV 变换。
+/// 绝大多数导出器（Blender、gltfpack）把同一个变换写给材质里的每一张图，
+/// 所以这个近似在实际文件上是准确的；真的每张图各变各的时候，
+/// 非基础色的那几张会错位。
+///
+/// **旋转不支持**：引擎的 UV 变换是 `uv * scale + offset`，没有旋转项。
+/// 文件里写了非零旋转时记一条警告，而不是静默忽略——贴图转没转是
+/// 一眼能看出来的，但「为什么没转」不写下来就没人知道。
+fn apply_texture_transform(source: &gltf::Material<'_>, material: &mut Material) {
+    let Some(transform) = source
+        .pbr_metallic_roughness()
+        .base_color_texture()
+        .and_then(|info| info.extension_value("KHR_texture_transform").cloned())
+    else {
+        return;
+    };
+    let pair = |key: &str, default: [f32; 2]| -> [f32; 2] {
+        transform
+            .get(key)
+            .and_then(|v| v.as_array())
+            .filter(|a| a.len() == 2)
+            .map_or(default, |a| {
+                [
+                    a[0].as_f64().unwrap_or(default[0] as f64) as f32,
+                    a[1].as_f64().unwrap_or(default[1] as f64) as f32,
+                ]
+            })
+    };
+    let scale = pair("scale", [1.0, 1.0]);
+    let offset = pair("offset", [0.0, 0.0]);
+    let rotation = transform
+        .get("rotation")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    if rotation.abs() > 1e-6 {
+        klog::warn!(
+            "KHR_texture_transform 的 rotation（{rotation:.3} 弧度）被忽略：引擎的 UV 变换没有旋转项"
+        );
+    }
+    material.set(kpbr::standard::UV_SCALE, kmath::Vec2::from_array(scale));
+    material.set(kpbr::standard::UV_OFFSET, kmath::Vec2::from_array(offset));
+}
+
 /// 读 `KHR_materials_variants`。
 ///
 /// 扩展分两半：文档根上是变体的**名单**，每个图元上是「我在第 i 个变体下
@@ -500,6 +552,7 @@ fn import_materials(gltf: &gltf::Gltf, textures: &[Option<Resource<Texture>>]) -
                 material.set(kpbr::standard::EMISSIVE_TEXTURE, texture);
             }
             material.set(kpbr::standard::EMISSIVE, Vec3::from_array(source.emissive_factor()) * source.emissive_strength().unwrap_or(1.0));
+            apply_texture_transform(&source, &mut material);
             material.set_double_sided(source.double_sided());
             if source.alpha_mode()==gltf::material::AlphaMode::Blend { material.set_blend_mode(kmaterial::BlendMode::Alpha); }
             let mut physical = kpbr::physical::Physical::default();

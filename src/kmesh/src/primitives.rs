@@ -263,6 +263,122 @@ impl Mesh {
         mesh
     }
 
+    /// 按体素聚类做网格简化，返回一份三角形更少的几何。
+    ///
+    /// `ratio` 是目标顶点数相对原始顶点数的比例（`0.25` = 目标四分之一）。
+    /// 实际结果通常和目标差一截——聚类的粒度是格子边长，而落进同一个格子的
+    /// 顶点数不受控制。
+    ///
+    /// # 用的是体素聚类，不是边折叠
+    ///
+    /// 业界标准是**二次误差度量下的边折叠**（QEM）：每次折叠最不影响形状的
+    /// 那条边，能在同样的三角形数下保住轮廓和尖角。这里做的是更简单的
+    /// 体素聚类：把空间切成格子，同一个格子里的顶点合并成一个。
+    ///
+    /// 取舍很明确：
+    ///
+    /// | | 体素聚类 | QEM 边折叠 |
+    /// |---|---|---|
+    /// | 代码量 | 几十行 | 几百行，要处理翻面、非流形、边界 |
+    /// | 速度 | O(顶点数) | O(三角形数 · log) |
+    /// | 质量 | 尖角会被削平，轮廓会抖 | 明显更好 |
+    /// | 可预测性 | 结果数量不精确 | 能精确停在目标面数 |
+    ///
+    /// 对「远处的 LOD」这个用途，聚类够用——那个距离上几个像素的轮廓
+    /// 差别看不出来。近处的 LOD 或者要精确控制面数时，这个实现不合适。
+    ///
+    /// # 属性怎么合并
+    ///
+    /// 同一个格子里的位置、法线、UV、颜色各自取平均，法线再归一化。
+    /// 平均 UV 在**贴图接缝**处是错的（接缝两侧的 UV 差很远，平均出来落在
+    /// 贴图中间），这是聚类法的已知问题；LOD 距离上通常看不出来。
+    ///
+    /// 退化的三角形（三个角落进同一个格子）直接丢掉。
+    pub fn simplify(&self, ratio: f32) -> Self {
+        let vertices = self.vertices();
+        let ratio = ratio.clamp(0.001, 1.0);
+        if vertices.is_empty() || ratio >= 1.0 {
+            return self.clone();
+        }
+        let bounds = self.aabb();
+        let size = bounds.max - bounds.min;
+        let extent = size.max_element();
+        if extent <= 0.0 {
+            return self.clone();
+        }
+        // 目标顶点数开三次方就是每个轴上该切几格：顶点大致铺在一个曲面上，
+        // 但格子是三维的，用三次方根比二次方根更稳（薄壳模型不会被切太碎）。
+        let target = (vertices.len() as f32 * ratio).max(4.0);
+        let divisions = target.cbrt().ceil().max(2.0);
+        let cell = extent / divisions;
+
+        let key = |position: Vec3| -> [i32; 3] {
+            let local = (position - bounds.min) / cell;
+            [
+                local.x.floor() as i32,
+                local.y.floor() as i32,
+                local.z.floor() as i32,
+            ]
+        };
+
+        let mut cells: std::collections::HashMap<[i32; 3], u32> = std::collections::HashMap::new();
+        let mut accumulated: Vec<(Vertex, f32)> = Vec::new();
+        let mut remap = Vec::with_capacity(vertices.len());
+        for vertex in vertices {
+            let slot = *cells.entry(key(vertex.position())).or_insert_with(|| {
+                accumulated.push((Vertex::default(), 0.0));
+                (accumulated.len() - 1) as u32
+            });
+            let entry = &mut accumulated[slot as usize];
+            for axis in 0..3 {
+                entry.0.position[axis] += vertex.position[axis];
+                entry.0.normal[axis] += vertex.normal[axis];
+                entry.0.color[axis] += vertex.color[axis];
+            }
+            entry.0.uv[0] += vertex.uv[0];
+            entry.0.uv[1] += vertex.uv[1];
+            entry.1 += 1.0;
+            remap.push(slot);
+        }
+
+        let merged: Vec<Vertex> = accumulated
+            .into_iter()
+            .map(|(mut vertex, count)| {
+                let inverse = 1.0 / count.max(1.0);
+                for axis in 0..3 {
+                    vertex.position[axis] *= inverse;
+                    vertex.color[axis] *= inverse;
+                }
+                vertex.uv[0] *= inverse;
+                vertex.uv[1] *= inverse;
+                // 法线取的是平均方向，长度没有意义，归一化回去。
+                // 正好抵消的情况（薄壳的两面被并进同一个格子）退回 +Y。
+                let normal = Vec3::from_array(vertex.normal).normalize_or(Vec3::Y);
+                vertex.normal = normal.to_array();
+                vertex
+            })
+            .collect();
+
+        let mut indices = Vec::with_capacity(self.indices().len());
+        for triangle in self.indices().chunks_exact(3) {
+            let mapped = [
+                remap[triangle[0] as usize],
+                remap[triangle[1] as usize],
+                remap[triangle[2] as usize],
+            ];
+            // 两个角合并到一起的三角形面积为零，画出来是一条看不见的线，
+            // 但仍然占着索引带宽和光栅化的开销。
+            if mapped[0] == mapped[1] || mapped[1] == mapped[2] || mapped[0] == mapped[2] {
+                continue;
+            }
+            indices.extend_from_slice(&mapped);
+        }
+
+        let mut mesh = Self::new(merged, indices);
+        mesh.recompute_tangents();
+        mesh
+    }
+
     /// 点云几何：每个点一个**退化的**正方形面片。
     ///
     /// 四个顶点的位置完全相同，四个角的区别只写在 `uv` 里
@@ -550,6 +666,43 @@ mod test {
                 [1, 0, 0],
             ]
         );
+    }
+
+    #[test]
+    fn simplification_reduces_triangles_and_keeps_the_shape() {
+        let sphere = Mesh::sphere(32, 48);
+        let simplified = sphere.simplify(0.1);
+        assert!(
+            simplified.triangle_count() < sphere.triangle_count() / 2,
+            "简化后还有 {} 个三角形，原来是 {}",
+            simplified.triangle_count(),
+            sphere.triangle_count()
+        );
+        assert!(simplified.triangle_count() > 0, "简化把整个网格削没了");
+        // 包围盒不该缩水太多：聚类合并的是邻近顶点，形状的尺度要留住。
+        let (before, after) = (sphere.aabb(), simplified.aabb());
+        let shrink = (before.max - before.min) - (after.max - after.min);
+        assert!(
+            shrink.max_element() < (before.max - before.min).max_element() * 0.35,
+            "包围盒缩水太多：{shrink:?}"
+        );
+    }
+
+    #[test]
+    fn simplification_produces_no_degenerate_triangles() {
+        let simplified = Mesh::sphere(24, 32).simplify(0.05);
+        for triangle in simplified.indices().chunks_exact(3) {
+            assert!(
+                triangle[0] != triangle[1] && triangle[1] != triangle[2] && triangle[0] != triangle[2],
+                "留下了退化三角形 {triangle:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_ratio_of_one_is_a_no_op() {
+        let cube = Mesh::cube();
+        assert_eq!(cube.simplify(1.0).triangle_count(), cube.triangle_count());
     }
 
     #[test]
