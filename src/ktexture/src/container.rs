@@ -120,6 +120,17 @@ fn to_rgba(pixels: Vec<u32>) -> Vec<u8> {
 }
 
 /// 解一级 mip 的一个面。
+///
+/// # 为什么要 `catch_unwind`
+///
+/// 块解码交给的是第三方 crate，而喂给它的是**外部文件**。一个写坏的
+/// （或者恶意构造的）纹理不该让整个进程挂掉——游戏读到一张坏贴图，
+/// 合理的表现是这张贴图加载失败，不是崩溃。
+///
+/// 这不是假设性的风险：`texture2ddecoder` 0.1.2 的 BC6H 解码在
+/// `endpoint_bits == 16` 的模式（mode 15）上会算出 `1u16 << 16`，
+/// debug 下直接 panic、release 下掩码变成 0 于是颜色是错的。
+/// 三份 `disturb_dx10_bc6h_*.dds` 样本就会踩到。
 fn decode_level(
     layout: &Layout,
     data: &[u8],
@@ -130,17 +141,31 @@ fn decode_level(
     let data = data
         .get(..needed)
         .ok_or_else(|| err(format!("{} 这一级的数据被截断", layout.name)))?;
-    let mut pixels = vec![0u32; width * height];
-    (layout.decoder)(data, width, height, &mut pixels).map_err(err)?;
-    Ok(to_rgba(pixels))
+    let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut pixels = vec![0u32; width * height];
+        (layout.decoder)(data, width, height, &mut pixels).map(|()| pixels)
+    }))
+    .map_err(|_| err(format!("{} 的块解码器崩了（第三方解码器的 bug）", layout.name)))?
+    .map_err(err)?;
+    Ok(to_rgba(decoded))
 }
 
 /// 各级 mip 的尺寸：每级减半，最小为 1。
+///
+/// `level` 用 `min(31)` 夹一下：头部里的 mip 数是外部数据，写着 255 的
+/// 文件会让移位溢出（debug 下 panic，release 下是未定义的结果）。
 fn level_size(width: u32, height: u32, level: usize) -> (usize, usize) {
+    let shift = level.min(31) as u32;
     (
-        (width as usize >> level).max(1),
-        (height as usize >> level).max(1),
+        (width as usize >> shift).max(1),
+        (height as usize >> shift).max(1),
     )
+}
+
+/// mip 链最多到 1×1，16384 的图也就 15 级。头部写得更多时按这个夹住。
+fn clamp_levels(levels: u32, width: u32, height: u32) -> usize {
+    let full = 32 - width.max(height).max(1).leading_zeros();
+    levels.max(1).min(full) as usize
 }
 
 /// 把每级、每面的数据装成 [`Container`]。
@@ -312,7 +337,7 @@ fn dds(bytes: &[u8]) -> Result<Container, TextureError> {
     }
     let height = word(12)?;
     let width = word(16)?;
-    let mips = word(28)?.max(1) as usize;
+    let mips = clamp_levels(word(28)?, width, height);
     let pixel_flags = word(80)?;
     let four_cc = bytes.get(84..88).ok_or_else(|| err("DDS 头部被截断"))?;
     let bit_count = word(88)?;
@@ -493,7 +518,7 @@ fn ktx1(bytes: &[u8]) -> Result<Container, TextureError> {
     let width = word(36)?;
     let height = word(40)?;
     let faces = word(48)?.max(1);
-    let levels = word(52)?.max(1) as usize;
+    let levels = clamp_levels(word(52)?, width, height);
     let key_value_bytes = word(60)? as usize;
     let layout = gl_layout(internal_format)?;
 
@@ -583,34 +608,70 @@ fn gl_layout(format: u32) -> Result<Layout, TextureError> {
             decoder: texture2ddecoder::decode_pvrtc_2bpp,
             linear: false,
         },
-        0x93B0 | 0x93D0 => astc(4, 4),
-        0x93B2 | 0x93D2 => astc(6, 6),
-        0x93B4 | 0x93D4 => astc(8, 8),
+        // ASTC 的 14 种块尺寸在 GL 枚举里是连续的两段（线性与 sRGB）。
+        0x93B0..=0x93BD => astc((format - 0x93B0) as usize)?,
+        0x93D0..=0x93DD => astc((format - 0x93D0) as usize)?,
         0x8058 | 0x1908 => raw("RGBA8", raw_rgba8, 4, false),
         0x8051 | 0x1907 => raw("RGB8", raw_rgb8, 3, false),
         other => return Err(err(format!("不支持的 KTX 内部格式 0x{other:04X}"))),
     })
 }
 
-fn astc(width: usize, height: usize) -> Layout {
-    // `texture2ddecoder` 的 ASTC 解码函数按块尺寸分开导出，这里只接
-    // 这批样本用到的三种。块字节数恒为 16。
-    let decoder: Decoder = match (width, height) {
-        (4, 4) => texture2ddecoder::decode_astc_4_4,
-        (6, 6) => texture2ddecoder::decode_astc_6_6,
-        _ => texture2ddecoder::decode_astc_8_8,
+/// ASTC 的 14 种块尺寸，顺序和 GL / Vulkan 的枚举顺序一致。
+const ASTC_BLOCKS: [(usize, usize, &str); 14] = [
+    (4, 4, "ASTC 4×4"),
+    (5, 4, "ASTC 5×4"),
+    (5, 5, "ASTC 5×5"),
+    (6, 5, "ASTC 6×5"),
+    (6, 6, "ASTC 6×6"),
+    (8, 5, "ASTC 8×5"),
+    (8, 6, "ASTC 8×6"),
+    (8, 8, "ASTC 8×8"),
+    (10, 5, "ASTC 10×5"),
+    (10, 6, "ASTC 10×6"),
+    (10, 8, "ASTC 10×8"),
+    (10, 10, "ASTC 10×10"),
+    (12, 10, "ASTC 12×10"),
+    (12, 12, "ASTC 12×12"),
+];
+
+// `texture2ddecoder::decode_astc` 要把块尺寸当参数传，而 `Layout` 存的是
+// 一个普通函数指针（不能捕获）。所以每种块尺寸生成一个薄包装。
+macro_rules! astc_decoders {
+    ($($name:ident => ($w:expr, $h:expr)),+ $(,)?) => {
+        $(fn $name(data: &[u8], width: usize, height: usize, out: &mut [u32]) -> Result<(), &'static str> {
+            texture2ddecoder::decode_astc(data, width, height, $w, $h, out)
+        })+
+        /// 按块尺寸取解码函数。
+        fn astc_decoder(block: (usize, usize)) -> Option<Decoder> {
+            Some(match block {
+                $(($w, $h) => $name as Decoder,)+
+                _ => return None,
+            })
+        }
     };
-    Layout {
-        name: match (width, height) {
-            (4, 4) => "ASTC 4×4",
-            (6, 6) => "ASTC 6×6",
-            _ => "ASTC 8×8",
-        },
+}
+
+astc_decoders! {
+    astc_4_4 => (4, 4), astc_5_4 => (5, 4), astc_5_5 => (5, 5), astc_6_5 => (6, 5),
+    astc_6_6 => (6, 6), astc_8_5 => (8, 5), astc_8_6 => (8, 6), astc_8_8 => (8, 8),
+    astc_10_5 => (10, 5), astc_10_6 => (10, 6), astc_10_8 => (10, 8),
+    astc_10_10 => (10, 10), astc_12_10 => (12, 10), astc_12_12 => (12, 12),
+}
+
+/// 按 GL / Vulkan 枚举里的次序取第 `index` 种 ASTC 块尺寸。
+fn astc(index: usize) -> Result<Layout, TextureError> {
+    let (width, height, name) = *ASTC_BLOCKS
+        .get(index)
+        .ok_or_else(|| err("ASTC 块尺寸下标越界"))?;
+    Ok(Layout {
+        name,
         block: (width, height),
+        // ASTC 无论块多大，一块永远是 16 字节——压缩率的差别全在这里。
         bytes: 16,
-        decoder,
+        decoder: astc_decoder((width, height)).ok_or_else(|| err("没有这个 ASTC 块尺寸的解码器"))?,
         linear: false,
-    }
+    })
 }
 
 // ── KTX 2 ──
@@ -638,7 +699,7 @@ fn ktx2(bytes: &[u8]) -> Result<Container, TextureError> {
     let width = word(20)?;
     let height = word(24)?;
     let faces = word(36)?.max(1);
-    let levels = word(40)?.max(1) as usize;
+    let levels = clamp_levels(word(40)?, width, height);
     let supercompression = word(44)?;
 
     if vk_format == 0 {
@@ -757,9 +818,12 @@ fn vk_layout(format: u32) -> Result<Layout, TextureError> {
             decoder: texture2ddecoder::decode_eacrg,
             linear: true,
         },
-        157..=158 => astc(4, 4),
-        165..=166 => astc(6, 6),
-        171..=172 => astc(8, 8),
+        // vkFormat 157..184 是 14 种块尺寸 × (UNORM, SRGB) 交替排列。
+        157..=184 => astc(((format - 157) / 2) as usize)?,
+        // HDR ASTC（`*_SFLOAT_BLOCK_EXT`，扩展号段）。块布局和 LDR 完全
+        // 一样，差别在端点的解释方式；`texture2ddecoder` 的解码器认得
+        // HDR 端点模式，但输出仍然是 8 位——高光会被压回 `0..1`。
+        1000066000..=1000066013 => astc((format - 1000066000) as usize)?,
         other => return Err(err(format!("不支持的 KTX2 vkFormat {other}"))),
     })
 }
@@ -787,7 +851,7 @@ fn pvr(bytes: &[u8]) -> Result<Container, TextureError> {
             word(24)?,
             52 + word(48)? as usize,
             pvrtc(two_bpp, format % 2 == 1),
-            word(44)?.max(1) as usize,
+            clamp_levels(word(44)?, word(28)?, word(24)?),
             word(40)?.max(1),
         )
     } else {
@@ -800,7 +864,10 @@ fn pvr(bytes: &[u8]) -> Result<Container, TextureError> {
             word(4)?,
             word(0)? as usize,
             pvrtc(format == 24, word(40)? != 0),
-            (word(44)? + 1) as usize,
+            // v2 的 mip 数在第 12 字节，而且**不含**第 0 级。第 44 字节
+            // 是魔数 "PVR!"（`sniff` 就是靠它认的），拿它当 mip 数会得到
+            // 一个荒唐的大数。
+            clamp_levels(word(12)? + 1, word(8)?, word(4)?),
             1,
         )
     };
