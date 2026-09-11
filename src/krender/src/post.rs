@@ -22,6 +22,16 @@ pub struct PostSettings {
     pub bloom_intensity: f32,
     /// 色调映射算子。
     pub tone_mapping: ToneMapping,
+    /// 曝光。色调映射**之前**乘上去的整体倍数，默认 1。
+    ///
+    /// 这不是「调亮度」的美化开关，而是 HDR 管线里必须有的一环：
+    /// 场景的辐射度是有量纲的（一盏 1000 流明的灯就是 1000），
+    /// 而色调映射曲线的拐点固定在 1 附近。没有曝光这个自由度的话，
+    /// 室内和正午户外两个场景只能二选一地调好看。
+    ///
+    /// 乘在色调映射之前而不是之后：之后乘等于把已经压好的曲线整体拉伸，
+    /// 高光会重新超出 1、又被硬切掉。
+    pub exposure: f32,
     /// 抗锯齿。
     pub anti_alias: AntiAlias,
 }
@@ -32,6 +42,7 @@ impl Default for PostSettings {
             bloom_threshold: 1.0,
             bloom_intensity: 0.06,
             tone_mapping: ToneMapping::default(),
+            exposure: 1.0,
             anti_alias: AntiAlias::default(),
         }
     }
@@ -492,7 +503,13 @@ impl PostProcess {
             self.settings.bloom_threshold,
             self.settings.bloom_intensity,
             operator,
-            0.0,
+            // 负数或 NaN 会让整个画面变成黑屏或花屏，在这里夹住比在
+            // 着色器里判断便宜。
+            if self.settings.exposure.is_finite() {
+                self.settings.exposure.clamp(0.0, 1000.0)
+            } else {
+                1.0
+            },
         ];
 
         // 四个 pass 的参数：提取、横向模糊、纵向模糊、合成。
@@ -726,5 +743,6 @@ mod test {
         assert_eq!(settings.bloom_threshold, 1.0);
         assert!(settings.bloom_intensity > 0.0 && settings.bloom_intensity < 0.5);
         assert_eq!(settings.tone_mapping, ToneMapping::Aces);
+        assert_eq!(settings.exposure, 1.0, "默认曝光必须是 1——它是个倍数，不是偏移");
     }
 }

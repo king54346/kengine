@@ -105,6 +105,9 @@ fn composite_fs(in: FullscreenOutput) -> @location(0) vec4<f32> {
     var color = textureSample(source, source_sampler, in.uv).rgb;
     color += textureSample(bloom, bloom_sampler, in.uv).rgb * params.settings.y;
 
+    // 曝光乘在色调映射**之前**：乘在之后等于把压好的曲线整体拉伸，
+    // 高光会重新超出 1 再被硬切掉。
+    color = color * params.settings.w;
     color = tonemap(color, u32(params.settings.z));
 
     // 这里不做 gamma 校正：交换链是 sRGB 格式，由硬件负责转换。
