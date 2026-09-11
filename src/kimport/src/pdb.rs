@@ -19,9 +19,28 @@
 //! 表里没有的元素退回品红——一个刺眼的颜色比一个看起来合理的默认色好，
 //! 至少一眼能看出「这个元素没认出来」。
 
-use crate::{bad, limits};
-use kasset::LoadError;
+use crate::{bad, limits, loader};
+use kasset::{LoadError, ResourceData, ResourceIo};
+use kcore::uuid::{Uuid, uuid};
 use kmath::Vec3;
+use std::{path::PathBuf, sync::Arc};
+
+/// [`Molecule`] 的资源类型标识。
+pub const MOLECULE_TYPE_UUID: Uuid = uuid!("b83f0a17-5d62-49ce-8a01-7c4e2b9f5d68");
+
+loader! {
+    /// 读 `.pdb`。
+    PdbLoader -> Molecule : ["pdb"] = MOLECULE_TYPE_UUID, load
+}
+
+/// [`loader!`] 要的异步签名。
+pub async fn load(
+    bytes: Vec<u8>,
+    _path: PathBuf,
+    _io: Arc<dyn ResourceIo>,
+) -> Result<Molecule, LoadError> {
+    parse(&bytes)
+}
 
 /// 一个原子。
 #[derive(Debug, Clone, Copy)]
@@ -44,6 +63,12 @@ pub struct Molecule {
     pub atoms: Vec<Atom>,
     /// 所有化学键，同一对原子只出现一次。
     pub bonds: Vec<Bond>,
+}
+
+impl ResourceData for Molecule {
+    fn type_uuid(&self) -> Uuid {
+        MOLECULE_TYPE_UUID
+    }
 }
 
 impl Molecule {

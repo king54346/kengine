@@ -20,10 +20,29 @@
 //!
 //! 代价是重定向是 O(网格顶点数 × 缓存点数)，只在加载时做一次。
 
-use crate::{bad, limits};
-use kasset::LoadError;
+use crate::{bad, limits, loader};
+use kasset::{LoadError, ResourceData, ResourceIo};
+use kcore::uuid::{Uuid, uuid};
 use kmath::Vec3;
 use kmesh::Mesh;
+use std::{path::PathBuf, sync::Arc};
+
+/// [`PointCache`] 的资源类型标识。
+pub const POINT_CACHE_TYPE_UUID: Uuid = uuid!("e51c78b4-9d06-4a2f-bb13-6f90c7e48a25");
+
+loader! {
+    /// 读 `.mdd`。
+    MddLoader -> PointCache : ["mdd"] = POINT_CACHE_TYPE_UUID, load
+}
+
+/// [`loader!`] 要的异步签名。
+pub async fn load(
+    bytes: Vec<u8>,
+    _path: PathBuf,
+    _io: Arc<dyn ResourceIo>,
+) -> Result<PointCache, LoadError> {
+    parse(&bytes)
+}
 
 /// 一份顶点缓存。
 #[derive(Debug, Clone, Default)]
@@ -32,6 +51,12 @@ pub struct PointCache {
     pub times: Vec<f32>,
     /// `frames[f][p]` 是第 `f` 帧第 `p` 个点的位置。
     pub frames: Vec<Vec<Vec3>>,
+}
+
+impl ResourceData for PointCache {
+    fn type_uuid(&self) -> Uuid {
+        POINT_CACHE_TYPE_UUID
+    }
 }
 
 impl PointCache {

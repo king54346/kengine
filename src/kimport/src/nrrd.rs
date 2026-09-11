@@ -20,11 +20,29 @@
 //! 窗宽窗位（window / level）就是一对普通的 0..1 参数，不必为每种
 //! 模态各写一套。
 
-use crate::{bad, limits};
-use kasset::LoadError;
+use crate::{bad, limits, loader};
+use kasset::{LoadError, ResourceData, ResourceIo};
+use kcore::uuid::{Uuid, uuid};
 use kmath::Vec3;
 use ktexture::{Sampler, Texture, TextureFormat};
-use std::io::Read;
+use std::{io::Read, path::PathBuf, sync::Arc};
+
+/// [`Volume`] 的资源类型标识。
+pub const VOLUME_TYPE_UUID: Uuid = uuid!("47b2e6d9-31a5-4f70-9c88-5d0b3e17a2f4");
+
+loader! {
+    /// 读 `.nrrd`。
+    NrrdLoader -> Volume : ["nrrd"] = VOLUME_TYPE_UUID, load
+}
+
+/// [`loader!`] 要的异步签名。
+pub async fn load(
+    bytes: Vec<u8>,
+    _path: PathBuf,
+    _io: Arc<dyn ResourceIo>,
+) -> Result<Volume, LoadError> {
+    parse(&bytes)
+}
 
 /// 一份三维体数据。
 #[derive(Debug, Clone)]
@@ -37,6 +55,12 @@ pub struct Volume {
     pub voxels: Vec<f32>,
     /// 归一化之前的原始值域 `(最小, 最大)`。
     pub range: (f32, f32),
+}
+
+impl ResourceData for Volume {
+    fn type_uuid(&self) -> Uuid {
+        VOLUME_TYPE_UUID
+    }
 }
 
 impl Volume {

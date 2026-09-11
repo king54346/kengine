@@ -56,7 +56,11 @@ use std::{
 };
 
 pub use md2::Md2Loader;
+pub use mdd::MddLoader;
+pub use nrrd::NrrdLoader;
 pub use obj::ObjLoader;
+pub use pcd::PcdLoader;
+pub use pdb::PdbLoader;
 pub use ply::PlyLoader;
 pub use stl::StlLoader;
 pub use vox::VoxLoader;
@@ -64,8 +68,8 @@ pub use vox::VoxLoader;
 /// 常用类型的集中导出。
 pub mod prelude {
     pub use crate::{
-        Md2Loader, ObjLoader, PlyLoader, StlLoader, VoxLoader, md2::Md2, mdd::PointCache,
-        nrrd::Volume, pcd::PointCloud, pdb::Molecule,
+        Md2Loader, MddLoader, NrrdLoader, ObjLoader, PcdLoader, PdbLoader, PlyLoader, StlLoader,
+        VoxLoader, md2::Md2, mdd::PointCache, nrrd::Volume, pcd::PointCloud, pdb::Molecule,
     };
 }
 

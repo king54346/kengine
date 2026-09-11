@@ -15,10 +15,29 @@
 //!
 //! 压缩算法是 LZF（不是 zlib），PCL 自带的那一版，实现见 [`lzf_decompress`]。
 
-use crate::{bad, limits};
-use kasset::LoadError;
+use crate::{bad, limits, loader};
+use kasset::{LoadError, ResourceData, ResourceIo};
+use kcore::uuid::{Uuid, uuid};
 use kmath::Vec3;
 use kmesh::Mesh;
+use std::{path::PathBuf, sync::Arc};
+
+/// [`PointCloud`] 的资源类型标识。
+pub const POINT_CLOUD_TYPE_UUID: Uuid = uuid!("6c1d4f80-2a7e-4d33-b5c9-0e8f1a62d743");
+
+loader! {
+    /// 读 `.pcd`。
+    PcdLoader -> PointCloud : ["pcd"] = POINT_CLOUD_TYPE_UUID, load
+}
+
+/// [`loader!`] 要的异步签名；PCD 不需要读第二个文件。
+pub async fn load(
+    bytes: Vec<u8>,
+    _path: PathBuf,
+    _io: Arc<dyn ResourceIo>,
+) -> Result<PointCloud, LoadError> {
+    parse(&bytes)
+}
 
 /// 一朵点云：位置与颜色，可选法线。
 #[derive(Debug, Clone, Default)]
@@ -29,6 +48,12 @@ pub struct PointCloud {
     pub colors: Vec<Vec3>,
     /// 文件里有没有真正的颜色字段。没有时调用方通常会按高度或强度上色。
     pub has_color: bool,
+}
+
+impl ResourceData for PointCloud {
+    fn type_uuid(&self) -> Uuid {
+        POINT_CLOUD_TYPE_UUID
+    }
 }
 
 impl PointCloud {
