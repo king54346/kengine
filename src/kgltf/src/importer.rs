@@ -21,14 +21,21 @@ pub(crate) async fn import(
     path: PathBuf,
     io: Arc<dyn ResourceIo>,
 ) -> Result<Model, LoadError> {
-    let gltf = gltf::Gltf::from_slice(&bytes).map_err(LoadError::custom)?;
+    // Validate the standard document after accounting for extensions implemented
+    // by this importer, which gltf-rs does not include in its feature registry.
+    let parsed = gltf::Gltf::from_slice_without_validation(&bytes).map_err(LoadError::custom)?;
+    let mut json = parsed.document.into_json();
+    json.extensions_required.retain(|ext| !matches!(ext.as_str(),
+        "EXT_mesh_gpu_instancing" | "KHR_materials_dispersion" | "KHR_materials_iridescence" | "KHR_materials_sheen"));
+    let gltf = gltf::Gltf { document: gltf::Document::from_json(json).map_err(LoadError::custom)?, blob: parsed.blob };
     let base = uri::base_dir(&path);
 
     let buffers = load_buffers(&gltf, &base, &io).await?;
     let textures = load_textures(&gltf, &base, &io, &buffers, &path).await;
     let materials = import_materials(&gltf, &textures);
     let (meshes, primitive_ranges) = import_meshes(&gltf, &buffers, &path)?;
-    let (nodes, roots) = import_nodes(&gltf, &primitive_ranges);
+    let (mut nodes, roots) = import_nodes(&gltf, &primitive_ranges);
+    import_instances(&gltf, &buffers, &mut nodes)?;
     let skins = import_skins(&gltf, &buffers);
     let animations = import_animations(&gltf, &buffers);
 
@@ -627,4 +634,37 @@ fn import_nodes(
     };
 
     (nodes, roots)
+}
+
+/// Expand glTF GPU instance transforms into nodes sharing one Mesh id. The
+/// renderer batches those shared meshes back into GPU instanced draws.
+fn import_instances(gltf:&gltf::Gltf,buffers:&[Vec<u8>],nodes:&mut Vec<ModelNode>)->Result<(),LoadError>{
+    for source in gltf.nodes(){
+        let Some(extension)=source.extension_value("EXT_mesh_gpu_instancing") else {continue};
+        let attrs=extension.get("attributes").and_then(|v|v.as_object()).ok_or_else(||LoadError::message("instancing attributes missing"))?;
+        if source.skin().is_some(){return Err(LoadError::message("skinned EXT_mesh_gpu_instancing is not supported"));}
+        let accessor=|key:&str|->Result<Option<gltf::Accessor<'_>>,LoadError>{
+            let Some(value)=attrs.get(key) else{return Ok(None)};
+            let index=value.as_u64().ok_or_else(||LoadError::message("invalid instance accessor index"))? as usize;
+            Ok(Some(gltf.accessors().nth(index).ok_or_else(||LoadError::message("instance accessor out of range"))?))
+        };
+        let read3=|key:&str|->Result<Option<Vec<[f32;3]>>,LoadError>{
+            accessor(key)?.map(|a|gltf::accessor::Iter::<[f32;3]>::new(a,|b|buffers.get(b.index()).map(Vec::as_slice)).map(Iterator::collect).ok_or_else(||LoadError::message("invalid VEC3 instance data"))).transpose()
+        };
+        let positions=read3("TRANSLATION")?;let scales=read3("SCALE")?;
+        let rotations=accessor("ROTATION")?.map(|a|gltf::accessor::Iter::<[f32;4]>::new(a,|b|buffers.get(b.index()).map(Vec::as_slice)).map(Iterator::collect::<Vec<_>>).ok_or_else(||LoadError::message("invalid VEC4 instance rotation"))).transpose()?;
+        let counts=[positions.as_ref().map(Vec::len),scales.as_ref().map(Vec::len),rotations.as_ref().map(Vec::len)];
+        let count=counts.into_iter().flatten().next().ok_or_else(||LoadError::message("instancing has no TRS attributes"))?;
+        if count==0 || count>100_000 || counts.into_iter().flatten().any(|n|n!=count){return Err(LoadError::message("instance counts mismatch or exceed limit"));}
+        let original=source.index();let parts=std::mem::take(&mut nodes[original].parts);
+        for instance in 0..count{
+            let position=positions.as_ref().map_or(Vec3::ZERO,|p|Vec3::from_array(p[instance]));
+            let scale=scales.as_ref().map_or(Vec3::ONE,|p|Vec3::from_array(p[instance]));
+            let rotation=rotations.as_ref().map_or(Quat::IDENTITY,|p|Quat::from_array(p[instance]));
+            if !position.is_finite()||!scale.is_finite()||!rotation.is_finite()||rotation.length_squared()<1e-8 {return Err(LoadError::message("non-finite instance transform"));}
+            let child=nodes.len();nodes[original].children.push(child);
+            nodes.push(ModelNode{name:format!("Instance{instance}"),transform:NodeTransform{position,scale,rotation:rotation.normalize()},parts:parts.clone(),..Default::default()});
+        }
+    }
+    Ok(())
 }

@@ -1,234 +1,190 @@
-//! Versioned, offline-cooked scene assets. Runtime decoding is CPU-only Rust.
+//! kimport —— 第三方资源格式的**原生**导入。
 //!
-//! Complex authoring formats are cooked by `examples/kengine/new/import_tool`.
-//! The runtime never starts a browser, executes JavaScript, or downloads assets.
-use kasset::{BoxedLoaderFuture, LoadError, Resource, ResourceData, ResourceIo, ResourceLoader};
-use kcore::uuid::{Uuid, uuid};
+//! 这个 crate 回答的是一个很具体的问题：引擎已经能读 glTF 了，
+//! 那些「别人家的格式」（OBJ、STL、PLY、PCD、MD2、VOX、IFC……）怎么办。
+//!
+//! # 三条规矩
+//!
+//! 1. **纯 Rust，运行期解析**。不启浏览器、不跑 JavaScript、不预烘中间格式。
+//!    读的就是资源本来的那个文件，改了资源不用重新烘一遍。
+//! 2. **能复用的绝不重写**。图片解码走 [`ktexture`]，压缩块解码走
+//!    `texture2ddecoder`，glTF 走 [`kgltf`]；这里只写引擎里确实没有的部分。
+//! 3. **老实说明子集**。IFC、USD、Lottie 这类格式的完整实现是独立项目的规模，
+//!    这里实现的是「能把这批例子画出来」的子集，每个模块的文档注释里
+//!    写清楚**支持到哪、不支持什么**，而不是假装全都支持。
+//!
+//! # 产物统一是 [`Model`]
+//!
+//! 凡是「一堆三角形 + 材质 + 节点树」的格式（OBJ / STL / PLY / MD2 / VOX /
+//! LDraw / KMZ / USDZ / IFC）一律产出 [`kgltf::Model`]，于是
+//! [`Scene::instantiate_model`](kscene) 那条已有的实例化路径原样可用，
+//! 也不必为每种格式再发明一套场景描述。
+//!
+//! 装不进 `Model` 的才有自己的类型：[`pcd::PointCloud`]（点云）、
+//! [`pdb::Molecule`]（原子与化学键）、[`nrrd::Volume`]（体数据）、
+//! [`mdd::PointCache`]（逐帧顶点缓存）、[`svg::Document`]（二维路径）、
+//! [`lottie::Animation`]（矢量动画）。
+//!
+//! ```no_run
+//! use kasset::ResourceManager;
+//! use kgltf::Model;
+//!
+//! let manager = ResourceManager::new();
+//! manager.add_loader(kimport::ObjLoader);
+//! let model = manager.request::<Model>("models/obj/male02/male02.obj");
+//! ```
+
+#![warn(missing_docs)]
+
+pub mod pcd;
+pub mod obj;
+pub mod ply;
+pub mod stl;
+
+use kasset::{LoadError, ResourceIo};
 use kgltf::{MeshPart, Model, ModelNode, NodeTransform};
-use kmath::{Mat4, Vec3};
-use kmesh::{Mesh, MorphDelta, MorphTarget, Vertex};
-use ktexture::{Texture, TextureFormat};
-use serde::Deserialize;
-use std::{path::PathBuf, sync::Arc};
+use kmaterial::Material;
+use kmesh::Mesh;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
-mod physical;
-pub use physical::physical_material;
+pub use obj::ObjLoader;
+pub use ply::PlyLoader;
+pub use stl::StlLoader;
 
-const IMPORT_UUID: Uuid = uuid!("9d87050d-955a-425e-96cf-b7860fca9269");
-
-/// Portable imported scene plus authoring camera and environment.
-#[derive(Debug)]
-pub struct ImportedScene {
-    pub model: Model,
-    pub camera: Mat4,
-    pub fov: f32,
-    pub near: f32,
-    pub far: f32,
-    pub target: Vec3,
-    pub environment: Option<kpbr::hdr::HdrImage>,
-    pub variants: Vec<(String, Model)>,
-    pub provenance: String,
-}
-impl ResourceData for ImportedScene {
-    fn type_uuid(&self) -> Uuid { IMPORT_UUID }
+/// 常用类型的集中导出。
+pub mod prelude {
+    pub use crate::{ObjLoader, PlyLoader, StlLoader};
 }
 
-/// Register with ResourceManager to load `.kmodel` + its sibling `.kbin`.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct ImportedSceneLoader;
-impl ResourceLoader for ImportedSceneLoader {
-    fn extensions(&self) -> &[&str] { &["kmodel"] }
-    fn data_type_uuid(&self) -> Uuid { IMPORT_UUID }
-    fn load(&self, path: PathBuf, io: Arc<dyn ResourceIo>) -> BoxedLoaderFuture {
-        Box::pin(async move {
-            let json = io.load_file(&path).await?;
-            let bytes = io.load_file(&path.with_extension("kbin")).await?;
-            Ok(Box::new(decode(&json, &bytes)?) as Box<dyn ResourceData>)
-        })
+/// 这批导入器共用的上限。
+///
+/// 不是性能调优，是**安全边界**：解析器面对的是外部文件，一个写坏的
+/// 头部字段可以让「按 count 预分配」变成几个 GB 的分配。所有从文件里
+/// 读出来、又要拿去开数组的数，都先过一遍这里。
+pub mod limits {
+    /// 单个网格的顶点数上限。
+    pub const VERTICES: usize = 32_000_000;
+    /// 单个模型的节点数上限。
+    pub const NODES: usize = 1_000_000;
+    /// 文本格式允许的最大行数，防止病态文件把解析卡死。
+    pub const LINES: usize = 40_000_000;
+}
+
+/// 构造一条「格式不对」的错误。各模块用得太频繁，抽出来省一行。
+pub(crate) fn bad(message: impl Into<String>) -> LoadError {
+    LoadError::message(message.into())
+}
+
+/// 把单个网格 + 单个材质包成最简单的 [`Model`]：一个根节点，一份几何。
+pub fn single_mesh_model(name: &str, mesh: Mesh, material: Material) -> Model {
+    Model::new(
+        vec![mesh],
+        vec![material],
+        vec![ModelNode {
+            name: name.to_string(),
+            transform: NodeTransform::default(),
+            children: Vec::new(),
+            parts: vec![MeshPart {
+                mesh: 0,
+                material: Some(0),
+            }],
+            skin: None,
+        }],
+        vec![0],
+    )
+}
+
+/// 把若干「网格 + 材质槽位」摊成一个单层节点树。
+///
+/// OBJ 的 group、PLY 的多元素、IFC 的构件都是这个形状：没有真正的层级，
+/// 只是一批并列的物体。
+pub fn flat_model(name: &str, parts: Vec<(String, Mesh, Option<usize>)>, materials: Vec<Material>) -> Model {
+    let mut meshes = Vec::with_capacity(parts.len());
+    let mut nodes = Vec::with_capacity(parts.len() + 1);
+    nodes.push(ModelNode {
+        name: name.to_string(),
+        transform: NodeTransform::default(),
+        children: (1..=parts.len()).collect(),
+        parts: Vec::new(),
+        skin: None,
+    });
+    for (index, (child, mesh, material)) in parts.into_iter().enumerate() {
+        meshes.push(mesh);
+        nodes.push(ModelNode {
+            name: child,
+            transform: NodeTransform::default(),
+            children: Vec::new(),
+            parts: vec![MeshPart {
+                mesh: index,
+                material,
+            }],
+            skin: None,
+        });
     }
+    Model::new(meshes, materials, nodes, vec![0])
 }
 
-#[derive(Deserialize, Clone, Copy, Debug)]
-struct View { offset: usize, count: usize }
-impl View {
-    fn bytes<'a>(&self, blob: &'a [u8], stride: usize) -> Result<&'a [u8], LoadError> {
-        let end = self.count.checked_mul(stride).and_then(|n| self.offset.checked_add(n))
-            .ok_or_else(|| LoadError::message("import buffer size overflow"))?;
-        blob.get(self.offset..end).ok_or_else(|| LoadError::message("import buffer out of bounds"))
-    }
-    fn floats(&self, blob: &[u8]) -> Result<Vec<f32>, LoadError> {
-        let data: Vec<_> = self.bytes(blob, 4)?.chunks_exact(4)
-            .map(|v| f32::from_le_bytes(v.try_into().unwrap())).collect();
-        if data.iter().any(|v| !v.is_finite()) { return Err(LoadError::message("non-finite import attribute")); }
-        Ok(data)
-    }
+/// 资源路径的所在目录，用于解析格式内部的相对引用（MTL、贴图、零件库）。
+pub(crate) fn base_dir(path: &Path) -> PathBuf {
+    path.parent().map(Path::to_path_buf).unwrap_or_default()
 }
-#[derive(Deserialize)]
-struct Document {
-    version: u32,
-    provenance: String,
-    meshes: Vec<Geometry>,
-    textures: Vec<Image>,
-    materials: Vec<Surface>,
-    nodes: Vec<Object>,
-    roots: Vec<usize>,
-    camera: Camera,
-    #[serde(default)] environment: Option<Environment>,
-    #[serde(default)] clips: Vec<Clip>,
-    #[serde(default)] variants: Vec<Variant>,
-}
-#[derive(Deserialize)]
-struct Geometry {
-    position: View,
-    normal: Option<View>, uv: Option<View>, color: Option<View>,
-    index: View,
-    #[serde(default)] morphs: Vec<Morph>,
-}
-#[derive(Deserialize)]
-struct Morph { name: String, position: View }
-#[derive(Deserialize)]
-struct Image { width: u32, height: u32, data: View, #[serde(default)] linear: bool }
-#[derive(Deserialize, Clone)]
-pub struct Surface {
-    pub name: String,
-    pub color: [f32; 4],
-    pub metallic: f32, pub roughness: f32,
-    pub emissive: [f32; 3],
-    #[serde(default)] pub double_sided: bool,
-    #[serde(default)] pub transparent: bool,
-    #[serde(default)] pub unlit: bool,
-    #[serde(default)] pub alpha_test: f32,
-    pub map: Option<usize>, pub normal_map: Option<usize>, pub mr_map: Option<usize>,
-    pub emissive_map: Option<usize>, pub ao_map: Option<usize>,
-    #[serde(default)] pub transmission: f32,
-    #[serde(default = "default_ior")] pub ior: f32,
-    #[serde(default)] pub thickness: f32,
-    #[serde(default)] pub dispersion: f32,
-    #[serde(default)] pub iridescence: f32,
-    #[serde(default = "default_film")] pub iridescence_thickness: f32,
-    #[serde(default)] pub sheen: [f32; 3],
-    #[serde(default)] pub sheen_roughness: f32,
-}
-fn default_ior() -> f32 { 1.5 }
-fn default_film() -> f32 { 400.0 }
-#[derive(Deserialize)]
-struct Object { name: String, matrix: [f32;16], children: Vec<usize>, mesh: Option<usize>, material: Option<usize> }
-#[derive(Deserialize)]
-struct Camera { matrix: [f32;16], fov: f32, near: f32, far: f32, target: [f32;3] }
-#[derive(Deserialize)]
-struct Environment { width: usize, height: usize, data: View }
-#[derive(Deserialize)]
-struct Clip { name: String, tracks: Vec<AnimationTrack> }
-#[derive(Deserialize)]
-struct AnimationTrack { node: usize, slot: usize, times: Vec<f32>, values: Vec<f32> }
-#[derive(Deserialize)]
-struct Variant { name: String, materials: Vec<Option<usize>> }
 
-/// Decode a cooked scene. Invalid ranges, topology and cyclic hierarchies fail before instantiation.
-pub fn decode(json: &[u8], blob: &[u8]) -> Result<ImportedScene, LoadError> {
-    if json.len() > 32 * 1024 * 1024 || blob.len() > 512 * 1024 * 1024 {
-        return Err(LoadError::message("import exceeds 32 MiB metadata / 512 MiB buffer limit"));
-    }
-    let doc: Document = serde_json::from_slice(json).map_err(LoadError::custom)?;
-    if doc.version != 1 { return Err(LoadError::message("unsupported kmodel version")); }
-    if doc.nodes.len() > 100_000 { return Err(LoadError::message("too many imported nodes")); }
-    validate_tree(&doc.nodes, &doc.roots)?;
-    let textures: Vec<_> = doc.textures.iter().enumerate().map(|(i, image)| {
-        let expected = (image.width as usize).checked_mul(image.height as usize).and_then(|n| n.checked_mul(4));
-        if image.width == 0 || image.height == 0 || image.width > 16384 || image.height > 16384 || expected != Some(image.data.count) {
-            return Err(LoadError::message("invalid imported image dimensions"));
-        }
-        Ok(Resource::new_ok(format!("import#image{i}"), Texture::new(image.width, image.height, image.data.bytes(blob,1)?.to_vec())
-            .with_format(if image.linear { TextureFormat::Linear } else { TextureFormat::Srgb })))
-    }).collect::<Result<_,_>>()?;
-    let materials: Vec<_> = doc.materials.iter().map(|s| {
-        let mut m = physical_material(s);
-        for (slot, index) in [("base_color_texture",s.map),("normal_texture",s.normal_map),("metallic_roughness_texture",s.mr_map),("emissive_texture",s.emissive_map),("occlusion_texture",s.ao_map)] {
-            if let Some(index) = index {
-                let tex = textures.get(index).ok_or_else(|| LoadError::message("invalid imported texture reference"))?;
-                m.set(slot,tex.clone());
+/// 生成一个资源加载器类型。
+///
+/// 每种格式都要写一遍「实现 `ResourceLoader`、读文件、调解析函数、
+/// 装箱」，差别只有扩展名和那一行解析调用。抄十几遍的话，往加载路径上
+/// 加一件事（比如统一的耗时日志）就要改十几处。
+macro_rules! loader {
+    (
+        $(#[$meta:meta])*
+        $name:ident -> $ty:ty : [$($ext:literal),+ $(,)?] = $uuid:expr, $parse:path
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Default, Clone, Copy)]
+        pub struct $name;
+
+        impl kasset::ResourceLoader for $name {
+            fn extensions(&self) -> &[&str] {
+                &[$($ext),+]
+            }
+
+            fn data_type_uuid(&self) -> kcore::uuid::Uuid {
+                $uuid
+            }
+
+            fn load(
+                &self,
+                path: std::path::PathBuf,
+                io: std::sync::Arc<dyn kasset::ResourceIo>,
+            ) -> kasset::BoxedLoaderFuture {
+                Box::pin(async move {
+                    let bytes = io.load_file(&path).await?;
+                    let started = std::time::Instant::now();
+                    let data = $parse(bytes, path.clone(), io).await?;
+                    klog::debug!(
+                        "{} 已导入：{}（{:.1} ms）",
+                        stringify!($name),
+                        path.display(),
+                        started.elapsed().as_secs_f32() * 1000.0
+                    );
+                    Ok(Box::new(data) as Box<dyn kasset::ResourceData>)
+                })
             }
         }
-        Ok(m)
-    }).collect::<Result<_,LoadError>>()?;
-    let meshes = doc.meshes.iter().map(|g| {
-        let p = g.position.floats(blob)?;
-        if p.is_empty() || p.len()%3 != 0 { return Err(LoadError::message("invalid POSITION length")); }
-        let n = g.normal.map(|v| v.floats(blob)).transpose()?;
-        let uv = g.uv.map(|v| v.floats(blob)).transpose()?;
-        let color = g.color.map(|v| v.floats(blob)).transpose()?;
-        for (a, size) in [(&n,3),(&uv,2),(&color,3)] {
-            if a.as_ref().is_some_and(|a| a.len()!=p.len()/3*size) { return Err(LoadError::message("attribute vertex count mismatch")); }
-        }
-        let vertices = p.chunks_exact(3).enumerate().map(|(i,p)| Vertex {
-            position: p.try_into().unwrap(),
-            normal: n.as_ref().map_or([0.0;3],|a| a[i*3..i*3+3].try_into().unwrap()),
-            uv: uv.as_ref().map_or([0.0;2],|a| a[i*2..i*2+2].try_into().unwrap()),
-            color: color.as_ref().map_or([1.0;3],|a| a[i*3..i*3+3].try_into().unwrap()),
-            ..Default::default()
-        }).collect();
-        let indices: Vec<_> = g.index.bytes(blob,4)?.chunks_exact(4).map(|a| u32::from_le_bytes(a.try_into().unwrap())).collect();
-        if indices.is_empty() || indices.len()%3!=0 || indices.iter().any(|&i| i as usize>=p.len()/3) { return Err(LoadError::message("invalid triangle indices")); }
-        let mut mesh = Mesh::new(vertices, indices);
-        if n.is_none() { mesh.recompute_normals(); }
-        if uv.is_some() { mesh.recompute_tangents(); }
-        let morphs = g.morphs.iter().map(|m| {
-            let values = m.position.floats(blob)?;
-            if values.len()!=p.len() { return Err(LoadError::message("morph vertex count mismatch")); }
-            Ok(MorphTarget::new(m.name.clone(), values.chunks_exact(3).map(|v| MorphDelta { position: v.try_into().unwrap(), ..Default::default() }).collect()))
-        }).collect::<Result<Vec<_>,LoadError>>()?;
-        if !morphs.is_empty() { let count=morphs.len(); mesh=mesh.with_morph_targets(morphs,vec![0.0;count]); }
-        Ok(mesh)
-    }).collect::<Result<Vec<_>,LoadError>>()?;
-    let nodes = doc.nodes.iter().map(|node| {
-        if node.matrix.iter().any(|n| !n.is_finite()) { return Err(LoadError::message("invalid node transform")); }
-        let (scale,rotation,position) = Mat4::from_cols_array(&node.matrix).to_scale_rotation_translation();
-        let parts = if let Some(mesh) = node.mesh {
-            if mesh>=meshes.len() || node.material.is_some_and(|m| m>=materials.len()) { return Err(LoadError::message("invalid mesh/material reference")); }
-            vec![MeshPart{mesh,material:node.material}]
-        } else { Vec::new() };
-        Ok(ModelNode{name:node.name.clone(), transform:NodeTransform{scale,rotation,position}, children:node.children.clone(), parts, skin:None})
-    }).collect::<Result<Vec<_>,LoadError>>()?;
-    let mut clips = Vec::new();
-    for clip in &doc.clips {
-        let mut tracks=Vec::new();
-        for t in &clip.tracks {
-            let mesh=doc.nodes.get(t.node).and_then(|n|n.mesh).and_then(|i|doc.meshes.get(i));
-            if mesh.is_none_or(|m|t.slot>=m.morphs.len()) || t.times.iter().chain(&t.values).any(|v|!v.is_finite()) {
-                return Err(LoadError::message("invalid morph animation target"));
-            }
-            let curve=kanim::Curve::new(t.times.clone(),t.values.clone(),kanim::Interpolation::Linear).ok_or_else(||LoadError::message("invalid animation curve"))?;
-            tracks.push(kanim::Track{target:t.node, channel:kanim::Channel::MorphWeight{index:t.slot,curve}});
-        }
-        clips.push(kanim::AnimationClip::new(clip.name.clone(),tracks));
-    }
-    let mut variants=Vec::new();
-    for v in doc.variants {
-        if v.materials.len()!=nodes.len() {return Err(LoadError::message("variant node count mismatch"));}
-        let mut vn=nodes.clone();
-        for (node,mat) in vn.iter_mut().zip(v.materials) {
-            if mat.is_some_and(|m|m>=materials.len()) {return Err(LoadError::message("invalid variant material"));}
-            for part in &mut node.parts {part.material=mat;}
-        }
-        variants.push((v.name,Model::new(meshes.clone(),materials.clone(),vn,doc.roots.clone()).with_animations(clips.clone())));
-    }
-    let environment=doc.environment.map(|e| {
-        let pixels=e.data.floats(blob)?;
-        if e.width==0 || e.height==0 || e.width.checked_mul(e.height).and_then(|n|n.checked_mul(3))!=Some(pixels.len()) {return Err(LoadError::message("invalid environment dimensions"));}
-        Ok(kpbr::hdr::HdrImage::from_pixels(e.width,e.height,pixels))
-    }).transpose()?;
-    Ok(ImportedScene{model:Model::new(meshes,materials,nodes,doc.roots).with_animations(clips),camera:Mat4::from_cols_array(&doc.camera.matrix),
-        fov:doc.camera.fov,near:doc.camera.near,far:doc.camera.far,target:Vec3::from_array(doc.camera.target),environment,variants,provenance:doc.provenance})
+    };
 }
+pub(crate) use loader;
 
-fn validate_tree(nodes:&[Object],roots:&[usize])->Result<(),LoadError>{
-    let mut seen=vec![false;nodes.len()];
-    let mut stack:Vec<_>=roots.iter().map(|&i|(i,0)).collect();
-    while let Some((i,depth))=stack.pop(){
-        if i>=nodes.len() || seen[i] || depth>256 {return Err(LoadError::message("cyclic, shared, out-of-range or excessively deep scene hierarchy"));}
-        seen[i]=true;
-        stack.extend(nodes[i].children.iter().map(|&c|(c,depth+1)));
-    }
-    if seen.iter().any(|v|!*v){return Err(LoadError::message("unreachable imported node"));}
-    Ok(())
+/// 读一个和主资源同目录的附属文件（MTL、贴图、零件），读不到返回 `None`。
+///
+/// 附属文件缺失是**常态**而不是错误：OBJ 可以没有 MTL，MTL 引用的贴图
+/// 可能根本没随模型一起发布。整个导入因为少一张贴图而失败是不可接受的。
+pub(crate) async fn sibling(io: &Arc<dyn ResourceIo>, base: &Path, name: &str) -> Option<Vec<u8>> {
+    // 格式内部的相对路径经常带 Windows 分隔符，或者 `./` 前缀。
+    let cleaned = name.replace('\\', "/");
+    let cleaned = cleaned.trim_start_matches("./");
+    io.load_file(&base.join(cleaned)).await.ok()
 }

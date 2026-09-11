@@ -1906,10 +1906,13 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 name = "kimport"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "kanim",
  "kasset",
  "kcore",
+ "kfont",
  "kgltf",
+ "klog",
  "kmaterial",
  "kmath",
  "kmesh",
@@ -1917,7 +1920,6 @@ dependencies = [
  "kshader",
  "ktask",
  "ktexture",
- "serde",
  "serde_json",
 ]
 

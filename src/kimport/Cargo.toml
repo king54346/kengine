@@ -8,13 +8,18 @@ kasset = { path = "../kasset" }
 kcore = { path = "../kcore" }
 kgltf = { path = "../kgltf" }
 kanim = { path = "../kanim" }
+klog = { path = "../klog" }
 kmath = { path = "../kmath" }
 kmaterial = { path = "../kmaterial" }
 kmesh = { path = "../kmesh" }
 ktexture = { path = "../ktexture" }
+kfont = { path = "../kfont" }
 kpbr = { path = "../kpbr" }
 kshader = { path = "../kshader" }
-serde = { version = "1", features = ["derive"] }
+# NRRD 的 gzip 正文、ZIP（KMZ / USDZ）的 deflate 条目。
+# 默认特性就是纯 Rust 的 miniz_oxide 后端，不牵扯 C 依赖。
+flate2 = "1"
+# Lottie 是 JSON；IFC / OBJ / PLY 那些自有文本格式不用它。
 serde_json = "1"
 
 [dev-dependencies]

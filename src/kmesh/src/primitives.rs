@@ -262,6 +262,46 @@ impl Mesh {
         mesh.recompute_tangents();
         mesh
     }
+
+    /// 点云几何：每个点一个**退化的**正方形面片。
+    ///
+    /// 四个顶点的位置完全相同，四个角的区别只写在 `uv` 里
+    /// （`(0,0)`、`(1,0)`、`(1,1)`、`(0,1)`）。张开的动作留给顶点着色器
+    /// ——配套的材质是 `kpbr::points::PointMaterial`，它在
+    /// `material_vertex` 里按相机方向把四个角推开。
+    ///
+    /// # 为什么不在 CPU 上摆好朝向
+    ///
+    /// 点云是几万到几百万个点。CPU 摆朝向意味着**每帧**重写整个顶点
+    /// 缓冲并重传显存；放在顶点着色器里则是一次上传、之后全在 GPU 上。
+    ///
+    /// # 包围盒会略小
+    ///
+    /// 包围盒按点的位置算，不含张开后的半径。视锥剔除因此可能在点云
+    /// 边缘擦边时早半个点的宽度剔掉它。半径通常是毫米级，不值得为它
+    /// 把整个包围盒撑大。
+    ///
+    /// `colors` 短于 `positions` 时缺的部分按白色处理。
+    pub fn point_sprites(positions: &[Vec3], colors: &[Vec3]) -> Self {
+        let mut vertices = Vec::with_capacity(positions.len() * 4);
+        let mut indices = Vec::with_capacity(positions.len() * 6);
+        for (index, &position) in positions.iter().enumerate() {
+            let color = colors.get(index).copied().unwrap_or(Vec3::ONE).to_array();
+            let base = (index * 4) as u32;
+            for corner in [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]] {
+                vertices.push(Vertex {
+                    position: position.to_array(),
+                    // 法线由顶点钩子改写成「指向相机」，这里的值只是占位。
+                    normal: [0.0, 0.0, 1.0],
+                    uv: corner,
+                    color,
+                    ..Default::default()
+                });
+            }
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        Self::new(vertices, indices)
+    }
 }
 
 #[cfg(test)]
@@ -510,6 +550,31 @@ mod test {
                 [1, 0, 0],
             ]
         );
+    }
+
+    #[test]
+    fn point_sprites_keep_all_four_corners_on_the_point() {
+        let mesh = Mesh::point_sprites(&[Vec3::new(1.0, 2.0, 3.0)], &[Vec3::X]);
+        assert_eq!(mesh.triangle_count(), 2);
+        assert!(
+            mesh.vertices()
+                .iter()
+                .all(|v| v.position == [1.0, 2.0, 3.0] && v.color == [1.0, 0.0, 0.0]),
+            "四个角必须同位——张开是顶点着色器的事"
+        );
+        let mut corners: Vec<[i32; 2]> = mesh
+            .vertices()
+            .iter()
+            .map(|v| [v.uv[0] as i32, v.uv[1] as i32])
+            .collect();
+        corners.sort();
+        assert_eq!(corners, vec![[0, 0], [0, 1], [1, 0], [1, 1]]);
+    }
+
+    #[test]
+    fn point_sprites_fall_back_to_white_when_colours_run_out() {
+        let mesh = Mesh::point_sprites(&[Vec3::ZERO, Vec3::X], &[Vec3::X]);
+        assert_eq!(mesh.vertices()[4].color, [1.0, 1.0, 1.0]);
     }
 
     #[test]

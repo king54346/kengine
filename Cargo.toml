@@ -532,3 +532,7 @@ path = "examples/kengine/new/loader_usdz.rs"
 [[example]]
 name = "loader_vox"
 path = "examples/kengine/new/loader_vox.rs"
+
+[[example]]
+name = "loader_gallery"
+path = "examples/kengine/new/loader_gallery.rs"

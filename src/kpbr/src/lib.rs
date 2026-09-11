@@ -19,6 +19,7 @@
 #![warn(missing_docs)]
 
 pub mod physical;
+pub mod points;
 
 pub mod brdf;
 pub mod hdr;
