@@ -15,9 +15,10 @@
 
 #![warn(missing_docs)]
 
-mod compressed;
+pub mod container;
 mod loader;
 
+pub use container::Container;
 pub use loader::TextureLoader;
 
 use kasset::ResourceData;
@@ -224,8 +225,9 @@ impl Texture {
     ///
     /// glTF 的内嵌贴图走这条路径，无需经过文件系统。
     pub fn from_encoded(bytes: &[u8]) -> Result<Self, TextureError> {
-        if let Some(result) = compressed::decode(bytes) {
-            return result;
+        // DDS / KTX / KTX2 / PVR 走容器那条路，其余交给 `image`。
+        if container::sniff(bytes).is_some() {
+            return container::decode(bytes).map(|c| c.base());
         }
         let image = image::load_from_memory(bytes).map_err(|e| TextureError(e.to_string()))?;
         let rgba = image.to_rgba8();

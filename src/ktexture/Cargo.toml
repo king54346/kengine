@@ -11,3 +11,6 @@ kmath = { path = "../kmath" }
 # 只需要 PNG / JPEG 解码，关掉默认特性以免拖入大量无关格式。
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "tga", "tiff", "exr", "hdr", "dds"] }
 texture2ddecoder = "0.1.2"
+# KTX2 的两种超压缩：zstd 与 zlib。两个都是纯 Rust 实现。
+ruzstd = "0.7"
+flate2 = "1"
