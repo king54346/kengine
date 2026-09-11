@@ -25,8 +25,19 @@ pub(crate) async fn import(
     // by this importer, which gltf-rs does not include in its feature registry.
     let parsed = gltf::Gltf::from_slice_without_validation(&bytes).map_err(LoadError::custom)?;
     let mut json = parsed.document.into_json();
-    json.extensions_required.retain(|ext| !matches!(ext.as_str(),
-        "EXT_mesh_gpu_instancing" | "KHR_materials_dispersion" | "KHR_materials_iridescence" | "KHR_materials_sheen"));
+    // gltf-rs 的特性注册表里没有这些扩展，但这个导入器认得它们；
+    // 不从 `extensionsRequired` 里划掉的话，校验会直接拒绝整个文件。
+    json.extensions_required.retain(|ext| {
+        !matches!(
+            ext.as_str(),
+            "EXT_mesh_gpu_instancing"
+                | "KHR_materials_dispersion"
+                | "KHR_materials_iridescence"
+                | "KHR_materials_sheen"
+                | "KHR_materials_variants"
+                | "KHR_texture_transform"
+        )
+    });
     let gltf = gltf::Gltf { document: gltf::Document::from_json(json).map_err(LoadError::custom)?, blob: parsed.blob };
     let base = uri::base_dir(&path);
 
@@ -36,6 +47,7 @@ pub(crate) async fn import(
     let (meshes, primitive_ranges) = import_meshes(&gltf, &buffers, &path)?;
     let (mut nodes, roots) = import_nodes(&gltf, &primitive_ranges);
     import_instances(&gltf, &buffers, &mut nodes)?;
+    let variants = import_variants(&gltf, &nodes);
     let skins = import_skins(&gltf, &buffers);
     let animations = import_animations(&gltf, &buffers);
 
@@ -52,7 +64,74 @@ pub(crate) async fn import(
     Ok(Model::new(meshes, materials, nodes, roots)
         .with_skins(skins)
         .with_animations(animations)
+        .with_variants(variants)
         .with_extras(import_extras(&gltf)))
+}
+
+/// 读 `KHR_materials_variants`。
+///
+/// 扩展分两半：文档根上是变体的**名单**，每个图元上是「我在第 i 个变体下
+/// 用哪个材质」的映射。这里把它翻成「(节点, 部件) → 材质」的覆盖表，
+/// 因为引擎的场景里能改的是**节点上的材质**，没有「图元」这一层。
+///
+/// 节点和部件的对应关系要用已经建好的 `nodes`：一个 glTF mesh 可能有
+/// 好几个图元，导入之后成了同一个节点的好几个 part，序号是一一对应的。
+fn import_variants(gltf: &gltf::Gltf, nodes: &[ModelNode]) -> Vec<crate::Variant> {
+    let Some(names) = gltf
+        .extension_value("KHR_materials_variants")
+        .and_then(|value| value.get("variants"))
+        .and_then(|value| value.as_array())
+    else {
+        return Vec::new();
+    };
+    let mut variants: Vec<crate::Variant> = names
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| crate::Variant {
+            name: entry
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&format!("variant{index}"))
+                .to_string(),
+            overrides: Vec::new(),
+        })
+        .collect();
+
+    for source in gltf.nodes() {
+        let index = source.index();
+        if index >= nodes.len() {
+            continue;
+        }
+        let Some(mesh) = source.mesh() else { continue };
+        for (part, primitive) in mesh.primitives().enumerate() {
+            // 导入时跳过了非三角形图元，序号会对不上。这批模型没有那种
+            // 图元，真遇到时宁可少换一个材质，也不要换错一个。
+            if part >= nodes[index].parts.len() {
+                break;
+            }
+            let Some(mappings) = primitive
+                .extension_value("KHR_materials_variants")
+                .and_then(|value| value.get("mappings"))
+                .and_then(|value| value.as_array())
+            else {
+                continue;
+            };
+            for mapping in mappings {
+                let Some(material) = mapping.get("material").and_then(|v| v.as_u64()) else {
+                    continue;
+                };
+                let Some(list) = mapping.get("variants").and_then(|v| v.as_array()) else {
+                    continue;
+                };
+                for slot in list.iter().filter_map(|v| v.as_u64()) {
+                    if let Some(variant) = variants.get_mut(slot as usize) {
+                        variant.overrides.push((index, part, material as usize));
+                    }
+                }
+            }
+        }
+    }
+    variants
 }
 
 /// 把文件里挂着的 `extras` 原样收起来。

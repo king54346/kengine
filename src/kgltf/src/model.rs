@@ -152,6 +152,21 @@ impl GltfExtras {
     }
 }
 
+/// `KHR_materials_variants` 里的一套材质变体。
+///
+/// 同一双鞋的三种配色、同一辆车的五种漆面——几何完全一样，只有材质不同。
+/// glTF 把它表达成「某个图元在某个变体下换用哪个材质」，
+/// 所以这里存的是一串覆盖项而不是一整套材质。
+#[derive(Debug, Clone, Default)]
+pub struct Variant {
+    /// 变体名，例如 `midnight`。
+    pub name: String,
+    /// 覆盖项：`(节点号, 该节点的第几个部件, 材质号)`。
+    ///
+    /// 没被覆盖到的部件保持它在默认变体下的材质。
+    pub overrides: Vec<(usize, usize, usize)>,
+}
+
 /// 一个导入完成的模型。
 #[derive(Debug, Clone)]
 pub struct Model {
@@ -164,6 +179,7 @@ pub struct Model {
     /// 动画剪辑。用 [`Arc`] 是为了让同一个模型的多个实例共享关键帧数据。
     pub(crate) animations: Arc<Vec<AnimationClip>>,
     pub(crate) extras: GltfExtras,
+    pub(crate) variants: Vec<Variant>,
 }
 
 impl Model {
@@ -185,7 +201,28 @@ impl Model {
             skins: Vec::new(),
             animations: Arc::new(Vec::new()),
             extras: GltfExtras::default(),
+            variants: Vec::new(),
         }
+    }
+
+    /// 附上 `KHR_materials_variants` 的变体表。
+    pub fn with_variants(mut self, variants: Vec<Variant>) -> Self {
+        self.variants = variants;
+        self
+    }
+
+    /// 全部材质变体。没有这个扩展时是空的。
+    pub fn variants(&self) -> &[Variant] {
+        &self.variants
+    }
+
+    /// 第 `index` 个变体下，`(节点, 部件)` 该用哪个材质。
+    ///
+    /// 返回 `None` 表示这个部件在这个变体里没有被覆盖，沿用默认材质。
+    pub fn variant_material(&self, index: usize, node: usize, part: usize) -> Option<usize> {
+        self.variants.get(index)?.overrides.iter().find_map(|&(n, p, material)| {
+            (n == node && p == part).then_some(material)
+        })
     }
 
     /// 附上 glTF 的 `extras`。
