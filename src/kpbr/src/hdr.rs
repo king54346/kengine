@@ -172,6 +172,29 @@ impl HdrImage {
         top.lerp(bottom, ty)
     }
 
+    /// 从字节解码一张 OpenEXR。
+    ///
+    /// EXR 和 Radiance `.hdr` 的定位相同（都是浮点的 HDR 图），但格式复杂
+    /// 得多——分块、多层、多种压缩。这里不自己写解析，交给 `image` crate
+    /// 的 `exr` 特性（它内部用的是纯 Rust 的 `exr` crate）。
+    ///
+    /// 只取 RGB 三个通道。EXR 的 alpha、深度层、任意命名的附加层都会被丢掉
+    /// ——环境光照只关心辐射度。
+    pub fn decode_exr(bytes: &[u8]) -> Result<Self, HdrError> {
+        let image = image::load_from_memory_with_format(bytes, image::ImageFormat::OpenExr)
+            .map_err(|e| HdrError(e.to_string()))?
+            .to_rgb32f();
+        let (width, height) = (image.width() as usize, image.height() as usize);
+        // EXR 的值可以是负数或 NaN（合成软件的中间结果）。负的辐射度没有
+        // 物理意义，NaN 会顺着球谐投影污染整张环境图，这里一并夹掉。
+        let pixels = image
+            .into_raw()
+            .into_iter()
+            .map(|value| if value.is_finite() { value.max(0.0) } else { 0.0 })
+            .collect();
+        Ok(Self::from_pixels(width, height, pixels))
+    }
+
     /// 从字节解码一张 `.hdr`。
     pub fn decode(bytes: &[u8]) -> Result<Self, HdrError> {
         let mut cursor = 0usize;

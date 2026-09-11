@@ -14,12 +14,12 @@ impl ResourceData for HdrImage {
     }
 }
 
-/// 加载 Radiance `.hdr` 全景图。
+/// 加载 Radiance `.hdr` 与 OpenEXR `.exr` 全景图。
 pub struct HdrLoader;
 
 impl ResourceLoader for HdrLoader {
     fn extensions(&self) -> &[&str] {
-        &["hdr"]
+        &["hdr", "exr"]
     }
 
     fn data_type_uuid(&self) -> Uuid {
@@ -29,7 +29,15 @@ impl ResourceLoader for HdrLoader {
     fn load(&self, path: PathBuf, io: Arc<dyn ResourceIo>) -> BoxedLoaderFuture {
         Box::pin(async move {
             let bytes = io.load_file(&path).await?;
-            let image = HdrImage::decode(&bytes).map_err(LoadError::custom)?;
+            let image = if path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("exr"))
+            {
+                HdrImage::decode_exr(&bytes)
+            } else {
+                HdrImage::decode(&bytes)
+            }
+            .map_err(LoadError::custom)?;
 
             klog::debug!(
                 "HDR 已解码：{} ({}×{})",
@@ -49,7 +57,7 @@ mod tests {
 
     #[test]
     fn the_loader_claims_the_hdr_extension() {
-        assert_eq!(HdrLoader.extensions(), &["hdr"]);
+        assert_eq!(HdrLoader.extensions(), &["hdr", "exr"]);
         assert_eq!(HdrLoader.data_type_uuid(), HDR_TYPE_UUID);
     }
 

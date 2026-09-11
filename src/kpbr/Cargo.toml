@@ -11,6 +11,9 @@ kmath = { path = "../kmath" }
 bytemuck = { version = "1.25.2", features = ["derive"] }
 kmaterial = { path = "../kmaterial" }
 kshader = { path = "../kshader" }
+# OpenEXR 与 UltraHDR（JPEG + 增益图）的解码。只开这两种格式，
+# 其余交给 ktexture 那份 `image` 依赖，Cargo 会把特性并起来。
+image = { version = "0.25.10", default-features = false, features = ["exr", "jpeg"] }
 
 [dev-dependencies]
 # 用于校验本 crate 导出的 WGSL 是否合法

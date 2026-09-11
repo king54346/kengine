@@ -18,7 +18,7 @@
 pub mod container;
 mod loader;
 
-pub use container::Container;
+pub use container::{Container, ContainerLoader};
 pub use loader::TextureLoader;
 
 use kasset::ResourceData;

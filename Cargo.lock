@@ -2000,6 +2000,7 @@ name = "kpbr"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "image",
  "kasset",
  "kcore",
  "klog",

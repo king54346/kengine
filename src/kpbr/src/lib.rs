@@ -20,6 +20,7 @@
 
 pub mod physical;
 pub mod points;
+pub mod ultrahdr;
 
 pub mod brdf;
 pub mod hdr;

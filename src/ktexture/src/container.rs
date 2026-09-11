@@ -29,6 +29,12 @@
 //! `spiritedaway.ktx2`，以及 `coffeemat.glb` 里那几张 `KHR_texture_basisu` 贴图。
 
 use crate::{Sampler, Texture, TextureError, TextureFormat};
+use kasset::{BoxedLoaderFuture, LoadError, ResourceData, ResourceIo, ResourceLoader};
+use kcore::uuid::{Uuid, uuid};
+use std::{path::PathBuf, sync::Arc};
+
+/// [`Container`] 的资源类型标识。
+pub const CONTAINER_TYPE_UUID: Uuid = uuid!("2f6b91ca-84d7-4e05-9a3b-c17e58d06b92");
 
 /// 一个容器解出来的全部内容。
 #[derive(Debug, Clone)]
@@ -43,6 +49,49 @@ pub struct Container {
     pub faces: u32,
     /// 每一级 mip 一张图（已解成 RGBA8）；立方体贴图时每级是一张 6 层的数组。
     pub levels: Vec<Texture>,
+}
+
+impl ResourceData for Container {
+    fn type_uuid(&self) -> Uuid {
+        CONTAINER_TYPE_UUID
+    }
+}
+
+/// 把压缩纹理容器整个读进来（含 mip 链、立方体的六个面、格式名）。
+///
+/// 和 [`TextureLoader`](crate::TextureLoader) 的区别：那个只要第 0 级，
+/// 直接产出一张 [`Texture`]；这个保留整个容器的结构，给「要显示 mip 链
+/// 或者格式信息」的场合用。
+///
+/// 两者扩展名重叠，而资源管理器按扩展名找加载器、后注册的优先——
+/// 同一个管理器里只该注册其中一个。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ContainerLoader;
+
+impl ResourceLoader for ContainerLoader {
+    fn extensions(&self) -> &[&str] {
+        &["dds", "ktx", "ktx2", "pvr"]
+    }
+
+    fn data_type_uuid(&self) -> Uuid {
+        CONTAINER_TYPE_UUID
+    }
+
+    fn load(&self, path: PathBuf, io: Arc<dyn ResourceIo>) -> BoxedLoaderFuture {
+        Box::pin(async move {
+            let bytes = io.load_file(&path).await?;
+            let container = decode(&bytes).map_err(LoadError::custom)?;
+            klog::debug!(
+                "压缩纹理已解码：{}（{} {}×{}，{} 级 mip）",
+                path.display(),
+                container.format,
+                container.width,
+                container.height,
+                container.levels.len()
+            );
+            Ok(Box::new(container) as Box<dyn ResourceData>)
+        })
+    }
 }
 
 impl Container {
