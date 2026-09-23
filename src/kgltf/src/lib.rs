@@ -39,6 +39,19 @@ pub use model::{
     GltfExtras, MODEL_TYPE_UUID, MeshPart, Model, ModelNode, ModelSkin, NodeTransform, Variant,
 };
 
+/// 从内存里的 glTF / GLB 字节导入。
+///
+/// `path` 用来解析相对 URI（外部 `.bin`、贴图）并当资源键。容器格式
+/// （3D Tiles 的 `.b3dm`、KMZ 之类）把 GLB 包在自己的头部里，剥掉头部之后
+/// 走这里，而不必先写一个临时文件。
+pub async fn import_bytes(
+    bytes: Vec<u8>,
+    path: std::path::PathBuf,
+    io: std::sync::Arc<dyn kasset::ResourceIo>,
+) -> Result<Model, kasset::LoadError> {
+    importer::import(bytes, path, io).await
+}
+
 /// 常用类型的集中导出。
 pub mod prelude {
     pub use crate::{GltfLoader, MeshPart, Model, ModelNode, NodeTransform};

@@ -101,7 +101,7 @@ pub mod prelude {
     pub use kcore::pool::Handle;
     // `Color` 在引擎里只有调试线用得上，导出时冠上来源，免得和材质的
     // 颜色向量混起来。
-    pub use kgizmo::{Color as GizmoColor, Gizmos, Layer as GizmoLayer};
+    pub use kgizmo::{Color as GizmoColor, Gizmos, Layer as GizmoLayer, LineSet, LineSetBuilder};
     pub use kgltf::{GltfLoader, Model};
     pub use kinput::{Binding, Input, KeyCode, MouseButton};
     pub use kmaterial::{Material, MaterialValue};

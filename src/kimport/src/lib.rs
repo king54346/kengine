@@ -46,6 +46,7 @@ pub mod ifc;
 pub mod kmz;
 pub mod md2;
 pub mod mdd;
+mod nurbs;
 pub mod nrrd;
 pub mod obj;
 pub mod path;
@@ -54,7 +55,9 @@ pub mod pdb;
 pub mod ply;
 pub mod stl;
 pub mod tds;
+pub mod threedm;
 pub mod threemf;
+pub mod tiles;
 pub mod vox;
 pub mod xml;
 pub mod zip;
@@ -85,7 +88,9 @@ pub use pdb::PdbLoader;
 pub use ply::PlyLoader;
 pub use stl::StlLoader;
 pub use tds::TdsLoader;
+pub use threedm::{Rhino3dmLoader, Rhino3dmSceneLoader};
 pub use threemf::ThreeMfLoader;
+pub use tiles::{B3dmLoader, TilesetLoader};
 pub use vox::VoxLoader;
 
 /// 常用类型的集中导出。
