@@ -83,7 +83,7 @@ impl Path {
         let mut cursor = Vec2::ZERO;
         let mut start = Vec2::ZERO;
 
-        let mut flush = |points: &mut Vec<Vec2>, closed: &mut bool, out: &mut Vec<Contour>| {
+        let flush = |points: &mut Vec<Vec2>, closed: &mut bool, out: &mut Vec<Contour>| {
             if points.len() >= 2 {
                 out.push(Contour {
                     points: std::mem::take(points),
@@ -416,12 +416,19 @@ fn is_ear(polygon: &[Vec2], remaining: &[usize], a: usize, b: usize, c: usize) -
     if cross(pa, pb, pc) <= 1e-9 {
         return false;
     }
-    // 三角形里不能含别的顶点。
+    // 三角形里不能含别的顶点。和三个角**重合**的顶点不算：桥会把洞口和
+    // 外轮廓上的两个点各复制一份，它们位置相同、下标不同。算进去的话，
+    // 桥两侧的每个候选耳朵都「含有别的顶点」，一只耳朵都切不出来，
+    // 最后退化成强行切，把洞填上。
     !remaining.iter().any(|&index| {
+        let p = polygon[index];
         index != a
             && index != b
             && index != c
-            && point_in_triangle(polygon[index], pa, pb, pc)
+            && p != pa
+            && p != pb
+            && p != pc
+            && point_in_triangle(p, pa, pb, pc)
     })
 }
 
@@ -509,7 +516,7 @@ pub fn extrude(fill: &Tessellation, contours: &[Contour], depth: f32) -> Mesh {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
 
-    let mut cap = |z: f32, normal: Vec3, flip: bool, vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>| {
+    let cap = |z: f32, normal: Vec3, flip: bool, vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>| {
         let base = vertices.len() as u32;
         for point in &fill.points {
             vertices.push(Vertex {

@@ -1,8 +1,9 @@
 //! 只读的 ZIP 容器：KMZ、3MF、压缩的 AMF、USDZ 都是 ZIP。
 //!
-//! 只实现这几个格式用得到的部分：中央目录、「存储」与「deflate」两种
-//! 压缩方式。不支持加密、ZIP64、分卷——这些样本里一个都没有，而遇到时
-//! 会明确报错而不是读出垃圾。
+//! 只实现这几个格式用得到的部分：中央目录（含 ZIP64 扩展）、「存储」与
+//! 「deflate」两种压缩方式。不支持加密、分卷——遇到时明确报错而不是读出
+//! 垃圾。（ZIP64 是真会遇到的：`truck.3mf` 就是一个很小的 ZIP64 文件，
+//! 有些打包工具不管大小一律写 ZIP64 头。）
 //!
 //! 为什么不用 `zip` crate：它默认拖进 bzip2 / zstd / aes 一串依赖，
 //! 而这里用得到的全部逻辑就是下面这一百来行；deflate 本身仍然复用
@@ -36,6 +37,12 @@ fn u16_at(b: &[u8], at: usize) -> Result<u16, LoadError> {
         .ok_or_else(|| bad("ZIP 被截断"))
 }
 
+fn u64_at(b: &[u8], at: usize) -> Result<u64, LoadError> {
+    b.get(at..at + 8)
+        .map(|s| u64::from_le_bytes(s.try_into().expect("长度刚好是 8")))
+        .ok_or_else(|| bad("ZIP 被截断"))
+}
+
 fn u32_at(b: &[u8], at: usize) -> Result<u32, LoadError> {
     b.get(at..at + 4)
         .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
@@ -56,10 +63,20 @@ impl<'a> Archive<'a> {
             .rev()
             .find(|&at| bytes[at..at + 4] == *b"PK\x05\x06")
             .ok_or_else(|| bad("不是 ZIP：找不到中央目录"))?;
-        let count = u16_at(bytes, eocd + 10)? as usize;
+        let mut count = u16_at(bytes, eocd + 10)? as usize;
         let mut at = u32_at(bytes, eocd + 16)? as usize;
         if count == 0xffff || at == 0xffff_ffff {
-            return Err(bad("不支持 ZIP64"));
+            // ZIP64：目录尾之前 20 字节是定位记录，它指向真正的 ZIP64 目录尾。
+            let locator = eocd.checked_sub(20).ok_or_else(|| bad("ZIP64 定位记录缺失"))?;
+            if u32_at(bytes, locator)? != 0x0706_4b50 {
+                return Err(bad("ZIP64 定位记录缺失"));
+            }
+            let record = u64_at(bytes, locator + 8)? as usize;
+            if u32_at(bytes, record)? != 0x0606_4b50 {
+                return Err(bad("ZIP64 目录尾损坏"));
+            }
+            count = u64_at(bytes, record + 32)? as usize;
+            at = u64_at(bytes, record + 48)? as usize;
         }
         let mut entries = Vec::with_capacity(count.min(65536));
         for _ in 0..count {
@@ -76,12 +93,32 @@ impl<'a> Archive<'a> {
             let name = bytes
                 .get(at + 46..at + 46 + name_len)
                 .ok_or_else(|| bad("ZIP 被截断"))?;
+            let mut compressed = u32_at(bytes, at + 20)? as u64;
+            let mut uncompressed = u32_at(bytes, at + 24)? as u64;
+            let mut local_offset = u32_at(bytes, at + 42)? as u64;
+            // ZIP64 扩展字段（id 1）：值为 0xFFFFFFFF 的那几项按固定顺序放在这里。
+            let mut extra = at + 46 + name_len;
+            let extra_end = extra + extra_len;
+            while extra + 4 <= extra_end {
+                let id = u16_at(bytes, extra)?;
+                let size = u16_at(bytes, extra + 2)? as usize;
+                if id == 1 {
+                    let mut field = extra + 4;
+                    for value in [&mut uncompressed, &mut compressed, &mut local_offset] {
+                        if *value == 0xffff_ffff && field + 8 <= extra + 4 + size {
+                            *value = u64_at(bytes, field)?;
+                            field += 8;
+                        }
+                    }
+                }
+                extra += 4 + size;
+            }
             entries.push(Entry {
                 name: String::from_utf8_lossy(name).replace('\\', "/"),
                 method: u16_at(bytes, at + 10)?,
-                compressed: u32_at(bytes, at + 20)? as usize,
-                uncompressed: u32_at(bytes, at + 24)? as usize,
-                local_offset: u32_at(bytes, at + 42)? as usize,
+                compressed: compressed as usize,
+                uncompressed: uncompressed as usize,
+                local_offset: local_offset as usize,
             });
             at += 46 + name_len + extra_len + comment_len;
         }

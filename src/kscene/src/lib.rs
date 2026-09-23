@@ -1015,10 +1015,19 @@ impl Scene {
             // 不是节点的局部变换。
             for sample in player.pose().morphs() {
                 let node_handle = player.target(sample.target);
-                let Ok(node) = self.nodes.try_borrow_mut(node_handle) else {
-                    continue;
+                // 多材质的网格在实例化时拆成了 `Part{n}` 子节点，权重要写到它们身上。
+                let targets: Vec<Handle<Node>> = match self.try_get(node_handle) {
+                    Some(node) if node.mesh.is_some() => vec![node_handle],
+                    Some(node) => node.children.clone(),
+                    None => continue,
                 };
-                node.set_morph_weight(sample.index, sample.weight);
+                for target in targets {
+                    if let Ok(node) = self.nodes.try_borrow_mut(target)
+                        && node.mesh.is_some()
+                    {
+                        node.set_morph_weight(sample.index, sample.weight);
+                    }
+                }
             }
 
             // 材质属性（`KHR_animation_pointer`）：写到目标节点那一块几何的材质上。

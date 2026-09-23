@@ -36,14 +36,25 @@
 
 #![warn(missing_docs)]
 
+pub mod amf;
+pub mod bvh;
+pub mod collada;
+pub mod drc;
+pub mod fbx;
+pub mod gcode;
+pub mod ifc;
+pub mod kmz;
 pub mod md2;
 pub mod mdd;
 pub mod nrrd;
 pub mod obj;
+pub mod path;
 pub mod pcd;
 pub mod pdb;
 pub mod ply;
 pub mod stl;
+pub mod tds;
+pub mod threemf;
 pub mod vox;
 pub mod xml;
 pub mod zip;
@@ -57,6 +68,14 @@ use std::{
     sync::Arc,
 };
 
+pub use amf::AmfLoader;
+pub use bvh::BvhLoader;
+pub use collada::{ColladaKinematicsLoader, ColladaLoader};
+pub use drc::DracoLoader;
+pub use fbx::{FbxLoader, FbxSceneLoader};
+pub use gcode::GCodeLoader;
+pub use ifc::IfcLoader;
+pub use kmz::KmzLoader;
 pub use md2::Md2Loader;
 pub use mdd::MddLoader;
 pub use nrrd::NrrdLoader;
@@ -65,6 +84,8 @@ pub use pcd::PcdLoader;
 pub use pdb::PdbLoader;
 pub use ply::PlyLoader;
 pub use stl::StlLoader;
+pub use tds::TdsLoader;
+pub use threemf::ThreeMfLoader;
 pub use vox::VoxLoader;
 
 /// 常用类型的集中导出。
@@ -203,4 +224,42 @@ pub(crate) async fn sibling(io: &Arc<dyn ResourceIo>, base: &Path, name: &str) -
     let cleaned = name.replace('\\', "/");
     let cleaned = cleaned.trim_start_matches("./");
     io.load_file(&base.join(cleaned)).await.ok()
+}
+
+/// 读一张和模型同目录（或在其子目录里）的贴图，读不到或解不开返回 `None`。
+///
+/// 格式内部写的贴图路径经常是作者机器上的绝对路径（`C:\Users\...\wood.jpg`），
+/// 或者大小写和实际文件不符。所以按这个顺序试：原路径 → 只取文件名 →
+/// 文件名转小写。三种都找不到才算缺失——缺贴图是常态，不是错误。
+pub(crate) async fn load_texture(
+    io: &Arc<dyn ResourceIo>,
+    base: &Path,
+    name: &str,
+    linear: bool,
+) -> Option<kasset::Resource<ktexture::Texture>> {
+    let cleaned = name.replace('\\', "/");
+    let file = cleaned.rsplit('/').next().unwrap_or(&cleaned).to_string();
+    let mut bytes = sibling(io, base, &cleaned).await;
+    if bytes.is_none() {
+        bytes = sibling(io, base, &file).await;
+    }
+    if bytes.is_none() {
+        bytes = sibling(io, base, &file.to_lowercase()).await;
+    }
+    let bytes = bytes?;
+    texture_from_bytes(&base.join(&file).to_string_lossy(), &bytes, linear)
+}
+
+/// 把内嵌的贴图字节解码成资源。`key` 只用于资源表里的名字。
+pub(crate) fn texture_from_bytes(key: &str, bytes: &[u8], linear: bool) -> Option<kasset::Resource<ktexture::Texture>> {
+    match ktexture::Texture::from_encoded(bytes) {
+        Ok(texture) => {
+            let format = if linear { ktexture::TextureFormat::Linear } else { ktexture::TextureFormat::Srgb };
+            Some(kasset::Resource::new_ok(format!("{key}#{}", if linear { "linear" } else { "srgb" }), texture.with_format(format)))
+        }
+        Err(error) => {
+            klog::warn!("贴图 {key} 解码失败：{error}");
+            None
+        }
+    }
 }

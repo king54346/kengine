@@ -306,6 +306,11 @@ impl Model {
         self.nodes.get(index)
     }
 
+    /// 按索引改节点。导入器做后处理（换坐标系、改单位）时用。
+    pub fn node_mut(&mut self, index: usize) -> Option<&mut ModelNode> {
+        self.nodes.get_mut(index)
+    }
+
     /// 按索引取网格。
     pub fn mesh(&self, index: usize) -> Option<&Mesh> {
         self.meshes.get(index)

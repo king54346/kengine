@@ -1,0 +1,511 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "kengine gen_animation_pointer.py"
+ },
+ "extensionsUsed": [
+  "KHR_animation_pointer",
+  "KHR_materials_emissive_strength",
+  "KHR_materials_iridescence"
+ ],
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0,
+    1,
+    2,
+    3
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "ColorCycle",
+   "mesh": 0,
+   "translation": [
+    -1.8,
+    0.6,
+    0
+   ]
+  },
+  {
+   "name": "Breathing",
+   "mesh": 1,
+   "translation": [
+    0,
+    0.6,
+    0
+   ]
+  },
+  {
+   "name": "MetalRough",
+   "mesh": 2,
+   "translation": [
+    1.8,
+    0.6,
+    0
+   ]
+  },
+  {
+   "name": "Iridescent",
+   "mesh": 3,
+   "translation": [
+    0,
+    2.1,
+    0
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "name": "Cube0",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 0
+    }
+   ]
+  },
+  {
+   "name": "Cube1",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 1
+    }
+   ]
+  },
+  {
+   "name": "Cube2",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 2
+    }
+   ]
+  },
+  {
+   "name": "Cube3",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1
+     },
+     "indices": 2,
+     "material": 3
+    }
+   ]
+  }
+ ],
+ "materials": [
+  {
+   "name": "ColorCycle",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     1,
+     0,
+     0,
+     1
+    ],
+    "metallicFactor": 0.0,
+    "roughnessFactor": 0.4
+   }
+  },
+  {
+   "name": "Breathing",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.05,
+     0.05,
+     0.05,
+     1
+    ],
+    "metallicFactor": 0.0,
+    "roughnessFactor": 0.6
+   },
+   "emissiveFactor": [
+    1,
+    0.45,
+    0.1
+   ],
+   "extensions": {
+    "KHR_materials_emissive_strength": {
+     "emissiveStrength": 1.0
+    }
+   }
+  },
+  {
+   "name": "MetalRough",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.9,
+     0.75,
+     0.4,
+     1
+    ],
+    "metallicFactor": 1.0,
+    "roughnessFactor": 0.0
+   }
+  },
+  {
+   "name": "Iridescent",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.1,
+     0.1,
+     0.12,
+     1
+    ],
+    "metallicFactor": 1.0,
+    "roughnessFactor": 0.15
+   },
+   "extensions": {
+    "KHR_materials_iridescence": {
+     "iridescenceFactor": 0.0,
+     "iridescenceThicknessMaximum": 420
+    }
+   }
+  }
+ ],
+ "accessors": [
+  {
+   "componentType": 5126,
+   "count": 24,
+   "type": "VEC3",
+   "min": [
+    -0.5,
+    -0.5,
+    -0.5
+   ],
+   "max": [
+    0.5,
+    0.5,
+    0.5
+   ],
+   "bufferView": 0
+  },
+  {
+   "componentType": 5126,
+   "count": 24,
+   "type": "VEC3",
+   "bufferView": 1
+  },
+  {
+   "componentType": 5123,
+   "count": 36,
+   "type": "SCALAR",
+   "bufferView": 2
+  },
+  {
+   "componentType": 5126,
+   "count": 33,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    4.0
+   ],
+   "bufferView": 3
+  },
+  {
+   "componentType": 5126,
+   "count": 33,
+   "type": "VEC4",
+   "bufferView": 4
+  },
+  {
+   "componentType": 5126,
+   "count": 33,
+   "type": "VEC3",
+   "bufferView": 5
+  },
+  {
+   "componentType": 5126,
+   "count": 33,
+   "type": "SCALAR",
+   "bufferView": 6
+  },
+  {
+   "componentType": 5126,
+   "count": 33,
+   "type": "SCALAR",
+   "bufferView": 7
+  },
+  {
+   "componentType": 5126,
+   "count": 33,
+   "type": "SCALAR",
+   "bufferView": 8
+  },
+  {
+   "componentType": 5126,
+   "count": 33,
+   "type": "SCALAR",
+   "bufferView": 9
+  },
+  {
+   "componentType": 5126,
+   "count": 33,
+   "type": "VEC4",
+   "bufferView": 10
+  },
+  {
+   "componentType": 5126,
+   "count": 33,
+   "type": "VEC4",
+   "bufferView": 11
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 288
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 288,
+   "byteLength": 288
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 576,
+   "byteLength": 72
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 648,
+   "byteLength": 132
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 780,
+   "byteLength": 528
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 1308,
+   "byteLength": 396
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 1704,
+   "byteLength": 132
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 1836,
+   "byteLength": 132
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 1968,
+   "byteLength": 132
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 2100,
+   "byteLength": 132
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 2232,
+   "byteLength": 528
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 2760,
+   "byteLength": 528
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 3288,
+   "uri": "data:application/octet-stream;base64,AAAAPwAAAL8AAAC/AAAAPwAAAD8AAAC/AAAAPwAAAD8AAAA/AAAAPwAAAL8AAAA/AAAAvwAAAL8AAAC/AAAAvwAAAD8AAAC/AAAAvwAAAD8AAAA/AAAAvwAAAL8AAAA/AAAAvwAAAD8AAAC/AAAAvwAAAD8AAAA/AAAAPwAAAD8AAAA/AAAAPwAAAD8AAAC/AAAAvwAAAL8AAAC/AAAAvwAAAL8AAAA/AAAAPwAAAL8AAAA/AAAAPwAAAL8AAAC/AAAAvwAAAL8AAAA/AAAAPwAAAL8AAAA/AAAAPwAAAD8AAAA/AAAAvwAAAD8AAAA/AAAAvwAAAL8AAAC/AAAAPwAAAL8AAAC/AAAAPwAAAD8AAAC/AAAAvwAAAD8AAAC/AACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAACAvwAAAAAAAAAAAACAvwAAAAAAAAAAAACAvwAAAAAAAAAAAACAvwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAABAAIAAAACAAMABAAGAAUABAAHAAYACAAJAAoACAAKAAsADAAOAA0ADAAPAA4AEAARABIAEAASABMAFAAWABUAFAAXABYAAAAAAAAAAD4AAIA+AADAPgAAAD8AACA/AABAPwAAYD8AAIA/AACQPwAAoD8AALA/AADAPwAA0D8AAOA/AADwPwAAAEAAAAhAAAAQQAAAGEAAACBAAAAoQAAAMEAAADhAAABAQAAASEAAAFBAAABYQAAAYEAAAGhAAABwQAAAeEAAAIBAAACAPwAAAAAAAAAAAACAPwAAgD8AAEA+AAAAAAAAgD8AAIA/AADAPgAAAAAAAIA/AACAPwAAED8AAAAAAACAPwAAgD8AAEA/AAAAAAAAgD8AAIA/AABwPwAAAAAAAIA/AABgPwAAgD8AAAAAAACAPwAAMD8AAIA/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"
+  }
+ ],
+ "animations": [
+  {
+   "name": "PointerShowcase",
+   "samplers": [
+    {
+     "input": 3,
+     "output": 4,
+     "interpolation": "LINEAR"
+    },
+    {
+     "input": 3,
+     "output": 5,
+     "interpolation": "LINEAR"
+    },
+    {
+     "input": 3,
+     "output": 6,
+     "interpolation": "LINEAR"
+    },
+    {
+     "input": 3,
+     "output": 7,
+     "interpolation": "LINEAR"
+    },
+    {
+     "input": 3,
+     "output": 8,
+     "interpolation": "LINEAR"
+    },
+    {
+     "input": 3,
+     "output": 9,
+     "interpolation": "LINEAR"
+    },
+    {
+     "input": 3,
+     "output": 10,
+     "interpolation": "LINEAR"
+    },
+    {
+     "input": 3,
+     "output": 11,
+     "interpolation": "LINEAR"
+    },
+    {
+     "input": 3,
+     "output": 10,
+     "interpolation": "LINEAR"
+    },
+    {
+     "input": 3,
+     "output": 11,
+     "interpolation": "LINEAR"
+    }
+   ],
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "path": "pointer",
+      "extensions": {
+       "KHR_animation_pointer": {
+        "pointer": "/materials/0/pbrMetallicRoughness/baseColorFactor"
+       }
+      }
+     }
+    },
+    {
+     "sampler": 1,
+     "target": {
+      "path": "pointer",
+      "extensions": {
+       "KHR_animation_pointer": {
+        "pointer": "/materials/1/emissiveFactor"
+       }
+      }
+     }
+    },
+    {
+     "sampler": 2,
+     "target": {
+      "path": "pointer",
+      "extensions": {
+       "KHR_animation_pointer": {
+        "pointer": "/materials/1/extensions/KHR_materials_emissive_strength/emissiveStrength"
+       }
+      }
+     }
+    },
+    {
+     "sampler": 3,
+     "target": {
+      "path": "pointer",
+      "extensions": {
+       "KHR_animation_pointer": {
+        "pointer": "/materials/2/pbrMetallicRoughness/roughnessFactor"
+       }
+      }
+     }
+    },
+    {
+     "sampler": 4,
+     "target": {
+      "path": "pointer",
+      "extensions": {
+       "KHR_animation_pointer": {
+        "pointer": "/materials/2/pbrMetallicRoughness/metallicFactor"
+       }
+      }
+     }
+    },
+    {
+     "sampler": 5,
+     "target": {
+      "path": "pointer",
+      "extensions": {
+       "KHR_animation_pointer": {
+        "pointer": "/materials/3/extensions/KHR_materials_iridescence/iridescenceFactor"
+       }
+      }
+     }
+    },
+    {
+     "sampler": 6,
+     "target": {
+      "path": "pointer",
+      "extensions": {
+       "KHR_animation_pointer": {
+        "pointer": "/nodes/0/rotation"
+       }
+      }
+     }
+    },
+    {
+     "sampler": 7,
+     "target": {
+      "path": "pointer",
+      "extensions": {
+       "KHR_animation_pointer": {
+        "pointer": "/nodes/1/rotation"
+       }
+      }
+     }
+    },
+    {
+     "sampler": 8,
+     "target": {
+      "path": "pointer",
+      "extensions": {
+       "KHR_animation_pointer": {
+        "pointer": "/nodes/2/rotation"
+       }
+      }
+     }
+    },
+    {
+     "sampler": 9,
+     "target": {
+      "path": "pointer",
+      "extensions": {
+       "KHR_animation_pointer": {
+        "pointer": "/nodes/3/rotation"
+       }
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

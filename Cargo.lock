@@ -2003,6 +2003,7 @@ dependencies = [
  "kasset",
  "kcore",
  "kfont",
+ "kgizmo",
  "kgltf",
  "klog",
  "kmaterial",

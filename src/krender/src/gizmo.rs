@@ -12,9 +12,28 @@
 //! 两条都不写深度：调试线是叠上去的东西，不该影响它之后画的任何像素。
 
 use bytemuck::{Pod, Zeroable};
-use kgizmo::{GizmoVertex, Gizmos, Layer};
+use kgizmo::{GizmoVertex, Gizmos, Layer, LineSet};
 use kmath::Mat4;
-use std::num::NonZeroU64;
+use std::{collections::HashMap, num::NonZeroU64};
+
+/// 常驻线段每帧一份矩阵，按 uniform 动态偏移的对齐要求排开。
+const MATRIX_STRIDE: u64 = 256;
+
+/// 一个常驻线段集在显存里的那份拷贝。
+struct RetainedLines {
+    buffer: wgpu::Buffer,
+    count: u32,
+    /// 最后一次被画是第几帧。长期没人画的缓冲会被回收。
+    last_used: u64,
+}
+
+/// 本帧一次常驻线段的绘制。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RetainedDraw {
+    id: u64,
+    slot: u32,
+    count: u32,
+}
 
 /// 调试线 pass 的全局量，对应 `gizmo.wgsl` 的 `Globals`。
 #[repr(C)]
@@ -58,6 +77,16 @@ pub(crate) struct GizmoResources {
 
     /// 逐帧复用的暂存区：两层拼成一个缓冲，一次写完。
     scratch: Vec<GizmoVertex>,
+
+    // ── 常驻线段（`kgizmo::LineSet`）──
+    retained_pipeline: wgpu::RenderPipeline,
+    retained_layout: wgpu::BindGroupLayout,
+    matrix_buffer: wgpu::Buffer,
+    matrix_bind_group: wgpu::BindGroup,
+    /// 矩阵缓冲能放几份。
+    matrix_capacity: u64,
+    retained: HashMap<u64, RetainedLines>,
+    frame: u64,
 }
 
 impl GizmoResources {
@@ -129,6 +158,39 @@ impl GizmoResources {
             "overlay",
         );
 
+        // 常驻线段：同一个着色器，但 `Globals` 走动态偏移——每个线段集
+        // 一份 `view_proj × model`，着色器完全不用改。
+        let retained_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("kengine retained lines layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: NonZeroU64::new(size_of::<GizmoGlobals>() as u64),
+                },
+                count: None,
+            }],
+        });
+        let retained_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("kengine retained lines pipeline layout"),
+            bind_group_layouts: &[Option::from(&retained_layout)],
+            immediate_size: 0,
+        });
+        let retained_pipeline = create_pipeline(
+            device,
+            &retained_pipeline_layout,
+            &shader,
+            color_format,
+            depth_format,
+            wgpu::CompareFunction::LessEqual,
+            "retained",
+        );
+        let matrix_capacity = 16;
+        let matrix_buffer = create_matrix_buffer(device, matrix_capacity);
+        let matrix_bind_group = create_matrix_bind_group(device, &retained_layout, &matrix_buffer);
+
         Self {
             depth_pipeline,
             overlay_pipeline,
@@ -137,6 +199,78 @@ impl GizmoResources {
             vertex_buffer: create_vertex_buffer(device, Self::INITIAL_CAPACITY),
             capacity: Self::INITIAL_CAPACITY,
             scratch: Vec::new(),
+            retained_pipeline,
+            retained_layout,
+            matrix_buffer,
+            matrix_bind_group,
+            matrix_capacity,
+            retained: HashMap::new(),
+            frame: 0,
+        }
+    }
+
+    /// 准备本帧的常驻线段：没见过的线段集上传一次，之后每帧只写矩阵。
+    pub(crate) fn prepare_retained<'a>(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        items: impl Iterator<Item = (&'a LineSet, Mat4)>,
+        view_proj: Mat4,
+    ) -> Vec<RetainedDraw> {
+        use wgpu::util::DeviceExt;
+        self.frame += 1;
+        let mut draws = Vec::new();
+        let mut matrices: Vec<u8> = Vec::new();
+        for (lines, model) in items {
+            let entry = self.retained.entry(lines.id()).or_insert_with(|| RetainedLines {
+                buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("kengine retained lines"),
+                    contents: bytemuck::cast_slice(lines.vertices()),
+                    usage: wgpu::BufferUsages::VERTEX,
+                }),
+                count: lines.vertices().len() as u32,
+                last_used: 0,
+            });
+            entry.last_used = self.frame;
+            let slot = draws.len() as u32;
+            let globals = GizmoGlobals {
+                view_proj: (view_proj * model).to_cols_array_2d(),
+            };
+            matrices.extend_from_slice(bytemuck::bytes_of(&globals));
+            matrices.resize(matrices.len() + MATRIX_STRIDE as usize - size_of::<GizmoGlobals>(), 0);
+            draws.push(RetainedDraw {
+                id: lines.id(),
+                slot,
+                count: entry.count,
+            });
+        }
+        // 一秒多没被画的线段集：节点删了、换了几何，显存还给系统。
+        let frame = self.frame;
+        self.retained.retain(|_, r| frame - r.last_used < 120);
+
+        if draws.is_empty() {
+            return draws;
+        }
+        if draws.len() as u64 > self.matrix_capacity {
+            self.matrix_capacity = (draws.len() as u64).next_power_of_two();
+            self.matrix_buffer = create_matrix_buffer(device, self.matrix_capacity);
+            self.matrix_bind_group = create_matrix_bind_group(device, &self.retained_layout, &self.matrix_buffer);
+        }
+        queue.write_buffer(&self.matrix_buffer, 0, &matrices);
+        draws
+    }
+
+    /// 画常驻线段。和网格一样参与深度测试，不写深度。
+    pub(crate) fn draw_retained(&self, pass: &mut wgpu::RenderPass<'_>, draws: &[RetainedDraw]) {
+        if draws.is_empty() {
+            return;
+        }
+        pass.set_pipeline(&self.retained_pipeline);
+        for draw in draws {
+            let Some(lines) = self.retained.get(&draw.id) else { continue };
+            pass.set_bind_group(0, &self.matrix_bind_group, &[draw.slot * MATRIX_STRIDE as u32]);
+            pass.set_vertex_buffer(0, lines.buffer.slice(..));
+            pass.draw(0..draw.count, 0..1);
         }
     }
 
@@ -209,6 +343,34 @@ impl GizmoResources {
             pass.draw(slice.first..slice.first + slice.count, 0..1);
         }
     }
+}
+
+fn create_matrix_buffer(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("kengine retained line matrices"),
+        size: MATRIX_STRIDE * capacity.max(1),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn create_matrix_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    buffer: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("kengine retained line matrices bind group"),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer,
+                offset: 0,
+                size: NonZeroU64::new(size_of::<GizmoGlobals>() as u64),
+            }),
+        }],
+    })
 }
 
 fn create_vertex_buffer(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {

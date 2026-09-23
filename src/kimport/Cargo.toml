@@ -14,6 +14,8 @@ kmaterial = { path = "../kmaterial" }
 kmesh = { path = "../kmesh" }
 ktexture = { path = "../ktexture" }
 kfont = { path = "../kfont" }
+# G-code / BVH / NURBS 曲线这类「只有线」的产物走常驻线段集。
+kgizmo = { path = "../kgizmo" }
 kpbr = { path = "../kpbr" }
 kshader = { path = "../kshader" }
 # NRRD 的 gzip 正文、ZIP（KMZ / USDZ）的 deflate 条目。

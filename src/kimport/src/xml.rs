@@ -140,10 +140,10 @@ pub fn parse(bytes: &[u8]) -> Result<Element, LoadError> {
         };
         for attribute in e.attributes().with_checks(false) {
             let attribute = attribute.map_err(|e| bad(format!("XML 属性写坏了：{e}")))?;
-            let value = attribute
-                .unescape_value()
+            let raw = String::from_utf8_lossy(&attribute.value);
+            let value = quick_xml::escape::unescape(&raw)
                 .map(|v| v.into_owned())
-                .unwrap_or_else(|_| String::from_utf8_lossy(&attribute.value).into_owned());
+                .unwrap_or_else(|_| raw.clone().into_owned());
             element.attributes.push((local(attribute.key.as_ref()), value));
         }
         Ok(element)

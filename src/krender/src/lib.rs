@@ -2987,6 +2987,11 @@ impl Renderer {
             .gizmos
             .prepare(&self.device, &self.queue, scene.gizmos(), view_proj);
         stats.gizmo_vertices = scene.gizmos().len() as u32;
+        // 常驻线段（`kgizmo::LineSet`）：顶点只在第一次见到时上传。
+        let line_draws = self
+            .gizmos
+            .prepare_retained(&self.device, &self.queue, scene.visible_lines(), view_proj);
+        stats.draw_calls += line_draws.len() as u32;
 
         // 统计在取交换链纹理之前定格：那一步会因垂直同步而阻塞，
         // 算进来的话读到的就是显示器刷新率，不是 CPU 的准备耗时。
@@ -3447,6 +3452,7 @@ impl Renderer {
 
             // 调试线放在最后：它要盖在所有东西上面，而且不写深度，
             // 所以画在哪一步都不会影响别人，唯独顺序决定了它自己可不可见。
+            self.gizmos.draw_retained(&mut pass, &line_draws);
             self.gizmos.draw(&mut pass, &gizmo_draw);
         }
 
