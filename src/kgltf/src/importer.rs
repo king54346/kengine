@@ -485,7 +485,9 @@ fn import_materials(
     let mut cache = std::collections::HashMap::new();
     let mut texture_for = |source: gltf::Texture<'_>, linear: bool| -> Option<Resource<Texture>> {
         let key = (source.index(), linear);
-        if let Some(texture) = cache.get(&key) { return Some(Resource::clone(texture)); }
+        if let Some(texture) = cache.get(&key) {
+            return Some(Resource::clone(texture));
+        }
         let resource = textures.get(source.source().index())?.as_ref()?;
         let image = resource.data_ref()?;
         let wrap = |mode| match mode {
@@ -495,13 +497,36 @@ fn import_materials(
         };
         let s = source.sampler();
         let sampler = ktexture::Sampler {
-            wrap_u: wrap(s.wrap_s()), wrap_v: wrap(s.wrap_t()),
-            mag_filter: if s.mag_filter()==Some(gltf::texture::MagFilter::Nearest) {ktexture::FilterMode::Nearest}else{ktexture::FilterMode::Linear},
-            min_filter: if matches!(s.min_filter(), Some(gltf::texture::MinFilter::Nearest | gltf::texture::MinFilter::NearestMipmapNearest | gltf::texture::MinFilter::NearestMipmapLinear)) {ktexture::FilterMode::Nearest}else{ktexture::FilterMode::Linear},
+            wrap_u: wrap(s.wrap_s()),
+            wrap_v: wrap(s.wrap_t()),
+            mag_filter: if s.mag_filter() == Some(gltf::texture::MagFilter::Nearest) {
+                ktexture::FilterMode::Nearest
+            } else {
+                ktexture::FilterMode::Linear
+            },
+            min_filter: if matches!(
+                s.min_filter(),
+                Some(
+                    gltf::texture::MinFilter::Nearest
+                        | gltf::texture::MinFilter::NearestMipmapNearest
+                        | gltf::texture::MinFilter::NearestMipmapLinear
+                )
+            ) {
+                ktexture::FilterMode::Nearest
+            } else {
+                ktexture::FilterMode::Linear
+            },
         };
-        let image = (*image).clone().with_format(if linear {ktexture::TextureFormat::Linear}else{ktexture::TextureFormat::Srgb}).with_sampler(sampler);
+        let image = (*image)
+            .clone()
+            .with_format(if linear {
+                ktexture::TextureFormat::Linear
+            } else {
+                ktexture::TextureFormat::Srgb
+            })
+            .with_sampler(sampler);
         let resource = Resource::new_ok(format!("gltf#texture{}:{linear}", source.index()), image);
-        cache.insert(key,resource.clone());
+        cache.insert(key, resource.clone());
         Some(resource)
     };
     gltf.materials()
@@ -519,52 +544,101 @@ fn import_materials(
                     material = material.with_base_color_texture(texture);
                 }
             }
-            if let Some(info) = pbr.metallic_roughness_texture() && let Some(texture) = texture_for(info.texture(), true) {
+            if let Some(info) = pbr.metallic_roughness_texture()
+                && let Some(texture) = texture_for(info.texture(), true)
+            {
                 material.set(kpbr::standard::METALLIC_ROUGHNESS_TEXTURE, texture);
             }
-            if let Some(info) = source.normal_texture() && let Some(texture) = texture_for(info.texture(), true) {
+            if let Some(info) = source.normal_texture()
+                && let Some(texture) = texture_for(info.texture(), true)
+            {
                 material.set(kpbr::standard::NORMAL_TEXTURE, texture);
                 material.set("normal_scale", info.scale());
             }
-            if let Some(info) = source.occlusion_texture() && let Some(texture) = texture_for(info.texture(), true) {
+            if let Some(info) = source.occlusion_texture()
+                && let Some(texture) = texture_for(info.texture(), true)
+            {
                 material.set(kpbr::standard::OCCLUSION_TEXTURE, texture);
                 material.set(kpbr::standard::OCCLUSION, info.strength());
             }
-            if let Some(info) = source.emissive_texture() && let Some(texture) = texture_for(info.texture(), false) {
+            if let Some(info) = source.emissive_texture()
+                && let Some(texture) = texture_for(info.texture(), false)
+            {
                 material.set(kpbr::standard::EMISSIVE_TEXTURE, texture);
             }
-            material.set(kpbr::standard::EMISSIVE, Vec3::from_array(source.emissive_factor()) * source.emissive_strength().unwrap_or(1.0));
+            material.set(
+                kpbr::standard::EMISSIVE,
+                Vec3::from_array(source.emissive_factor())
+                    * source.emissive_strength().unwrap_or(1.0),
+            );
             apply_texture_transform(&source, &mut material);
             material.set_double_sided(source.double_sided());
-            if source.alpha_mode()==gltf::material::AlphaMode::Blend { material.set_blend_mode(kmaterial::BlendMode::Alpha); }
+            if source.alpha_mode() == gltf::material::AlphaMode::Blend {
+                material.set_blend_mode(kmaterial::BlendMode::Alpha);
+            }
             let mut physical = kpbr::physical::Physical::default();
-            physical.unlit=source.unlit();
-            physical.alpha_cutoff=if source.alpha_mode()==gltf::material::AlphaMode::Mask {source.alpha_cutoff().unwrap_or(0.5)}else{0.0};
-            physical.transmission=source.transmission().map_or(0.0,|t|t.transmission_factor());
-            physical.ior=source.ior().unwrap_or(1.5);
-            physical.thickness=source.volume().map_or(0.0,|v|v.thickness_factor());
-            let number=|extension:&str,key:&str,default:f32|source.extension_value(extension).and_then(|e|e.get(key)).and_then(|v|v.as_f64()).map_or(default,|v|v as f32);
-            physical.dispersion=number("KHR_materials_dispersion","dispersion",0.0);
-            physical.iridescence=number("KHR_materials_iridescence","iridescenceFactor",0.0);
-            physical.film_thickness=number("KHR_materials_iridescence","iridescenceThicknessMaximum",400.0);
-            physical.sheen_roughness=number("KHR_materials_sheen","sheenRoughnessFactor",0.0);
-            if let Some(color)=source.extension_value("KHR_materials_sheen").and_then(|e|e.get("sheenColorFactor")).and_then(|v|v.as_array()) && color.len()==3 {
-                physical.sheen=Vec3::new(color[0].as_f64().unwrap_or(0.0) as f32,color[1].as_f64().unwrap_or(0.0) as f32,color[2].as_f64().unwrap_or(0.0) as f32);
+            physical.unlit = source.unlit();
+            physical.alpha_cutoff = if source.alpha_mode() == gltf::material::AlphaMode::Mask {
+                source.alpha_cutoff().unwrap_or(0.5)
+            } else {
+                0.0
+            };
+            physical.transmission = source
+                .transmission()
+                .map_or(0.0, |t| t.transmission_factor());
+            physical.ior = source.ior().unwrap_or(1.5);
+            physical.thickness = source.volume().map_or(0.0, |v| v.thickness_factor());
+            let number = |extension: &str, key: &str, default: f32| {
+                source
+                    .extension_value(extension)
+                    .and_then(|e| e.get(key))
+                    .and_then(|v| v.as_f64())
+                    .map_or(default, |v| v as f32)
+            };
+            physical.dispersion = number("KHR_materials_dispersion", "dispersion", 0.0);
+            physical.iridescence = number("KHR_materials_iridescence", "iridescenceFactor", 0.0);
+            physical.film_thickness = number(
+                "KHR_materials_iridescence",
+                "iridescenceThicknessMaximum",
+                400.0,
+            );
+            physical.sheen_roughness = number("KHR_materials_sheen", "sheenRoughnessFactor", 0.0);
+            if let Some(color) = source
+                .extension_value("KHR_materials_sheen")
+                .and_then(|e| e.get("sheenColorFactor"))
+                .and_then(|v| v.as_array())
+                && color.len() == 3
+            {
+                physical.sheen = Vec3::new(
+                    color[0].as_f64().unwrap_or(0.0) as f32,
+                    color[1].as_f64().unwrap_or(0.0) as f32,
+                    color[2].as_f64().unwrap_or(0.0) as f32,
+                );
             }
             // KHR_materials_anisotropy：强度、旋转，外加一张方向贴图（线性数据）。
-            physical.anisotropy=number("KHR_materials_anisotropy","anisotropyStrength",0.0);
-            physical.anisotropy_rotation=number("KHR_materials_anisotropy","anisotropyRotation",0.0);
-            if let Some(index)=source.extension_value("KHR_materials_anisotropy").and_then(|e|e.get("anisotropyTexture")).and_then(|t|t.get("index")).and_then(|i|i.as_u64())
-                && let Some(texture)=gltf.textures().nth(index as usize)
+            physical.anisotropy = number("KHR_materials_anisotropy", "anisotropyStrength", 0.0);
+            physical.anisotropy_rotation =
+                number("KHR_materials_anisotropy", "anisotropyRotation", 0.0);
+            if let Some(index) = source
+                .extension_value("KHR_materials_anisotropy")
+                .and_then(|e| e.get("anisotropyTexture"))
+                .and_then(|t| t.get("index"))
+                .and_then(|i| i.as_u64())
+                && let Some(texture) = gltf.textures().nth(index as usize)
             {
-                physical.anisotropy_texture=texture_for(texture,true);
+                physical.anisotropy_texture = texture_for(texture, true);
             }
             // KHR_materials_clearcoat：只读系数；清漆自己的贴图与法线贴图不读。
-            physical.clearcoat=number("KHR_materials_clearcoat","clearcoatFactor",0.0);
-            physical.clearcoat_roughness=number("KHR_materials_clearcoat","clearcoatRoughnessFactor",0.0);
+            physical.clearcoat = number("KHR_materials_clearcoat", "clearcoatFactor", 0.0);
+            physical.clearcoat_roughness =
+                number("KHR_materials_clearcoat", "clearcoatRoughnessFactor", 0.0);
             // 被动画指针驱动扩展参数的材质，即便静态值全是默认也要换上扩展着色器——
             // 否则参数槽写进去了，却没有着色器读它。
-            if physical.is_needed() || force_physical.contains(&source.index().unwrap_or(usize::MAX)) {physical.apply(&mut material);}
+            if physical.is_needed()
+                || force_physical.contains(&source.index().unwrap_or(usize::MAX))
+            {
+                physical.apply(&mut material);
+            }
 
             // 名字留着：游戏侧要按「LeatherPartsMat」这种美术起的名字找到
             // 具体某一块去改颜色。用序号找的话，美术重新导出一次就全错位了。
@@ -765,37 +839,108 @@ fn import_nodes(
 
 /// Expand glTF GPU instance transforms into nodes sharing one Mesh id. The
 /// renderer batches those shared meshes back into GPU instanced draws.
-fn import_instances(gltf:&gltf::Gltf,buffers:&[Vec<u8>],nodes:&mut Vec<ModelNode>)->Result<(),LoadError>{
-    for source in gltf.nodes(){
-        let Some(extension)=source.extension_value("EXT_mesh_gpu_instancing") else {continue};
-        let attrs=extension.get("attributes").and_then(|v|v.as_object()).ok_or_else(||LoadError::message("instancing attributes missing"))?;
-        if source.skin().is_some(){return Err(LoadError::message("skinned EXT_mesh_gpu_instancing is not supported"));}
-        let accessor=|key:&str|->Result<Option<gltf::Accessor<'_>>,LoadError>{
-            let Some(value)=attrs.get(key) else{return Ok(None)};
-            let index=value.as_u64().ok_or_else(||LoadError::message("invalid instance accessor index"))? as usize;
-            Ok(Some(gltf.accessors().nth(index).ok_or_else(||LoadError::message("instance accessor out of range"))?))
+fn import_instances(
+    gltf: &gltf::Gltf,
+    buffers: &[Vec<u8>],
+    nodes: &mut Vec<ModelNode>,
+) -> Result<(), LoadError> {
+    for source in gltf.nodes() {
+        let Some(extension) = source.extension_value("EXT_mesh_gpu_instancing") else {
+            continue;
         };
-        let read3=|key:&str|->Result<Option<Vec<[f32;3]>>,LoadError>{
-            accessor(key)?.map(|a|gltf::accessor::Iter::<[f32;3]>::new(a,|b|buffers.get(b.index()).map(Vec::as_slice)).map(Iterator::collect).ok_or_else(||LoadError::message("invalid VEC3 instance data"))).transpose()
+        let attrs = extension
+            .get("attributes")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| LoadError::message("instancing attributes missing"))?;
+        if source.skin().is_some() {
+            return Err(LoadError::message(
+                "skinned EXT_mesh_gpu_instancing is not supported",
+            ));
+        }
+        let accessor = |key: &str| -> Result<Option<gltf::Accessor<'_>>, LoadError> {
+            let Some(value) = attrs.get(key) else {
+                return Ok(None);
+            };
+            let index = value
+                .as_u64()
+                .ok_or_else(|| LoadError::message("invalid instance accessor index"))?
+                as usize;
+            Ok(Some(gltf.accessors().nth(index).ok_or_else(|| {
+                LoadError::message("instance accessor out of range")
+            })?))
         };
-        let positions=read3("TRANSLATION")?;let scales=read3("SCALE")?;
-        let rotations=accessor("ROTATION")?.map(|a|gltf::accessor::Iter::<[f32;4]>::new(a,|b|buffers.get(b.index()).map(Vec::as_slice)).map(Iterator::collect::<Vec<_>>).ok_or_else(||LoadError::message("invalid VEC4 instance rotation"))).transpose()?;
-        let counts=[positions.as_ref().map(Vec::len),scales.as_ref().map(Vec::len),rotations.as_ref().map(Vec::len)];
-        let count=counts.into_iter().flatten().next().ok_or_else(||LoadError::message("instancing has no TRS attributes"))?;
-        if count==0 || count>100_000 || counts.into_iter().flatten().any(|n|n!=count){return Err(LoadError::message("instance counts mismatch or exceed limit"));}
-        let original=source.index();let parts=std::mem::take(&mut nodes[original].parts);
-        for instance in 0..count{
-            let position=positions.as_ref().map_or(Vec3::ZERO,|p|Vec3::from_array(p[instance]));
-            let scale=scales.as_ref().map_or(Vec3::ONE,|p|Vec3::from_array(p[instance]));
-            let rotation=rotations.as_ref().map_or(Quat::IDENTITY,|p|Quat::from_array(p[instance]));
-            if !position.is_finite()||!scale.is_finite()||!rotation.is_finite()||rotation.length_squared()<1e-8 {return Err(LoadError::message("non-finite instance transform"));}
-            let child=nodes.len();nodes[original].children.push(child);
-            nodes.push(ModelNode{name:format!("Instance{instance}"),transform:NodeTransform{position,scale,rotation:rotation.normalize()},parts:parts.clone(),..Default::default()});
+        let read3 = |key: &str| -> Result<Option<Vec<[f32; 3]>>, LoadError> {
+            accessor(key)?
+                .map(|a| {
+                    gltf::accessor::Iter::<[f32; 3]>::new(a, |b| {
+                        buffers.get(b.index()).map(Vec::as_slice)
+                    })
+                    .map(Iterator::collect)
+                    .ok_or_else(|| LoadError::message("invalid VEC3 instance data"))
+                })
+                .transpose()
+        };
+        let positions = read3("TRANSLATION")?;
+        let scales = read3("SCALE")?;
+        let rotations = accessor("ROTATION")?
+            .map(|a| {
+                gltf::accessor::Iter::<[f32; 4]>::new(a, |b| {
+                    buffers.get(b.index()).map(Vec::as_slice)
+                })
+                .map(Iterator::collect::<Vec<_>>)
+                .ok_or_else(|| LoadError::message("invalid VEC4 instance rotation"))
+            })
+            .transpose()?;
+        let counts = [
+            positions.as_ref().map(Vec::len),
+            scales.as_ref().map(Vec::len),
+            rotations.as_ref().map(Vec::len),
+        ];
+        let count = counts
+            .into_iter()
+            .flatten()
+            .next()
+            .ok_or_else(|| LoadError::message("instancing has no TRS attributes"))?;
+        if count == 0 || count > 100_000 || counts.into_iter().flatten().any(|n| n != count) {
+            return Err(LoadError::message(
+                "instance counts mismatch or exceed limit",
+            ));
+        }
+        let original = source.index();
+        let parts = std::mem::take(&mut nodes[original].parts);
+        for instance in 0..count {
+            let position = positions
+                .as_ref()
+                .map_or(Vec3::ZERO, |p| Vec3::from_array(p[instance]));
+            let scale = scales
+                .as_ref()
+                .map_or(Vec3::ONE, |p| Vec3::from_array(p[instance]));
+            let rotation = rotations
+                .as_ref()
+                .map_or(Quat::IDENTITY, |p| Quat::from_array(p[instance]));
+            if !position.is_finite()
+                || !scale.is_finite()
+                || !rotation.is_finite()
+                || rotation.length_squared() < 1e-8
+            {
+                return Err(LoadError::message("non-finite instance transform"));
+            }
+            let child = nodes.len();
+            nodes[original].children.push(child);
+            nodes.push(ModelNode {
+                name: format!("Instance{instance}"),
+                transform: NodeTransform {
+                    position,
+                    scale,
+                    rotation: rotation.normalize(),
+                },
+                parts: parts.clone(),
+                ..Default::default()
+            });
         }
     }
     Ok(())
 }
-
 
 /// 指针路径 → 材质属性。返回 `(属性, 期望分量数)`。
 fn material_property(rest: &str) -> Option<kanim::MaterialProperty> {
@@ -804,7 +949,9 @@ fn material_property(rest: &str) -> Option<kanim::MaterialProperty> {
         "pbrMetallicRoughness/baseColorFactor" => P::BaseColor,
         "pbrMetallicRoughness/metallicFactor" => P::Metallic,
         "pbrMetallicRoughness/roughnessFactor" => P::Roughness,
-        "emissiveFactor" | "extensions/KHR_materials_emissive_strength/emissiveStrength" => P::Emissive,
+        "emissiveFactor" | "extensions/KHR_materials_emissive_strength/emissiveStrength" => {
+            P::Emissive
+        }
         "alphaCutoff" => P::Param(1, 3),
         "extensions/KHR_materials_transmission/transmissionFactor" => P::Param(0, 0),
         "extensions/KHR_materials_ior/ior" => P::Param(0, 1),
@@ -868,7 +1015,9 @@ fn attach_pointer_tracks(
     let mut skipped = std::collections::BTreeSet::new();
 
     for channel in pointers {
-        let Some(slot) = tracks.get_mut(channel.animation) else { continue };
+        let Some(slot) = tracks.get_mut(channel.animation) else {
+            continue;
+        };
         let interpolation = match channel.interpolation.as_str() {
             "STEP" => Interpolation::Step,
             "CUBICSPLINE" => Interpolation::CubicSpline,
@@ -879,7 +1028,14 @@ fn attach_pointer_tracks(
             channel
                 .values
                 .chunks_exact(c)
-                .map(|v| Vec4::new(v[0], *v.get(1).unwrap_or(&0.0), *v.get(2).unwrap_or(&0.0), *v.get(3).unwrap_or(&0.0)))
+                .map(|v| {
+                    Vec4::new(
+                        v[0],
+                        *v.get(1).unwrap_or(&0.0),
+                        *v.get(2).unwrap_or(&0.0),
+                        *v.get(3).unwrap_or(&0.0),
+                    )
+                })
                 .collect()
         };
         let times = channel.times.clone();
@@ -890,17 +1046,44 @@ fn attach_pointer_tracks(
         {
             let values = vec4s();
             let track = match *path {
-                "translation" => Curve::new(times, values.iter().map(|v| v.truncate()).collect(), interpolation).map(Channel::Position),
-                "scale" => Curve::new(times, values.iter().map(|v| v.truncate()).collect(), interpolation).map(Channel::Scale),
-                "rotation" => Curve::new(times, values.iter().map(|v| Quat::from_xyzw(v.x, v.y, v.z, v.w)).collect(), interpolation).map(Channel::Rotation),
+                "translation" => Curve::new(
+                    times,
+                    values.iter().map(|v| v.truncate()).collect(),
+                    interpolation,
+                )
+                .map(Channel::Position),
+                "scale" => Curve::new(
+                    times,
+                    values.iter().map(|v| v.truncate()).collect(),
+                    interpolation,
+                )
+                .map(Channel::Scale),
+                "rotation" => Curve::new(
+                    times,
+                    values
+                        .iter()
+                        .map(|v| Quat::from_xyzw(v.x, v.y, v.z, v.w))
+                        .collect(),
+                    interpolation,
+                )
+                .map(Channel::Rotation),
                 "weights" => {
                     let frames = times.len().max(1);
-                    let per_frame = if interpolation == Interpolation::CubicSpline { 3 } else { 1 };
+                    let per_frame = if interpolation == Interpolation::CubicSpline {
+                        3
+                    } else {
+                        1
+                    };
                     let count = channel.values.len() / (frames * per_frame);
                     for index in 0..count {
-                        let weights: Vec<f32> = (0..frames * per_frame).map(|k| channel.values[k * count + index]).collect();
+                        let weights: Vec<f32> = (0..frames * per_frame)
+                            .map(|k| channel.values[k * count + index])
+                            .collect();
                         if let Some(curve) = Curve::new(times.clone(), weights, interpolation) {
-                            slot.push(Track { target, channel: Channel::MorphWeight { index, curve } });
+                            slot.push(Track {
+                                target,
+                                channel: Channel::MorphWeight { index, curve },
+                            });
                         }
                     }
                     None
@@ -935,7 +1118,9 @@ fn attach_pointer_tracks(
             }
             "extensions/KHR_materials_emissive_strength/emissiveStrength" => {
                 let factor = Vec3::from_array(source.map_or([1.0; 3], |m| m.emissive_factor()));
-                values.iter_mut().for_each(|v| *v = (factor * v.x).extend(0.0));
+                values
+                    .iter_mut()
+                    .for_each(|v| *v = (factor * v.x).extend(0.0));
             }
             // 有方向贴图时，物理材质把强度存成「强度 + 2」作为标记。
             "extensions/KHR_materials_anisotropy/anisotropyStrength" => {
@@ -949,13 +1134,19 @@ fn attach_pointer_tracks(
             }
             _ => {}
         }
-        let Some(curve) = Curve::new(times, values, interpolation) else { continue };
+        let Some(curve) = Curve::new(times, values, interpolation) else {
+            continue;
+        };
         for (target, node) in nodes.iter().enumerate() {
             for (part, mesh_part) in node.parts.iter().enumerate() {
                 if mesh_part.material == Some(material) {
                     slot.push(Track {
                         target,
-                        channel: Channel::Property { part, property, curve: curve.clone() },
+                        channel: Channel::Property {
+                            part,
+                            property,
+                            curve: curve.clone(),
+                        },
                     });
                 }
             }
@@ -965,5 +1156,9 @@ fn attach_pointer_tracks(
     for pointer in skipped {
         klog::warn!("不支持的动画指针，已跳过：{pointer}");
     }
-    names.into_iter().zip(tracks).map(|(name, tracks)| AnimationClip::new(name, tracks)).collect()
+    names
+        .into_iter()
+        .zip(tracks)
+        .map(|(name, tracks)| AnimationClip::new(name, tracks))
+        .collect()
 }

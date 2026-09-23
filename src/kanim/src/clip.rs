@@ -237,7 +237,13 @@ impl Pose {
     }
 
     /// 设置一个材质属性，同一个 `(目标, 块, 属性)` 会被覆盖。
-    pub fn set_property(&mut self, target: usize, part: usize, property: MaterialProperty, value: Vec4) {
+    pub fn set_property(
+        &mut self,
+        target: usize,
+        part: usize,
+        property: MaterialProperty,
+        value: Vec4,
+    ) {
         match self
             .properties
             .iter_mut()
@@ -407,7 +413,10 @@ impl AnimationClip {
         pose.resize(pose.len().max(self.targets));
 
         for track in &self.tracks {
-            if matches!(track.channel, Channel::MorphWeight { .. } | Channel::Property { .. }) {
+            if matches!(
+                track.channel,
+                Channel::MorphWeight { .. } | Channel::Property { .. }
+            ) {
                 continue;
             }
             let entry = pose.entry_mut(track.target);
@@ -425,7 +434,11 @@ impl AnimationClip {
                 Channel::MorphWeight { index, curve } => {
                     pose.set_morph(track.target, *index, curve.sample(time));
                 }
-                Channel::Property { part, property, curve } => {
+                Channel::Property {
+                    part,
+                    property,
+                    curve,
+                } => {
                     pose.set_property(track.target, *part, *property, curve.sample(time));
                 }
                 _ => {}

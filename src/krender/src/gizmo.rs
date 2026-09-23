@@ -173,11 +173,12 @@ impl GizmoResources {
                 count: None,
             }],
         });
-        let retained_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("kengine retained lines pipeline layout"),
-            bind_group_layouts: &[Option::from(&retained_layout)],
-            immediate_size: 0,
-        });
+        let retained_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("kengine retained lines pipeline layout"),
+                bind_group_layouts: &[Option::from(&retained_layout)],
+                immediate_size: 0,
+            });
         let retained_pipeline = create_pipeline(
             device,
             &retained_pipeline_layout,
@@ -222,22 +223,28 @@ impl GizmoResources {
         let mut draws = Vec::new();
         let mut matrices: Vec<u8> = Vec::new();
         for (lines, model) in items {
-            let entry = self.retained.entry(lines.id()).or_insert_with(|| RetainedLines {
-                buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("kengine retained lines"),
-                    contents: bytemuck::cast_slice(lines.vertices()),
-                    usage: wgpu::BufferUsages::VERTEX,
-                }),
-                count: lines.vertices().len() as u32,
-                last_used: 0,
-            });
+            let entry = self
+                .retained
+                .entry(lines.id())
+                .or_insert_with(|| RetainedLines {
+                    buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("kengine retained lines"),
+                        contents: bytemuck::cast_slice(lines.vertices()),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    }),
+                    count: lines.vertices().len() as u32,
+                    last_used: 0,
+                });
             entry.last_used = self.frame;
             let slot = draws.len() as u32;
             let globals = GizmoGlobals {
                 view_proj: (view_proj * model).to_cols_array_2d(),
             };
             matrices.extend_from_slice(bytemuck::bytes_of(&globals));
-            matrices.resize(matrices.len() + MATRIX_STRIDE as usize - size_of::<GizmoGlobals>(), 0);
+            matrices.resize(
+                matrices.len() + MATRIX_STRIDE as usize - size_of::<GizmoGlobals>(),
+                0,
+            );
             draws.push(RetainedDraw {
                 id: lines.id(),
                 slot,
@@ -254,7 +261,8 @@ impl GizmoResources {
         if draws.len() as u64 > self.matrix_capacity {
             self.matrix_capacity = (draws.len() as u64).next_power_of_two();
             self.matrix_buffer = create_matrix_buffer(device, self.matrix_capacity);
-            self.matrix_bind_group = create_matrix_bind_group(device, &self.retained_layout, &self.matrix_buffer);
+            self.matrix_bind_group =
+                create_matrix_bind_group(device, &self.retained_layout, &self.matrix_buffer);
         }
         queue.write_buffer(&self.matrix_buffer, 0, &matrices);
         draws
@@ -267,8 +275,14 @@ impl GizmoResources {
         }
         pass.set_pipeline(&self.retained_pipeline);
         for draw in draws {
-            let Some(lines) = self.retained.get(&draw.id) else { continue };
-            pass.set_bind_group(0, &self.matrix_bind_group, &[draw.slot * MATRIX_STRIDE as u32]);
+            let Some(lines) = self.retained.get(&draw.id) else {
+                continue;
+            };
+            pass.set_bind_group(
+                0,
+                &self.matrix_bind_group,
+                &[draw.slot * MATRIX_STRIDE as u32],
+            );
             pass.set_vertex_buffer(0, lines.buffer.slice(..));
             pass.draw(0..draw.count, 0..1);
         }

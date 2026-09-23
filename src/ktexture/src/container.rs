@@ -196,7 +196,12 @@ fn decode_level(
         let mut pixels = vec![0u32; width * height];
         (layout.decoder)(data, width, height, &mut pixels).map(|()| pixels)
     }))
-    .map_err(|_| err(format!("{} 的块解码器崩了（第三方解码器的 bug）", layout.name)))?
+    .map_err(|_| {
+        err(format!(
+            "{} 的块解码器崩了（第三方解码器的 bug）",
+            layout.name
+        ))
+    })?
     .map_err(err)?;
     Ok(to_rgba(decoded))
 }
@@ -273,7 +278,12 @@ fn assemble(
 
 macro_rules! raw_decoder {
     ($name:ident, $bytes:expr, $body:expr) => {
-        fn $name(data: &[u8], width: usize, height: usize, out: &mut [u32]) -> Result<(), &'static str> {
+        fn $name(
+            data: &[u8],
+            width: usize,
+            height: usize,
+            out: &mut [u32],
+        ) -> Result<(), &'static str> {
             let convert: fn(&[u8]) -> [u8; 4] = $body;
             if data.len() < width * height * $bytes {
                 return Err("未压缩数据被截断");
@@ -304,8 +314,7 @@ raw_decoder!(raw_rgba16_float, 8, |c| {
     [channel(0), channel(1), channel(2), channel(3)]
 });
 raw_decoder!(raw_rgba32_float, 16, |c| {
-    let channel =
-        |i: usize| tone(f32::from_le_bytes(c[i * 4..i * 4 + 4].try_into().unwrap()));
+    let channel = |i: usize| tone(f32::from_le_bytes(c[i * 4..i * 4 + 4].try_into().unwrap()));
     [channel(0), channel(1), channel(2), channel(3)]
 });
 raw_decoder!(raw_rgb9e5, 4, |c| {
@@ -314,7 +323,12 @@ raw_decoder!(raw_rgb9e5, 4, |c| {
     let exponent = (word >> 27) as i32 - 15 - 9;
     let scale = (exponent as f32).exp2();
     let mantissa = |shift: u32| ((word >> shift) & 0x1ff) as f32 * scale;
-    [tone(mantissa(0)), tone(mantissa(9)), tone(mantissa(18)), 255]
+    [
+        tone(mantissa(0)),
+        tone(mantissa(9)),
+        tone(mantissa(18)),
+        255,
+    ]
 });
 raw_decoder!(raw_r11g11b10, 4, |c| {
     let word = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
@@ -583,7 +597,11 @@ fn ktx1(bytes: &[u8]) -> Result<Container, TextureError> {
         let face_size = layout.size(w, h);
         // 规范规定每面数据按 4 字节对齐。
         let padded = face_size.div_ceil(4) * 4;
-        cursor += 4 + if faces == 6 { padded * 6 } else { size.div_ceil(4) * 4 };
+        cursor += 4 + if faces == 6 {
+            padded * 6
+        } else {
+            size.div_ceil(4) * 4
+        };
     }
 
     assemble(layout, width, height, levels, faces, |level, face| {
@@ -720,7 +738,8 @@ fn astc(index: usize) -> Result<Layout, TextureError> {
         block: (width, height),
         // ASTC 无论块多大，一块永远是 16 字节——压缩率的差别全在这里。
         bytes: 16,
-        decoder: astc_decoder((width, height)).ok_or_else(|| err("没有这个 ASTC 块尺寸的解码器"))?,
+        decoder: astc_decoder((width, height))
+            .ok_or_else(|| err("没有这个 ASTC 块尺寸的解码器"))?,
         linear: false,
     })
 }
@@ -853,8 +872,7 @@ fn basis(bytes: &[u8], faces: u32, srgb: bool) -> Result<Container, TextureError
 
 fn zstd_decode(data: &[u8], expected: usize) -> Result<Vec<u8>, TextureError> {
     use std::io::Read;
-    let decoder =
-        ruzstd::StreamingDecoder::new(data).map_err(|e| err(e.to_string()))?;
+    let decoder = ruzstd::StreamingDecoder::new(data).map_err(|e| err(e.to_string()))?;
     let mut out = Vec::with_capacity(expected);
     decoder
         .take(expected.max(1) as u64)
@@ -1028,7 +1046,8 @@ fn pvrtc(two_bpp: bool, alpha: bool) -> Layout {
 /// PVRTC 每级至少占一个「最小块组」，不能按宽高直接算。
 fn pvrtc_size(layout: &Layout, width: usize, height: usize) -> usize {
     let two_bpp = layout.block.0 == 8;
-    let minimum = width.max(if two_bpp { 16 } else { 8 }) * height.max(8) / if two_bpp { 4 } else { 2 };
+    let minimum =
+        width.max(if two_bpp { 16 } else { 8 }) * height.max(8) / if two_bpp { 4 } else { 2 };
     layout.size(width, height).max(minimum)
 }
 

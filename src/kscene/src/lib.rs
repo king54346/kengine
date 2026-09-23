@@ -137,9 +137,7 @@ fn render_items_for_node(node: &Node) -> Vec<RenderItem<'_>> {
         .iter()
         .map(|group| RenderItem {
             mesh,
-            material: materials
-                .get(group.material as usize)
-                .or(node.material()),
+            material: materials.get(group.material as usize).or(node.material()),
             transform,
             aabb,
             skin,
@@ -1036,7 +1034,11 @@ impl Scene {
                 let node_handle = player.target(sample.target);
                 let owner = match self.try_get(node_handle) {
                     Some(node) if node.material.is_some() => node_handle,
-                    Some(node) => node.children.get(sample.part).copied().unwrap_or(Handle::NONE),
+                    Some(node) => node
+                        .children
+                        .get(sample.part)
+                        .copied()
+                        .unwrap_or(Handle::NONE),
                     None => continue,
                 };
                 if let Ok(node) = self.nodes.try_borrow_mut(owner)
@@ -2074,7 +2076,11 @@ impl IndexMut<Handle<Node>> for Scene {
 /// 和 [`kanim::MaterialProperty`] 一一对应。参数槽只改被驱动的那个分量，
 /// 其余分量保持材质原值——一个槽位里往往同时放着几个互不相干的参数
 /// （透射、折射率、厚度、色散挤在同一个 `vec4` 里）。
-pub fn apply_material_property(material: &mut Material, property: MaterialProperty, value: kmath::Vec4) {
+pub fn apply_material_property(
+    material: &mut Material,
+    property: MaterialProperty,
+    value: kmath::Vec4,
+) {
     let slot_value = |material: &Material, slot: usize| {
         material
             .param(slot)

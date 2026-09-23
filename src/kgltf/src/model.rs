@@ -220,9 +220,11 @@ impl Model {
     ///
     /// 返回 `None` 表示这个部件在这个变体里没有被覆盖，沿用默认材质。
     pub fn variant_material(&self, index: usize, node: usize, part: usize) -> Option<usize> {
-        self.variants.get(index)?.overrides.iter().find_map(|&(n, p, material)| {
-            (n == node && p == part).then_some(material)
-        })
+        self.variants
+            .get(index)?
+            .overrides
+            .iter()
+            .find_map(|&(n, p, material)| (n == node && p == part).then_some(material))
     }
 
     /// 附上 glTF 的 `extras`。

@@ -46,8 +46,8 @@ pub mod ifc;
 pub mod kmz;
 pub mod md2;
 pub mod mdd;
-mod nurbs;
 pub mod nrrd;
+mod nurbs;
 pub mod obj;
 pub mod path;
 pub mod pcd;
@@ -143,7 +143,11 @@ pub fn single_mesh_model(name: &str, mesh: Mesh, material: Material) -> Model {
 ///
 /// OBJ 的 group、PLY 的多元素、IFC 的构件都是这个形状：没有真正的层级，
 /// 只是一批并列的物体。
-pub fn flat_model(name: &str, parts: Vec<(String, Mesh, Option<usize>)>, materials: Vec<Material>) -> Model {
+pub fn flat_model(
+    name: &str,
+    parts: Vec<(String, Mesh, Option<usize>)>,
+    materials: Vec<Material>,
+) -> Model {
     let mut meshes = Vec::with_capacity(parts.len());
     let mut nodes = Vec::with_capacity(parts.len() + 1);
     nodes.push(ModelNode {
@@ -256,11 +260,22 @@ pub(crate) async fn load_texture(
 }
 
 /// 把内嵌的贴图字节解码成资源。`key` 只用于资源表里的名字。
-pub(crate) fn texture_from_bytes(key: &str, bytes: &[u8], linear: bool) -> Option<kasset::Resource<ktexture::Texture>> {
+pub(crate) fn texture_from_bytes(
+    key: &str,
+    bytes: &[u8],
+    linear: bool,
+) -> Option<kasset::Resource<ktexture::Texture>> {
     match ktexture::Texture::from_encoded(bytes) {
         Ok(texture) => {
-            let format = if linear { ktexture::TextureFormat::Linear } else { ktexture::TextureFormat::Srgb };
-            Some(kasset::Resource::new_ok(format!("{key}#{}", if linear { "linear" } else { "srgb" }), texture.with_format(format)))
+            let format = if linear {
+                ktexture::TextureFormat::Linear
+            } else {
+                ktexture::TextureFormat::Srgb
+            };
+            Some(kasset::Resource::new_ok(
+                format!("{key}#{}", if linear { "linear" } else { "srgb" }),
+                texture.with_format(format),
+            ))
         }
         Err(error) => {
             klog::warn!("贴图 {key} 解码失败：{error}");
