@@ -536,3 +536,75 @@ path = "examples/kengine/new/loader_vox.rs"
 [[example]]
 name = "loader_gallery"
 path = "examples/kengine/new/loader_gallery.rs"
+
+[[example]]
+name = "loader_3dm"
+path = "examples/kengine/new/loader_3dm.rs"
+
+[[example]]
+name = "loader_3ds"
+path = "examples/kengine/new/loader_3ds.rs"
+
+[[example]]
+name = "loader_3dtiles"
+path = "examples/kengine/new/loader_3dtiles.rs"
+
+[[example]]
+name = "loader_3mf"
+path = "examples/kengine/new/loader_3mf.rs"
+
+[[example]]
+name = "loader_3mf_materials"
+path = "examples/kengine/new/loader_3mf_materials.rs"
+
+[[example]]
+name = "loader_amf"
+path = "examples/kengine/new/loader_amf.rs"
+
+[[example]]
+name = "loader_bvh"
+path = "examples/kengine/new/loader_bvh.rs"
+
+[[example]]
+name = "loader_collada"
+path = "examples/kengine/new/loader_collada.rs"
+
+[[example]]
+name = "loader_collada_kinematics"
+path = "examples/kengine/new/loader_collada_kinematics.rs"
+
+[[example]]
+name = "loader_collada_skinning"
+path = "examples/kengine/new/loader_collada_skinning.rs"
+
+[[example]]
+name = "loader_draco"
+path = "examples/kengine/new/loader_draco.rs"
+
+[[example]]
+name = "loader_fbx"
+path = "examples/kengine/new/loader_fbx.rs"
+
+[[example]]
+name = "loader_fbx_nurbs"
+path = "examples/kengine/new/loader_fbx_nurbs.rs"
+
+[[example]]
+name = "loader_gcode"
+path = "examples/kengine/new/loader_gcode.rs"
+
+[[example]]
+name = "loader_gltf"
+path = "examples/kengine/new/loader_gltf.rs"
+
+[[example]]
+name = "loader_gltf_animation_pointer"
+path = "examples/kengine/new/loader_gltf_animation_pointer.rs"
+
+[[example]]
+name = "loader_gltf_anisotropy"
+path = "examples/kengine/new/loader_gltf_anisotropy.rs"
+
+[[example]]
+name = "loader_gltf_avif"
+path = "examples/kengine/new/loader_gltf_avif.rs"
