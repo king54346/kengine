@@ -17,16 +17,18 @@
 //! |---|---|
 //! | DDS | BC1–BC7（含 BC6H 的有/无符号）、未压缩 RGB/RGBA/L/LA、mip 链、立方体 |
 //! | KTX 1 | BC1–BC5、ETC1、ETC2、EAC、ASTC 4×4/6×6/8×8、PVRTC、未压缩 RGBA |
-//! | KTX 2 | 全部非超压缩的 `vkFormat`（未压缩与块格式）、zstd 与 zlib 超压缩 |
+//! | KTX 2 | 全部非超压缩的 `vkFormat`（未压缩与块格式）、zstd 与 zlib 超压缩、Basis ETC1S / UASTC |
 //! | PVR | v2 与 v3 的 PVRTC 1，mip 链、立方体 |
 //!
-//! # 不支持：Basis Universal（ETC1S / UASTC）
+//! # Basis Universal（ETC1S / UASTC）
 //!
 //! `vkFormat = 0` 的 KTX2 装的是 Basis 的中间格式，要靠一个**转码器**
-//! 才能变成 GPU 格式。那是一整套带 Huffman 码表与全局码本的算法
-//! （官方实现一千多行 C++），纯 Rust 没有现成的。这里遇到它会明确报错
-//! 而不是画出一团噪声。受影响的样本：`2d_uastc.ktx2`、`2d_etc1s.ktx2`、
-//! `spiritedaway.ktx2`，以及 `coffeemat.glb` 里那几张 `KHR_texture_basisu` 贴图。
+//! 才能变成 GPU 格式。转码交给纯 Rust 的 `basisu`（参考 C++ 转码器的
+//! 逐字节移植），这里只负责按级、按面调它并转成 RGBA8。样本：
+//! `2d_uastc.ktx2`、`2d_etc1s.ktx2`、`spiritedaway.ktx2`，以及
+//! `coffeemat.glb` 里那几张 `KHR_texture_basisu` 贴图。
+//!
+//! Basis 视频（ETC1S 的 P 帧）不支持：它要跨帧状态，而这里读的是静态纹理。
 
 use crate::{Sampler, Texture, TextureError, TextureFormat};
 use kasset::{BoxedLoaderFuture, LoadError, ResourceData, ResourceIo, ResourceLoader};
@@ -752,9 +754,11 @@ fn ktx2(bytes: &[u8]) -> Result<Container, TextureError> {
     let supercompression = word(44)?;
 
     if vk_format == 0 {
-        return Err(err(
-            "这份 KTX2 装的是 Basis Universal（ETC1S / UASTC），需要转码器，引擎没有实现",
-        ));
+        // DFD 基本块里的 transferFunction：2 = sRGB，其余按线性。
+        // 法线图、粗糙度图这类数据贴图靠它和颜色贴图区分开。
+        let dfd = word(48)? as usize;
+        let srgb = bytes.get(dfd + 14).is_none_or(|&transfer| transfer == 2);
+        return basis(bytes, faces, srgb);
     }
     let layout = vk_layout(vk_format)?;
 
@@ -770,7 +774,7 @@ fn ktx2(bytes: &[u8]) -> Result<Container, TextureError> {
             .ok_or_else(|| err("KTX2 的级数据被截断"))?;
         planes.push(match supercompression {
             0 => raw.to_vec(),
-            1 => return Err(err("BasisLZ 超压缩需要 Basis 转码器，引擎没有实现")),
+            1 => return Err(err("BasisLZ 超压缩只用于 Basis 格式（vkFormat = 0）")),
             2 => zstd_decode(raw, uncompressed)?,
             3 => zlib_decode(raw, uncompressed)?,
             other => return Err(err(format!("不支持的 KTX2 超压缩方式 {other}"))),
@@ -785,6 +789,65 @@ fn ktx2(bytes: &[u8]) -> Result<Container, TextureError> {
             .get(at..)
             .map(<[u8]>::to_vec)
             .ok_or_else(|| err("KTX2 的面数据被截断"))
+    })
+}
+
+/// Basis Universal（ETC1S / UASTC）的 KTX2：转码到 RGBA8。
+///
+/// 转码器是纯 Rust 的 `basisu`（参考 C++ 转码器的逐字节移植）。直接转
+/// `Rgba32` 而不是 BC7 / ASTC——理由和模块文档里说的一样，[`Texture`]
+/// 的约定是 RGBA8。
+fn basis(bytes: &[u8], faces: u32, srgb: bool) -> Result<Container, TextureError> {
+    let transcoder = basisu::Transcoder::new(bytes)
+        .map_err(|e| err(format!("Basis 转码器拒绝了这份文件：{e:?}")))?;
+    if transcoder.is_video() {
+        return Err(err("Basis 视频纹理需要逐帧状态，这里只读静态纹理"));
+    }
+    let (width, height) = transcoder.base_dimensions();
+    if width == 0 || height == 0 || width > 16384 || height > 16384 {
+        return Err(err("纹理尺寸不在 1..16384 之间"));
+    }
+    let source = transcoder.source_format();
+    let levels = transcoder.level_count().max(1);
+    let mut result = Vec::with_capacity(levels as usize);
+    for level in 0..levels {
+        let info = transcoder
+            .image_level_info(level)
+            .map_err(|e| err(format!("Basis 第 {level} 级：{e:?}")))?;
+        let mut face_textures = Vec::with_capacity(faces as usize);
+        for face in 0..faces {
+            let rgba = transcoder
+                .transcode_image(
+                    level,
+                    0,
+                    face,
+                    basisu::TargetFormat::Rgba32,
+                    basisu::DecodeFlags::NONE,
+                )
+                .map_err(|e| err(format!("Basis 第 {level} 级转码失败：{e:?}")))?;
+            face_textures.push(Texture::new(info.width, info.height, rgba));
+        }
+        let texture = if faces > 1 {
+            Texture::from_layers(&face_textures)
+        } else {
+            face_textures.remove(0)
+        };
+        result.push(
+            texture
+                .with_format(if srgb {
+                    TextureFormat::Srgb
+                } else {
+                    TextureFormat::Linear
+                })
+                .with_sampler(Sampler::default()),
+        );
+    }
+    Ok(Container {
+        format: format!("Basis {source:?}"),
+        width,
+        height,
+        faces,
+        levels: result,
     })
 }
 

@@ -20,6 +20,8 @@ gltf = { version = "1.4.1", default-features = false, features = ["names", "util
 base64 = "0.23.1"
 # 只用来解析 mesh.extras 里的 targetNames，glTF 规范没给它专门的字段。
 serde_json = "1.0"
+# KHR_draco_mesh_compression 与独立的 .drc：纯 Rust 的 Draco 解码器（与 C++ 1.5.7 逐字节一致）。
+draco-core = { version = "2.1", default-features = false, features = ["decoder", "point_cloud_decode", "edgebreaker_valence_decode", "legacy_bitstream_decode"] }
 
 [dev-dependencies]
 ktask = { path = "../ktask", features = ["multi_threaded"] }

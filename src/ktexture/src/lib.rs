@@ -15,6 +15,7 @@
 
 #![warn(missing_docs)]
 
+mod avif;
 pub mod container;
 mod loader;
 
@@ -221,13 +222,18 @@ impl Texture {
         }
     }
 
-    /// 从编码后的图片字节解码（PNG / JPEG），统一转成 RGBA8。
+    /// 从编码后的图片字节解码（PNG / JPEG / WebP / AVIF / 压缩纹理容器），统一转成 RGBA8。
     ///
     /// glTF 的内嵌贴图走这条路径，无需经过文件系统。
     pub fn from_encoded(bytes: &[u8]) -> Result<Self, TextureError> {
         // DDS / KTX / KTX2 / PVR 走容器那条路，其余交给 `image`。
         if container::sniff(bytes).is_some() {
             return container::decode(bytes).map(|c| c.base());
+        }
+        // AVIF：`image` 的 AVIF 解码要 C 写的 dav1d，这里走纯 Rust 的那条。
+        if avif::sniff(bytes) {
+            let (width, height, rgba) = avif::decode(bytes)?;
+            return Ok(Self::new(width, height, rgba));
         }
         let image = image::load_from_memory(bytes).map_err(|e| TextureError(e.to_string()))?;
         let rgba = image.to_rgba8();

@@ -8,7 +8,7 @@
 //! 这个设计来自 Fyrox 的 `AnimationPose`。
 
 use crate::curve::{Animatable, Curve};
-use kmath::{Quat, Vec3};
+use kmath::{Quat, Vec3, Vec4};
 
 /// 一条轨道驱动目标的哪个分量。
 ///
@@ -32,6 +32,40 @@ pub enum Channel {
         /// 权重曲线。
         curve: Curve<f32>,
     },
+    /// 材质上的一个属性（glTF 的 `KHR_animation_pointer` 指向 `/materials/...`）。
+    ///
+    /// 目标仍是**节点**序号，外加这个节点的第几块几何（`part`）——材质挂在
+    /// 几何块上，一个节点可以有好几块。值统一用 `Vec4`，标量放在 `x`。
+    Property {
+        /// 节点的第几块几何。
+        part: usize,
+        /// 驱动的是哪个属性。
+        property: MaterialProperty,
+        /// 值曲线。
+        curve: Curve<Vec4>,
+    },
+}
+
+/// [`Channel::Property`] 能驱动的材质属性。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MaterialProperty {
+    /// 基础色（RGBA）。
+    BaseColor,
+    /// 自发光（RGB，已乘强度）。
+    Emissive,
+    /// 金属度（`x`）。
+    Metallic,
+    /// 粗糙度（`x`）。
+    Roughness,
+    /// 贴图坐标偏移（`xy`，`KHR_texture_transform` 的 `offset`）。
+    UvOffset,
+    /// 贴图坐标缩放（`xy`，`KHR_texture_transform` 的 `scale`）。
+    UvScale,
+    /// 自定义参数槽的一个分量：`(槽位, 分量)`，值在 `x`。
+    /// 扩展材质（透射、虹彩、各向异性……）的参数都落在这里。
+    Param(u8, u8),
+    /// 自定义参数槽的前三个分量（`xyz`），例如绒感颜色。
+    ParamRgb(u8),
 }
 
 impl Channel {
@@ -41,6 +75,7 @@ impl Channel {
             Self::Position(curve) | Self::Scale(curve) => curve.duration(),
             Self::Rotation(curve) => curve.duration(),
             Self::MorphWeight { curve, .. } => curve.duration(),
+            Self::Property { curve, .. } => curve.duration(),
         }
     }
 
@@ -50,6 +85,7 @@ impl Channel {
             Self::Position(curve) | Self::Scale(curve) => curve.len(),
             Self::Rotation(curve) => curve.len(),
             Self::MorphWeight { curve, .. } => curve.len(),
+            Self::Property { curve, .. } => curve.len(),
         }
     }
 
@@ -128,7 +164,20 @@ pub struct MorphSample {
     pub weight: f32,
 }
 
-/// 一次采样的结果：每个目标一份局部变换，外加若干形变权重。
+/// 一个材质属性的采样值。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PropertySample {
+    /// 目标节点序号。
+    pub target: usize,
+    /// 节点的第几块几何。
+    pub part: usize,
+    /// 哪个属性。
+    pub property: MaterialProperty,
+    /// 值。
+    pub value: Vec4,
+}
+
+/// 一次采样的结果：每个目标一份局部变换，外加若干形变权重与材质属性。
 ///
 /// 局部变换用稠密数组而不是映射表：目标序号是从 0 开始的连续整数（模型节点序号），
 /// 直接当下标用既省掉了哈希，混合时也只是两个数组的逐元素运算。
@@ -139,6 +188,7 @@ pub struct MorphSample {
 pub struct Pose {
     entries: Vec<PoseEntry>,
     morphs: Vec<MorphSample>,
+    properties: Vec<PropertySample>,
 }
 
 impl Pose {
@@ -147,6 +197,7 @@ impl Pose {
         Self {
             entries: vec![PoseEntry::default(); targets],
             morphs: Vec::new(),
+            properties: Vec::new(),
         }
     }
 
@@ -157,7 +208,7 @@ impl Pose {
 
     /// 是否没有任何目标。
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty() && self.morphs.is_empty()
+        self.entries.is_empty() && self.morphs.is_empty() && self.properties.is_empty()
     }
 
     /// 清空所有分量，容量保留。每帧复用同一个姿态对象，避免重复分配。
@@ -166,6 +217,7 @@ impl Pose {
             *entry = PoseEntry::default();
         }
         self.morphs.clear();
+        self.properties.clear();
     }
 
     /// 设置一个形变权重，已存在的同名条目会被覆盖。
@@ -182,6 +234,28 @@ impl Pose {
                 weight,
             }),
         }
+    }
+
+    /// 设置一个材质属性，同一个 `(目标, 块, 属性)` 会被覆盖。
+    pub fn set_property(&mut self, target: usize, part: usize, property: MaterialProperty, value: Vec4) {
+        match self
+            .properties
+            .iter_mut()
+            .find(|s| s.target == target && s.part == part && s.property == property)
+        {
+            Some(sample) => sample.value = value,
+            None => self.properties.push(PropertySample {
+                target,
+                part,
+                property,
+                value,
+            }),
+        }
+    }
+
+    /// 全部材质属性。
+    pub fn properties(&self) -> &[PropertySample] {
+        &self.properties
     }
 
     /// 全部形变权重。
@@ -260,6 +334,18 @@ impl Pose {
                 None => self.morphs.push(*sample),
             }
         }
+
+        // 材质属性和形变权重一样：两边都有就插值，只有一边就接管。
+        for sample in &other.properties {
+            match self.properties.iter_mut().find(|existing| {
+                existing.target == sample.target
+                    && existing.part == sample.part
+                    && existing.property == sample.property
+            }) {
+                Some(existing) => existing.value = Vec4::lerp(existing.value, sample.value, weight),
+                None => self.properties.push(*sample),
+            }
+        }
     }
 }
 
@@ -321,7 +407,7 @@ impl AnimationClip {
         pose.resize(pose.len().max(self.targets));
 
         for track in &self.tracks {
-            if matches!(track.channel, Channel::MorphWeight { .. }) {
+            if matches!(track.channel, Channel::MorphWeight { .. } | Channel::Property { .. }) {
                 continue;
             }
             let entry = pose.entry_mut(track.target);
@@ -329,14 +415,20 @@ impl AnimationClip {
                 Channel::Position(curve) => entry.position = Some(curve.sample(time)),
                 Channel::Rotation(curve) => entry.rotation = Some(curve.sample(time)),
                 Channel::Scale(curve) => entry.scale = Some(curve.sample(time)),
-                Channel::MorphWeight { .. } => {}
+                Channel::MorphWeight { .. } | Channel::Property { .. } => {}
             }
         }
 
-        // 形变权重要单独走一遍：它存在稀疏表里，拿不到 `entry` 的可变引用。
+        // 形变权重与材质属性要单独走一遍：它们存在稀疏表里，拿不到 `entry` 的可变引用。
         for track in &self.tracks {
-            if let Channel::MorphWeight { index, curve } = &track.channel {
-                pose.set_morph(track.target, *index, curve.sample(time));
+            match &track.channel {
+                Channel::MorphWeight { index, curve } => {
+                    pose.set_morph(track.target, *index, curve.sample(time));
+                }
+                Channel::Property { part, property, curve } => {
+                    pose.set_property(track.target, *part, *property, curve.sample(time));
+                }
+                _ => {}
             }
         }
     }

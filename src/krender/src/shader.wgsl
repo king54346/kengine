@@ -347,11 +347,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // ── 切线空间法线 ──
     let geometric_normal = normalize(in.world_normal);
+    // Gram-Schmidt 重新正交化：插值后的切线未必还垂直于法线。
+    // 没有切线（全零）或切线和法线平行时，随便取一个垂直方向兜底，
+    // 免得 normalize(0) 在后面变成 NaN。
+    var raw_tangent = in.world_tangent - geometric_normal * dot(geometric_normal, in.world_tangent);
+    if (dot(raw_tangent, raw_tangent) < 1e-12) {
+        let helper = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(geometric_normal.x) > 0.9);
+        raw_tangent = cross(helper, geometric_normal);
+    }
+    let t = normalize(raw_tangent);
+    let b = cross(geometric_normal, t) * select(1.0, in.tangent_handedness, in.tangent_handedness != 0.0);
     var mapped_normal = geometric_normal;
     if (object.normal_scale > 0.0) {
-        // Gram-Schmidt 重新正交化：插值后的切线未必还垂直于法线。
-        let t = normalize(in.world_tangent - geometric_normal * dot(geometric_normal, in.world_tangent));
-        let b = cross(geometric_normal, t) * in.tangent_handedness;
         let tbn = mat3x3<f32>(t, b, geometric_normal);
 
         // 贴图存的是 [0,1]，解回 [-1,1]。
@@ -381,6 +388,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     surface.time = globals.frame_params.x;
     // 和 `scene_depth()` 用同一个还原函数，两者才能直接相减。
     surface.view_depth = linearize_depth(in.clip_position.z);
+    surface.tangent = t;
+    surface.bitangent = b;
     // 逐对象的自定义参数。整块搬过去，钩子按下标取。
     surface.params = object.params;
 

@@ -621,3 +621,13 @@ fn the_texture_array_name_matches_the_material_slot() {
         kmaterial::standard::CUSTOM_TEXTURE_ARRAY
     );
 }
+
+/// kpbr 的扩展材质（透射 / 虹彩 / 绒感 / 各向异性 / 清漆）要能和标准着色器拼起来。
+///
+/// 它覆盖了三个钩子、用到了 `custom_texture0` / `prefiltered_env` 这些全局
+/// 绑定和 `Surface` 的切线——任何一处和引擎对不上都只在运行时才会暴露
+/// （而且只表现为「这个材质退回了标准管线」），所以在这里钉住。
+#[test]
+fn the_physical_material_hook_compiles() {
+    compile(include_str!("../../kpbr/src/physical.wgsl")).expect("physical.wgsl 应当通过校验");
+}

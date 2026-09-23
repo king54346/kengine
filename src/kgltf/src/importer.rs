@@ -2,7 +2,7 @@
 
 use crate::{
     model::{GltfExtras, MeshPart, Model, ModelNode, ModelSkin, NodeTransform},
-    uri,
+    prepare, uri,
 };
 use kanim::{AnimationClip, Channel, Curve, Interpolation, Track};
 use kasset::{LoadError, Resource, ResourceIo};
@@ -21,27 +21,34 @@ pub(crate) async fn import(
     path: PathBuf,
     io: Arc<dyn ResourceIo>,
 ) -> Result<Model, LoadError> {
-    // Validate the standard document after accounting for extensions implemented
-    // by this importer, which gltf-rs does not include in its feature registry.
-    let parsed = gltf::Gltf::from_slice_without_validation(&bytes).map_err(LoadError::custom)?;
-    let mut json = parsed.document.into_json();
+    let base = uri::base_dir(&path);
+    // 压缩 / 量化 / 换壳贴图这几类扩展先在 JSON 层还原成普通 glTF，
+    // 后面的导入路径因此不用知道它们（理由见 `prepare` 的模块文档）。
+    let (mut value, blob) = prepare::split(&bytes)?;
+    let mut buffers = prepare::load_buffers(&value, blob, &base, &io).await?;
+    prepare::run(&mut value, &mut buffers)?;
+    let mut json: gltf::json::Root = serde_json::from_value(value).map_err(LoadError::custom)?;
     // gltf-rs 的特性注册表里没有这些扩展，但这个导入器认得它们；
     // 不从 `extensionsRequired` 里划掉的话，校验会直接拒绝整个文件。
     json.extensions_required.retain(|ext| {
-        !matches!(
-            ext.as_str(),
-            "EXT_mesh_gpu_instancing"
-                | "KHR_materials_dispersion"
-                | "KHR_materials_iridescence"
-                | "KHR_materials_sheen"
-                | "KHR_materials_variants"
-                | "KHR_texture_transform"
-        )
+        !prepare::HANDLED.contains(&ext.as_str())
+            && !matches!(
+                ext.as_str(),
+                "EXT_mesh_gpu_instancing"
+                    | "KHR_materials_anisotropy"
+                    | "KHR_materials_clearcoat"
+                    | "KHR_materials_dispersion"
+                    | "KHR_materials_iridescence"
+                    | "KHR_materials_sheen"
+                    | "KHR_materials_variants"
+                    | "KHR_texture_transform"
+                    | "KHR_animation_pointer"
+            )
     });
-    let gltf = gltf::Gltf { document: gltf::Document::from_json(json).map_err(LoadError::custom)?, blob: parsed.blob };
-    let base = uri::base_dir(&path);
-
-    let buffers = load_buffers(&gltf, &base, &io).await?;
+    let gltf = gltf::Gltf {
+        document: gltf::Document::from_json(json).map_err(LoadError::custom)?,
+        blob: None,
+    };
     let textures = load_textures(&gltf, &base, &io, &buffers, &path).await;
     let materials = import_materials(&gltf, &textures);
     let (meshes, primitive_ranges) = import_meshes(&gltf, &buffers, &path)?;
@@ -410,38 +417,6 @@ fn import_animations(gltf: &gltf::Gltf, buffers: &[Vec<u8>]) -> Vec<AnimationCli
         .collect()
 }
 
-/// 加载全部缓冲区。GLB 的内嵌 BIN 块、data URI 与外部 .bin 都在这里统一。
-async fn load_buffers(
-    gltf: &gltf::Gltf,
-    base: &Path,
-    io: &Arc<dyn ResourceIo>,
-) -> Result<Vec<Vec<u8>>, LoadError> {
-    let mut buffers = Vec::with_capacity(gltf.buffers().len());
-
-    for buffer in gltf.buffers() {
-        let data = match buffer.source() {
-            gltf::buffer::Source::Bin => gltf
-                .blob
-                .clone()
-                .ok_or_else(|| LoadError::message("glTF 引用了 BIN 块，但文件里没有"))?,
-            gltf::buffer::Source::Uri(source) => uri::read_uri(source, base, io).await?,
-        };
-
-        // 缓冲允许多出几个字节做对齐，但不能少。
-        if data.len() < buffer.length() {
-            return Err(LoadError::message(format!(
-                "缓冲区长度不足：声明 {} 字节，实际 {} 字节",
-                buffer.length(),
-                data.len()
-            )));
-        }
-
-        buffers.push(data);
-    }
-
-    Ok(buffers)
-}
-
 /// 加载全部贴图。单张贴图失败不影响整个模型，记日志后跳过。
 async fn load_textures(
     gltf: &gltf::Gltf,
@@ -569,7 +544,18 @@ fn import_materials(gltf: &gltf::Gltf, textures: &[Option<Resource<Texture>>]) -
             if let Some(color)=source.extension_value("KHR_materials_sheen").and_then(|e|e.get("sheenColorFactor")).and_then(|v|v.as_array()) && color.len()==3 {
                 physical.sheen=Vec3::new(color[0].as_f64().unwrap_or(0.0) as f32,color[1].as_f64().unwrap_or(0.0) as f32,color[2].as_f64().unwrap_or(0.0) as f32);
             }
-            if physical.transmission>0.0 || physical.iridescence>0.0 || physical.sheen!=Vec3::ZERO || physical.unlit || physical.alpha_cutoff>0.0 {physical.apply(&mut material);}
+            // KHR_materials_anisotropy：强度、旋转，外加一张方向贴图（线性数据）。
+            physical.anisotropy=number("KHR_materials_anisotropy","anisotropyStrength",0.0);
+            physical.anisotropy_rotation=number("KHR_materials_anisotropy","anisotropyRotation",0.0);
+            if let Some(index)=source.extension_value("KHR_materials_anisotropy").and_then(|e|e.get("anisotropyTexture")).and_then(|t|t.get("index")).and_then(|i|i.as_u64())
+                && let Some(texture)=gltf.textures().nth(index as usize)
+            {
+                physical.anisotropy_texture=texture_for(texture,true);
+            }
+            // KHR_materials_clearcoat：只读系数；清漆自己的贴图与法线贴图不读。
+            physical.clearcoat=number("KHR_materials_clearcoat","clearcoatFactor",0.0);
+            physical.clearcoat_roughness=number("KHR_materials_clearcoat","clearcoatRoughnessFactor",0.0);
+            if physical.is_needed() {physical.apply(&mut material);}
 
             // 名字留着：游戏侧要按「LeatherPartsMat」这种美术起的名字找到
             // 具体某一块去改颜色。用序号找的话，美术重新导出一次就全错位了。

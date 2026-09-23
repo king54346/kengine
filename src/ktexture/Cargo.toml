@@ -9,8 +9,18 @@ kcore = { path = "../kcore" }
 klog = { path = "../klog" }
 kmath = { path = "../kmath" }
 # 只需要 PNG / JPEG 解码，关掉默认特性以免拖入大量无关格式。
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "tga", "tiff", "exr", "hdr", "dds"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "tga", "tiff", "exr", "hdr", "dds", "webp"] }
 texture2ddecoder = "0.1.2"
 # KTX2 的两种超压缩：zstd 与 zlib。两个都是纯 Rust 实现。
 ruzstd = "0.7"
 flate2 = "1"
+# KTX2 里的 Basis Universal（ETC1S / UASTC）：纯 Rust 转码器。
+basisu = "0.1"
+# AVIF（EXT_texture_avif）：容器解析 + 纯 Rust 的 AV1 解码器（dav1d 的移植）。
+# 关掉 rav1d 的默认特性是为了不开汇编——那要 nasm，而这里的规矩是纯 Rust。
+avif-parse = "2"
+rav1d = { version = "1.1", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
+
+[dev-dependencies]
+# 只在测试里用：从 GLB 的 JSON 块里找出 AVIF 贴图的 bufferView。
+serde_json = "1"

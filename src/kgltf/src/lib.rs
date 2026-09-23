@@ -25,9 +25,12 @@
 
 #![warn(missing_docs)]
 
+pub mod draco;
 mod importer;
 mod loader;
+pub mod meshopt;
 mod model;
+mod prepare;
 mod uri;
 
 pub use kanim::AnimationClip;
