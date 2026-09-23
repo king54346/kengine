@@ -26,7 +26,7 @@ pub(crate) async fn import(
     // 后面的导入路径因此不用知道它们（理由见 `prepare` 的模块文档）。
     let (mut value, blob) = prepare::split(&bytes)?;
     let mut buffers = prepare::load_buffers(&value, blob, &base, &io).await?;
-    prepare::run(&mut value, &mut buffers)?;
+    let pointers = prepare::run(&mut value, &mut buffers)?;
     let mut json: gltf::json::Root = serde_json::from_value(value).map_err(LoadError::custom)?;
     // gltf-rs 的特性注册表里没有这些扩展，但这个导入器认得它们；
     // 不从 `extensionsRequired` 里划掉的话，校验会直接拒绝整个文件。
@@ -50,13 +50,16 @@ pub(crate) async fn import(
         blob: None,
     };
     let textures = load_textures(&gltf, &base, &io, &buffers, &path).await;
-    let materials = import_materials(&gltf, &textures);
+    let materials = import_materials(&gltf, &textures, &physical_targets(&pointers));
     let (meshes, primitive_ranges) = import_meshes(&gltf, &buffers, &path)?;
     let (mut nodes, roots) = import_nodes(&gltf, &primitive_ranges);
     import_instances(&gltf, &buffers, &mut nodes)?;
     let variants = import_variants(&gltf, &nodes);
     let skins = import_skins(&gltf, &buffers);
-    let animations = import_animations(&gltf, &buffers);
+    let mut animations = import_animations(&gltf, &buffers);
+    if !pointers.is_empty() {
+        animations = attach_pointer_tracks(animations, &pointers, &nodes, &gltf);
+    }
 
     klog::debug!(
         "glTF 已导入：{}（{} 网格 / {} 材质 / {} 节点 / {} 骨架 / {} 动画）",
@@ -472,7 +475,11 @@ async fn load_textures(
     textures
 }
 
-fn import_materials(gltf: &gltf::Gltf, textures: &[Option<Resource<Texture>>]) -> Vec<Material> {
+fn import_materials(
+    gltf: &gltf::Gltf,
+    textures: &[Option<Resource<Texture>>],
+    force_physical: &std::collections::HashSet<usize>,
+) -> Vec<Material> {
     // One image may be both sRGB color and linear data, or use different samplers.
     // Cache each texture/role separately; Texture clones share immutable pixel storage.
     let mut cache = std::collections::HashMap::new();
@@ -555,7 +562,9 @@ fn import_materials(gltf: &gltf::Gltf, textures: &[Option<Resource<Texture>>]) -
             // KHR_materials_clearcoat：只读系数；清漆自己的贴图与法线贴图不读。
             physical.clearcoat=number("KHR_materials_clearcoat","clearcoatFactor",0.0);
             physical.clearcoat_roughness=number("KHR_materials_clearcoat","clearcoatRoughnessFactor",0.0);
-            if physical.is_needed() {physical.apply(&mut material);}
+            // 被动画指针驱动扩展参数的材质，即便静态值全是默认也要换上扩展着色器——
+            // 否则参数槽写进去了，却没有着色器读它。
+            if physical.is_needed() || force_physical.contains(&source.index().unwrap_or(usize::MAX)) {physical.apply(&mut material);}
 
             // 名字留着：游戏侧要按「LeatherPartsMat」这种美术起的名字找到
             // 具体某一块去改颜色。用序号找的话，美术重新导出一次就全错位了。
@@ -785,4 +794,176 @@ fn import_instances(gltf:&gltf::Gltf,buffers:&[Vec<u8>],nodes:&mut Vec<ModelNode
         }
     }
     Ok(())
+}
+
+
+/// 指针路径 → 材质属性。返回 `(属性, 期望分量数)`。
+fn material_property(rest: &str) -> Option<kanim::MaterialProperty> {
+    use kanim::MaterialProperty as P;
+    Some(match rest {
+        "pbrMetallicRoughness/baseColorFactor" => P::BaseColor,
+        "pbrMetallicRoughness/metallicFactor" => P::Metallic,
+        "pbrMetallicRoughness/roughnessFactor" => P::Roughness,
+        "emissiveFactor" | "extensions/KHR_materials_emissive_strength/emissiveStrength" => P::Emissive,
+        "alphaCutoff" => P::Param(1, 3),
+        "extensions/KHR_materials_transmission/transmissionFactor" => P::Param(0, 0),
+        "extensions/KHR_materials_ior/ior" => P::Param(0, 1),
+        "extensions/KHR_materials_volume/thicknessFactor" => P::Param(0, 2),
+        "extensions/KHR_materials_dispersion/dispersion" => P::Param(0, 3),
+        "extensions/KHR_materials_iridescence/iridescenceFactor" => P::Param(1, 0),
+        "extensions/KHR_materials_iridescence/iridescenceThicknessMaximum" => P::Param(1, 1),
+        "extensions/KHR_materials_sheen/sheenRoughnessFactor" => P::Param(1, 2),
+        "extensions/KHR_materials_sheen/sheenColorFactor" => P::ParamRgb(2),
+        "extensions/KHR_materials_anisotropy/anisotropyStrength" => P::Param(3, 0),
+        "extensions/KHR_materials_anisotropy/anisotropyRotation" => P::Param(3, 1),
+        "extensions/KHR_materials_clearcoat/clearcoatFactor" => P::Param(3, 2),
+        "extensions/KHR_materials_clearcoat/clearcoatRoughnessFactor" => P::Param(3, 3),
+        // 引擎的 UV 变换是整个材质一套：任何一张贴图的 texture_transform 都写到这一套上。
+        _ if rest.ends_with("/extensions/KHR_texture_transform/offset") => P::UvOffset,
+        _ if rest.ends_with("/extensions/KHR_texture_transform/scale") => P::UvScale,
+        _ => return None,
+    })
+}
+
+/// 拆开 `/materials/{i}/...`，返回 `(材质号, 剩余路径)`。
+fn split_material_pointer(pointer: &str) -> Option<(usize, &str)> {
+    let rest = pointer.strip_prefix("/materials/")?;
+    let (index, rest) = rest.split_once('/')?;
+    Some((index.parse().ok()?, rest))
+}
+
+/// 被指针驱动扩展参数（参数槽）的材质号。
+fn physical_targets(pointers: &[prepare::PointerChannel]) -> std::collections::HashSet<usize> {
+    pointers
+        .iter()
+        .filter_map(|p| split_material_pointer(&p.pointer))
+        .filter(|(_, rest)| {
+            matches!(
+                material_property(rest),
+                Some(kanim::MaterialProperty::Param(..) | kanim::MaterialProperty::ParamRgb(_))
+            )
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// 把 `KHR_animation_pointer` 通道翻译成轨道，并进各自所属的剪辑。
+///
+/// | 指针 | 翻译成 |
+/// |---|---|
+/// | `/nodes/{i}/translation` `rotation` `scale` | 普通的 TRS 轨道 |
+/// | `/nodes/{i}/weights` | 每个形变目标一条权重轨道 |
+/// | `/materials/{i}/...` | 每个用到这个材质的「节点 + 块」一条属性轨道 |
+///
+/// 灯光、相机、贴图坐标旋转等其余指针记一条警告后跳过——引擎的 glTF
+/// 导入本来就不读 `KHR_lights_punctual`，驱动不存在的东西没有意义。
+fn attach_pointer_tracks(
+    clips: Vec<AnimationClip>,
+    pointers: &[prepare::PointerChannel],
+    nodes: &[ModelNode],
+    gltf: &gltf::Gltf,
+) -> Vec<AnimationClip> {
+    let mut tracks: Vec<Vec<Track>> = clips.iter().map(|c| c.tracks().to_vec()).collect();
+    let names: Vec<String> = clips.iter().map(|c| c.name().to_string()).collect();
+    let mut skipped = std::collections::BTreeSet::new();
+
+    for channel in pointers {
+        let Some(slot) = tracks.get_mut(channel.animation) else { continue };
+        let interpolation = match channel.interpolation.as_str() {
+            "STEP" => Interpolation::Step,
+            "CUBICSPLINE" => Interpolation::CubicSpline,
+            _ => Interpolation::Linear,
+        };
+        let c = channel.components.max(1);
+        let vec4s = || -> Vec<Vec4> {
+            channel
+                .values
+                .chunks_exact(c)
+                .map(|v| Vec4::new(v[0], *v.get(1).unwrap_or(&0.0), *v.get(2).unwrap_or(&0.0), *v.get(3).unwrap_or(&0.0)))
+                .collect()
+        };
+        let times = channel.times.clone();
+        let parts: Vec<&str> = channel.pointer.trim_start_matches('/').split('/').collect();
+
+        if let ["nodes", index, path] = parts.as_slice()
+            && let Ok(target) = index.parse::<usize>()
+        {
+            let values = vec4s();
+            let track = match *path {
+                "translation" => Curve::new(times, values.iter().map(|v| v.truncate()).collect(), interpolation).map(Channel::Position),
+                "scale" => Curve::new(times, values.iter().map(|v| v.truncate()).collect(), interpolation).map(Channel::Scale),
+                "rotation" => Curve::new(times, values.iter().map(|v| Quat::from_xyzw(v.x, v.y, v.z, v.w)).collect(), interpolation).map(Channel::Rotation),
+                "weights" => {
+                    let frames = times.len().max(1);
+                    let per_frame = if interpolation == Interpolation::CubicSpline { 3 } else { 1 };
+                    let count = channel.values.len() / (frames * per_frame);
+                    for index in 0..count {
+                        let weights: Vec<f32> = (0..frames * per_frame).map(|k| channel.values[k * count + index]).collect();
+                        if let Some(curve) = Curve::new(times.clone(), weights, interpolation) {
+                            slot.push(Track { target, channel: Channel::MorphWeight { index, curve } });
+                        }
+                    }
+                    None
+                }
+                _ => {
+                    skipped.insert(channel.pointer.clone());
+                    None
+                }
+            };
+            if let Some(channel) = track {
+                slot.push(Track { target, channel });
+            }
+            continue;
+        }
+
+        let Some((material, rest)) = split_material_pointer(&channel.pointer) else {
+            skipped.insert(channel.pointer.clone());
+            continue;
+        };
+        let Some(property) = material_property(rest) else {
+            skipped.insert(channel.pointer.clone());
+            continue;
+        };
+        let source = gltf.materials().nth(material);
+        let mut values = vec4s();
+        match rest {
+            // 引擎存的是「系数 × 强度」的乘积，两个指针各自只动其中一半，
+            // 另一半取材质的静态值。
+            "emissiveFactor" => {
+                let strength = source.and_then(|m| m.emissive_strength()).unwrap_or(1.0);
+                values.iter_mut().for_each(|v| *v *= strength);
+            }
+            "extensions/KHR_materials_emissive_strength/emissiveStrength" => {
+                let factor = Vec3::from_array(source.map_or([1.0; 3], |m| m.emissive_factor()));
+                values.iter_mut().for_each(|v| *v = (factor * v.x).extend(0.0));
+            }
+            // 有方向贴图时，物理材质把强度存成「强度 + 2」作为标记。
+            "extensions/KHR_materials_anisotropy/anisotropyStrength" => {
+                let textured = source.is_some_and(|m| {
+                    m.extension_value("KHR_materials_anisotropy")
+                        .is_some_and(|e| e.get("anisotropyTexture").is_some())
+                });
+                if textured {
+                    values.iter_mut().for_each(|v| v.x += 2.0);
+                }
+            }
+            _ => {}
+        }
+        let Some(curve) = Curve::new(times, values, interpolation) else { continue };
+        for (target, node) in nodes.iter().enumerate() {
+            for (part, mesh_part) in node.parts.iter().enumerate() {
+                if mesh_part.material == Some(material) {
+                    slot.push(Track {
+                        target,
+                        channel: Channel::Property { part, property, curve: curve.clone() },
+                    });
+                }
+            }
+        }
+    }
+
+    for pointer in skipped {
+        klog::warn!("不支持的动画指针，已跳过：{pointer}");
+    }
+    names.into_iter().zip(tracks).map(|(name, tracks)| AnimationClip::new(name, tracks)).collect()
 }

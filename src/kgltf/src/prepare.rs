@@ -35,7 +35,30 @@ pub(crate) const HANDLED: &[&str] = &[
     "KHR_texture_basisu",
     "EXT_texture_avif",
     "EXT_texture_webp",
+    "KHR_animation_pointer",
 ];
+
+/// 一条 `KHR_animation_pointer` 通道，已经从 JSON 里摘出来并解码。
+///
+/// gltf-rs 的 `animation.channel.target` 要求有 `node`、`path` 只认 TRS 与
+/// `weights`，指针通道（`path: "pointer"`、没有 `node`）会让整个文件反序列化
+/// 失败。所以这里在交给它之前把这些通道摘掉，数据自己解码，由导入器
+/// 按指针路径翻译成轨道。
+#[derive(Debug, Clone)]
+pub(crate) struct PointerChannel {
+    /// 属于第几个动画。
+    pub animation: usize,
+    /// JSON 指针，例如 `/materials/0/pbrMetallicRoughness/baseColorFactor`。
+    pub pointer: String,
+    /// 关键帧时刻。
+    pub times: Vec<f32>,
+    /// 采样值，逐帧 `components` 个（三次样条时每帧三组）。
+    pub values: Vec<f32>,
+    /// 每个值几个分量。
+    pub components: usize,
+    /// `LINEAR` / `STEP` / `CUBICSPLINE`。
+    pub interpolation: String,
+}
 
 /// 把文件拆成 JSON 和 GLB 的 BIN 块。
 pub(crate) fn split(bytes: &[u8]) -> Result<(Value, Option<Vec<u8>>), LoadError> {
@@ -235,8 +258,8 @@ fn component_size(component_type: u64) -> usize {
     }
 }
 
-/// 执行全部前处理。
-pub(crate) fn run(json: &mut Value, buffers: &mut Vec<Vec<u8>>) -> Result<(), LoadError> {
+/// 执行全部前处理，返回摘出来的动画指针通道。
+pub(crate) fn run(json: &mut Value, buffers: &mut Vec<Vec<u8>>) -> Result<Vec<PointerChannel>, LoadError> {
     redirect_texture_sources(json);
 
     // meshopt 先解、先落成一块独立的缓冲：量化反解和 Draco 要从解压后的
@@ -264,15 +287,71 @@ pub(crate) fn run(json: &mut Value, buffers: &mut Vec<Vec<u8>>) -> Result<(), Lo
     }
     dequantize(json, buffers, &mut synthetic);
 
-    if synthetic.data.is_empty() {
-        return Ok(());
+    if !synthetic.data.is_empty() {
+        let object = json.as_object_mut().ok_or_else(|| LoadError::message("glTF 顶层不是对象"))?;
+        push_all(object, "bufferViews", synthetic.views);
+        push_all(object, "accessors", synthetic.accessors);
+        push_all(object, "buffers", vec![json!({ "byteLength": synthetic.data.len() })]);
+        buffers.push(synthetic.data);
     }
-    let object = json.as_object_mut().ok_or_else(|| LoadError::message("glTF 顶层不是对象"))?;
-    push_all(object, "bufferViews", synthetic.views);
-    push_all(object, "accessors", synthetic.accessors);
-    push_all(object, "buffers", vec![json!({ "byteLength": synthetic.data.len() })]);
-    buffers.push(synthetic.data);
-    Ok(())
+    Ok(extract_pointer_channels(json, buffers))
+}
+
+/// 把 `KHR_animation_pointer` 通道（以及任何缺 `node` 的通道）从 JSON 里摘掉并解码。
+fn extract_pointer_channels(json: &mut Value, buffers: &[Vec<u8>]) -> Vec<PointerChannel> {
+    let mut out = Vec::new();
+    let animation_count = array(json, "animations").len();
+    for animation in 0..animation_count {
+        let samplers = array(&json["animations"][animation], "samplers").to_vec();
+        let Some(channels) = json["animations"][animation].get_mut("channels").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let mut kept = Vec::with_capacity(channels.len());
+        let mut taken = Vec::new();
+        for channel in channels.drain(..) {
+            let target = channel.get("target").cloned().unwrap_or(Value::Null);
+            let is_pointer = target.get("path").and_then(Value::as_str) == Some("pointer")
+                || target.get("node").is_none();
+            if is_pointer {
+                taken.push(channel);
+            } else {
+                kept.push(channel);
+            }
+        }
+        *channels = kept;
+        for channel in taken {
+            let Some(pointer) = extension(&channel["target"], "KHR_animation_pointer")
+                .and_then(|e| e.get("pointer"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            else {
+                klog::warn!("动画 {animation} 有一条既没有 node 也没有指针的通道，已跳过");
+                continue;
+            };
+            let Some(sampler) = usize_of(&channel, "sampler").and_then(|i| samplers.get(i)) else {
+                continue;
+            };
+            let input = usize_of(sampler, "input").and_then(|a| read_accessor(json, buffers, a));
+            let output = usize_of(sampler, "output").and_then(|a| read_accessor(json, buffers, a));
+            let (Some((times, _)), Some((values, components))) = (input, output) else {
+                klog::warn!("动画指针 {pointer} 的采样数据读不出来，已跳过");
+                continue;
+            };
+            out.push(PointerChannel {
+                animation,
+                pointer,
+                times,
+                values,
+                components,
+                interpolation: sampler
+                    .get("interpolation")
+                    .and_then(Value::as_str)
+                    .unwrap_or("LINEAR")
+                    .to_string(),
+            });
+        }
+    }
+    out
 }
 
 fn push_all(object: &mut Map<String, Value>, key: &str, items: Vec<Value>) {

@@ -54,7 +54,7 @@ pub use transform::Transform;
 
 use cull::SceneCulling;
 use fxhash::FxHashMap;
-use kanim::Animator;
+use kanim::{Animator, MaterialProperty};
 use kcore::pool::{Handle, Pool};
 use kgltf::Model;
 use klight::Light;
@@ -1021,6 +1021,22 @@ impl Scene {
                 node.set_morph_weight(sample.index, sample.weight);
             }
 
+            // 材质属性（`KHR_animation_pointer`）：写到目标节点那一块几何的材质上。
+            // 多块几何的节点在实例化时拆成了 `Part{n}` 子节点，按块号找回去。
+            for sample in player.pose().properties() {
+                let node_handle = player.target(sample.target);
+                let owner = match self.try_get(node_handle) {
+                    Some(node) if node.material.is_some() => node_handle,
+                    Some(node) => node.children.get(sample.part).copied().unwrap_or(Handle::NONE),
+                    None => continue,
+                };
+                if let Ok(node) = self.nodes.try_borrow_mut(owner)
+                    && let Some(material) = node.material.as_mut()
+                {
+                    apply_material_property(material, sample.property, sample.value);
+                }
+            }
+
             if let Ok(node) = self.nodes.try_borrow_mut(handle) {
                 node.animator = Some(player);
             }
@@ -1271,6 +1287,16 @@ impl Scene {
             node.light()
                 .filter(|light| light.enabled && node.global_visible)
                 .map(|light| (light, node.global_transform))
+        })
+    }
+
+    /// 遍历所有可见节点上的常驻线段，返回（线段集, 世界变换）。
+    ///
+    /// 线性遍历：挂线段的节点通常屈指可数，不值得为它们再维护一份索引。
+    pub fn visible_lines(&self) -> impl Iterator<Item = (&kgizmo::LineSet, Mat4)> {
+        self.nodes.iter().filter_map(|node| {
+            let lines = node.lines.as_ref()?;
+            (node.global_visible && !lines.is_empty()).then_some((lines, node.global_transform))
         })
     }
 
@@ -2031,6 +2057,43 @@ impl Index<Handle<Node>> for Scene {
 impl IndexMut<Handle<Node>> for Scene {
     fn index_mut(&mut self, handle: Handle<Node>) -> &mut Self::Output {
         &mut self.nodes[handle]
+    }
+}
+
+/// 把一个动画采样值写进材质。
+///
+/// 和 [`kanim::MaterialProperty`] 一一对应。参数槽只改被驱动的那个分量，
+/// 其余分量保持材质原值——一个槽位里往往同时放着几个互不相干的参数
+/// （透射、折射率、厚度、色散挤在同一个 `vec4` 里）。
+pub fn apply_material_property(material: &mut Material, property: MaterialProperty, value: kmath::Vec4) {
+    let slot_value = |material: &Material, slot: usize| {
+        material
+            .param(slot)
+            .and_then(|v| v.as_vec4())
+            .unwrap_or(kmath::Vec4::ZERO)
+    };
+    match property {
+        MaterialProperty::BaseColor => material.set_base_color(value),
+        MaterialProperty::Emissive => material.set("emissive", value.truncate()),
+        MaterialProperty::Metallic => material.set_metallic(value.x),
+        MaterialProperty::Roughness => material.set_roughness(value.x),
+        MaterialProperty::UvOffset => material.set("uv_offset", kmath::Vec2::new(value.x, value.y)),
+        MaterialProperty::UvScale => material.set("uv_scale", kmath::Vec2::new(value.x, value.y)),
+        MaterialProperty::Param(slot, component) => {
+            let slot = slot as usize;
+            if slot < 4 {
+                let mut current = slot_value(material, slot);
+                current[(component as usize).min(3)] = value.x;
+                material.set_param(slot, current);
+            }
+        }
+        MaterialProperty::ParamRgb(slot) => {
+            let slot = slot as usize;
+            if slot < 4 {
+                let current = slot_value(material, slot);
+                material.set_param(slot, value.truncate().extend(current.w));
+            }
+        }
     }
 }
 

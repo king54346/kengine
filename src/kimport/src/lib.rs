@@ -45,6 +45,8 @@ pub mod pdb;
 pub mod ply;
 pub mod stl;
 pub mod vox;
+pub mod xml;
+pub mod zip;
 
 use kasset::{LoadError, ResourceIo};
 use kgltf::{MeshPart, Model, ModelNode, NodeTransform};

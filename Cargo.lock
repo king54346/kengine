@@ -2012,6 +2012,7 @@ dependencies = [
  "kshader",
  "ktask",
  "ktexture",
+ "quick-xml",
  "serde_json",
 ]
 

@@ -21,6 +21,8 @@ kshader = { path = "../kshader" }
 flate2 = "1"
 # Lottie 是 JSON；IFC / OBJ / PLY 那些自有文本格式不用它。
 serde_json = "1"
+# Collada / 3MF / AMF / KML 的 XML 词法。工作区里已经锁定了这个版本。
+quick-xml = "0.41"
 
 [dev-dependencies]
 ktask = { path = "../ktask" }
