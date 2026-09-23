@@ -53,6 +53,8 @@ pub struct Node {
     pub(crate) camera: Option<Camera>,
     pub(crate) light: Option<Light>,
     pub(crate) particles: Option<Box<ParticleSystem>>,
+    /// 常驻线段集（GCode 路径、骨架、CAD 边线）。见 [`kgizmo::LineSet`]。
+    pub(crate) lines: Option<kgizmo::LineSet>,
     /// 骨架。有它的节点走蒙皮渲染路径。
     pub(crate) skin: Option<Box<Skin>>,
     /// 动画播放器，通常挂在模型的根节点上。
@@ -104,6 +106,7 @@ impl Node {
             // 装箱：粒子系统里有九个数组，直接内联会把每个 Node 撑大一大截，
             // 而绝大多数节点根本没有粒子。
             particles: None,
+            lines: None,
             skin: None,
             animator: None,
             morph_weights: Vec::new(),
@@ -351,6 +354,22 @@ impl Node {
     /// 光源的可变引用，可在运行时改颜色与强度。
     pub fn light_mut(&mut self) -> Option<&mut Light> {
         self.light.as_mut()
+    }
+
+    /// 挂上一组常驻线段。它跟着节点的世界变换走，渲染器只上传一次。
+    pub fn with_lines(mut self, lines: kgizmo::LineSet) -> Self {
+        self.lines = Some(lines);
+        self
+    }
+
+    /// 换掉（或用 `None` 摘掉）常驻线段。
+    pub fn set_lines(&mut self, lines: Option<kgizmo::LineSet>) {
+        self.lines = lines;
+    }
+
+    /// 常驻线段。
+    pub fn lines(&self) -> Option<&kgizmo::LineSet> {
+        self.lines.as_ref()
     }
 
     /// 粒子系统的只读引用。
