@@ -72,6 +72,8 @@ pub struct Node {
     pub(crate) ragdoll: Option<Box<Ragdoll>>,
     /// 地形。块网格由 [`Scene::update`] 生成成子节点。
     pub(crate) terrain: Option<Box<kterrain::Terrain>>,
+    /// 细节层级：按相机距离只显示一个子节点。见 [`Lod`](crate::Lod)。
+    pub(crate) lod: Option<Box<crate::Lod>>,
     pub(crate) sound: Option<Box<SoundSource>>,
     pub(crate) script: Option<Box<ScriptSlot>>,
     pub(crate) parent: Handle<Node>,
@@ -115,6 +117,7 @@ impl Node {
             joint: None,
             ragdoll: None,
             terrain: None,
+            lod: None,
             sound: None,
             script: None,
             parent: Handle::NONE,
@@ -516,6 +519,27 @@ impl Node {
     /// 地形的可变引用。
     pub fn terrain_mut(&mut self) -> Option<&mut kterrain::Terrain> {
         self.terrain.as_deref_mut()
+    }
+
+    /// 挂上细节层级。第 `i` 级对应这个节点的第 `i` 个子节点。
+    pub fn with_lod(mut self, lod: crate::Lod) -> Self {
+        self.lod = Some(Box::new(lod));
+        self
+    }
+
+    /// 挂上或摘掉细节层级。摘掉之后所有子节点恢复照常显示。
+    pub fn set_lod(&mut self, lod: Option<crate::Lod>) {
+        self.lod = lod.map(Box::new);
+    }
+
+    /// 细节层级。
+    pub fn lod(&self) -> Option<&crate::Lod> {
+        self.lod.as_deref()
+    }
+
+    /// 细节层级的可变引用（改级别、关自动选级）。
+    pub fn lod_mut(&mut self) -> Option<&mut crate::Lod> {
+        self.lod.as_deref_mut()
     }
 
     /// 把地形整个取走，节点上留空。

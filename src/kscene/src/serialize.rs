@@ -213,6 +213,13 @@ impl Visit for Node {
             ))
         })?;
 
+        // 后加的字段，老存档里没有这块区域：读不到就当没有 LOD。
+        if visit_optional("Lod", &mut self.lod, &mut region, Default::default).is_err()
+            && region.is_reading()
+        {
+            self.lod = None;
+        }
+
         // 后加的字段，老存档里没有这块区域：读不到就当「没有子网格材质」，
         // 和这个字段的默认值一致。子网格材质走内联而不是共享表——
         // 用它的节点本就是少数，犯不上为这条路单开一张去重表。

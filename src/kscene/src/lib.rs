@@ -11,6 +11,7 @@
 mod audio;
 mod cull;
 mod debug;
+mod lod;
 pub mod decal;
 mod node;
 mod physics;
@@ -43,6 +44,7 @@ pub use kphysics::{
 };
 pub use ksprite::{SortMode, SpriteInstance, SpriteRegion};
 pub use kterrain::{Brush, Terrain};
+pub use lod::{Lod, LodLevel};
 pub use node::Node;
 pub use physics::{Collider, Joint, RigidBody};
 pub use ragdoll::{LimbDesc, Ragdoll, RagdollBuilder, RagdollLimb, hinge_limits};
@@ -790,6 +792,10 @@ impl Scene {
     ///
     /// 引擎每帧在插件的 `update` 之后自动调用，通常不需要手动调。
     pub fn update(&mut self) {
+        // LOD 要量到相机的距离。相机是哪台得看上一帧的索引（马上要清掉），
+        // 但位置沿父链现算——这一帧里挪过相机，选级也跟着新位置走。
+        let viewer = self.active_camera_node().map(|camera| self.current_world_position(camera));
+
         self.culling.begin();
         self.index.clear();
 
@@ -804,6 +810,13 @@ impl Scene {
                 let visible = parent_visible && node.visible;
                 node.global_transform = global;
                 node.global_visible = visible;
+                // 选级放在这里而不是事后改子节点：子节点压栈时要带着
+                // 「这一帧可见吗」，事后再改就得把整棵子树重走一遍。
+                if let (Some(lod), Some(viewer)) = (node.lod.as_deref_mut(), viewer)
+                    && lod.auto_update
+                {
+                    lod.update(viewer.distance(global.w_axis.truncate()));
+                }
                 (
                     global,
                     visible,
@@ -882,9 +895,11 @@ impl Scene {
 
             // 按下标取子节点而不是克隆整个列表：每帧对上万个节点做一次分配，
             // 光是分配器就能吃掉可观的时间。倒序压栈，弹出时才是原本的顺序。
+            let node = &self.nodes[handle];
             for index in (0..child_count).rev() {
-                let child = self.nodes[handle].children[index];
-                stack.push((child, global, visible));
+                let child = node.children[index];
+                let shown = node.lod.as_deref().is_none_or(|lod| lod.shows_child(index));
+                stack.push((child, global, visible && shown));
             }
         }
 
@@ -916,6 +931,21 @@ impl Scene {
         }
 
         self.culling.commit();
+    }
+
+    /// 沿父链现算一个节点的世界位置，不依赖上一帧留下的 `global_transform`。
+    fn current_world_position(&self, handle: Handle<Node>) -> Vec3 {
+        let mut matrix = Mat4::IDENTITY;
+        let mut current = handle;
+        // 深度上限防御父链成环——正常的树不会，但读坏的存档可能。
+        for _ in 0..4096 {
+            let Some(node) = self.try_get(current) else {
+                break;
+            };
+            matrix = node.transform.matrix() * matrix;
+            current = node.parent;
+        }
+        matrix.w_axis.truncate()
     }
 
     /// 重算所有骨架的骨骼矩阵。
