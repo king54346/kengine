@@ -20,6 +20,7 @@
 
 pub mod physical;
 pub mod points;
+pub mod wireframe;
 pub mod ultrahdr;
 
 pub mod brdf;

@@ -418,6 +418,193 @@ impl Mesh {
         }
         Self::new(vertices, indices)
     }
+
+    /// 细分二十面体球，半径 0.5——three.js 的 `IcosahedronGeometry`。
+    ///
+    /// `detail` 是每条棱切几段减一：0 是原始的二十面体（20 个三角形），
+    /// 之后每个面变成 `(detail + 1)²` 个三角形再投影到球面上。
+    ///
+    /// # 和 [`sphere`](Self::sphere) 的区别
+    ///
+    /// UV 球的三角形在两极挤成一团、赤道处稀疏；二十面体球处处**大小均匀**。
+    /// 做 LOD 演示、线框、需要均匀采样的场合（点光阴影立方体、球面分布）
+    /// 都该用这个。代价是 UV 在接缝处会扭——贴图用 UV 球更合适。
+    ///
+    /// 面与面之间**不共享顶点**：法线本来就是位置的方向，共享与否画出来一样，
+    /// 不共享的话生成代码简单得多，线框（[`wireframe`](Self::wireframe)）也
+    /// 反正要拆开。
+    pub fn icosphere(detail: u32) -> Self {
+        let detail = detail.min(64);
+        let t = (1.0 + 5.0_f32.sqrt()) / 2.0;
+        let corners = [
+            Vec3::new(-1.0, t, 0.0),
+            Vec3::new(1.0, t, 0.0),
+            Vec3::new(-1.0, -t, 0.0),
+            Vec3::new(1.0, -t, 0.0),
+            Vec3::new(0.0, -1.0, t),
+            Vec3::new(0.0, 1.0, t),
+            Vec3::new(0.0, -1.0, -t),
+            Vec3::new(0.0, 1.0, -t),
+            Vec3::new(t, 0.0, -1.0),
+            Vec3::new(t, 0.0, 1.0),
+            Vec3::new(-t, 0.0, -1.0),
+            Vec3::new(-t, 0.0, 1.0),
+        ];
+        // 与 three.js 相同的 20 个面，从外面看逆时针。
+        const FACES: [[usize; 3]; 20] = [
+            [0, 11, 5],
+            [0, 5, 1],
+            [0, 1, 7],
+            [0, 7, 10],
+            [0, 10, 11],
+            [1, 5, 9],
+            [5, 11, 4],
+            [11, 10, 2],
+            [10, 7, 6],
+            [7, 1, 8],
+            [3, 9, 4],
+            [3, 4, 2],
+            [3, 2, 6],
+            [3, 6, 8],
+            [3, 8, 9],
+            [4, 9, 5],
+            [2, 4, 11],
+            [6, 2, 10],
+            [8, 6, 7],
+            [9, 8, 1],
+        ];
+
+        let n = detail + 1;
+        let per_face = ((n + 1) * (n + 2) / 2) as usize;
+        let mut vertices = Vec::with_capacity(per_face * 20);
+        let mut indices = Vec::with_capacity((n * n * 3 * 20) as usize);
+        let vertex = |p: Vec3| {
+            let normal = p.normalize();
+            // 球面坐标的 UV：够看，接缝处会扭——见上面的说明。
+            let u = 0.5 + normal.z.atan2(normal.x) / std::f32::consts::TAU;
+            let v = 0.5 - normal.y.asin() / std::f32::consts::PI;
+            Vertex::new(normal * 0.5, normal, [u, v])
+        };
+        for [a, b, c] in FACES {
+            let (a, b, c) = (corners[a], corners[b], corners[c]);
+            let base = vertices.len() as u32;
+            // 第 i 行（从顶点 a 往 b-c 那条边走）有 i + 1 个点。
+            for i in 0..=n {
+                let left = a.lerp(b, i as f32 / n as f32);
+                let right = a.lerp(c, i as f32 / n as f32);
+                for j in 0..=i {
+                    let p = if i == 0 { left } else { left.lerp(right, j as f32 / i as f32) };
+                    vertices.push(vertex(p));
+                }
+            }
+            let row = |i: u32| base + i * (i + 1) / 2;
+            for i in 0..n {
+                for j in 0..=i {
+                    let (top, bottom) = (row(i) + j, row(i + 1) + j);
+                    indices.extend_from_slice(&[top, bottom, bottom + 1]);
+                    if j < i {
+                        indices.extend_from_slice(&[top, bottom + 1, top + 1]);
+                    }
+                }
+            }
+        }
+
+        let mut mesh = Self::new(vertices, indices);
+        mesh.recompute_tangents();
+        mesh
+    }
+
+    /// 圆锥，底面直径 1、高 1，中轴沿 Y，尖朝上。
+    ///
+    /// 侧面法线按真实的母线斜率算（不是水平的）——用水平法线的话
+    /// 光照会像一根圆柱。尖端每个分段各有一个顶点，法线取那一段的
+    /// 中间方向，否则尖端的法线会被平均成竖直向上，顶上一圈发亮。
+    pub fn cone(segments: u32) -> Self {
+        let segments = segments.max(3);
+        let (half_height, radius) = (0.5_f32, 0.5_f32);
+        // 母线与底面的夹角决定法线的 Y 分量：斜率 r/h。
+        let slope = radius / (2.0 * half_height);
+
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        for segment in 0..segments {
+            let u0 = segment as f32 / segments as f32;
+            let u1 = (segment + 1) as f32 / segments as f32;
+            let um = (u0 + u1) * 0.5;
+            let normal_at = |u: f32| {
+                let (sin, cos) = (u * std::f32::consts::TAU).sin_cos();
+                Vec3::new(cos, slope, sin).normalize()
+            };
+            let rim = |u: f32| {
+                let (sin, cos) = (u * std::f32::consts::TAU).sin_cos();
+                Vec3::new(cos * radius, -half_height, sin * radius)
+            };
+            let base = vertices.len() as u32;
+            vertices.push(Vertex::new(Vec3::Y * half_height, normal_at(um), [um, 0.0]));
+            vertices.push(Vertex::new(rim(u0), normal_at(u0), [u0, 1.0]));
+            vertices.push(Vertex::new(rim(u1), normal_at(u1), [u1, 1.0]));
+            // 从外面看逆时针：尖 → u1 → u0。
+            indices.extend_from_slice(&[base, base + 2, base + 1]);
+        }
+        let center = vertices.len() as u32;
+        vertices.push(Vertex::new(Vec3::NEG_Y * half_height, Vec3::NEG_Y, [0.5, 0.5]));
+        for segment in 0..=segments {
+            let u = segment as f32 / segments as f32;
+            let (sin, cos) = (u * std::f32::consts::TAU).sin_cos();
+            vertices.push(Vertex::new(
+                Vec3::new(cos * radius, -half_height, sin * radius),
+                Vec3::NEG_Y,
+                [cos * 0.5 + 0.5, sin * 0.5 + 0.5],
+            ));
+        }
+        for segment in 0..segments {
+            let a = center + 1 + segment;
+            indices.extend_from_slice(&[center, a, a + 1]);
+        }
+
+        let mut mesh = Self::new(vertices, indices);
+        mesh.recompute_tangents();
+        mesh
+    }
+
+    /// 线框用的几何：三角形全部拆开，每个角的 `uv1` 写上重心坐标。
+    ///
+    /// 配套的材质是 `kpbr::wireframe::WireframeMaterial`：它在
+    /// `material_surface` 里看重心坐标离哪条边近，离得远的片元直接丢掉，
+    /// 剩下的就是三角形的边。
+    ///
+    /// # 为什么不用 `PolygonMode::Line`
+    ///
+    /// 那要 `POLYGON_MODE_LINE` 设备特性——WebGPU 标准里没有它，部分
+    /// 移动端和浏览器后端也不支持；而且线宽恒为 1 像素、不走光照。
+    /// 重心坐标的写法在哪都能跑，**照常受光**（three.js 的
+    /// `MeshLambertMaterial({ wireframe: true })` 就是受光的线框），
+    /// 线宽也可以随意调。
+    ///
+    /// # 代价
+    ///
+    /// - 顶点数变成三角形数 × 3（不能再共享顶点：同一个顶点在不同三角形里
+    ///   的重心坐标不同）。
+    /// - `uv1` 被占用，这份几何不能再同时挂 lightmap。
+    pub fn wireframe(&self) -> Self {
+        const CORNERS: [[f32; 2]; 3] = [[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]];
+        let source = self.vertices();
+        let mut vertices = Vec::with_capacity(self.indices().len());
+        for triangle in self.indices().chunks_exact(3) {
+            for (corner, &index) in triangle.iter().enumerate() {
+                let Some(vertex) = source.get(index as usize) else {
+                    continue;
+                };
+                vertices.push(Vertex {
+                    uv1: CORNERS[corner],
+                    ..*vertex
+                });
+            }
+        }
+        vertices.truncate(vertices.len() / 3 * 3);
+        let indices = (0..vertices.len() as u32).collect();
+        Self::new(vertices, indices)
+    }
 }
 
 #[cfg(test)]
@@ -746,5 +933,65 @@ mod test {
                 "第 {index} 个面的 UV 没铺满"
             );
         }
+    }
+
+    /// 每个三角形的几何法线（按绕序算）都和质心同向 ⟺ 从外面看是逆时针。
+    fn assert_faces_point_outward(mesh: &Mesh, label: &str) {
+        let v = mesh.vertices();
+        for (index, t) in mesh.indices().chunks_exact(3).enumerate() {
+            let [a, b, c] = [0, 1, 2].map(|k| v[t[k] as usize].position());
+            let normal = (b - a).cross(c - a);
+            if normal.length() < 1e-9 {
+                continue;
+            }
+            let centroid = (a + b + c) / 3.0;
+            // 圆锥底面的质心在 Y 轴上时点乘接近 0，改用「法线朝外」的平均方向判定。
+            let outward = if centroid.x.abs() + centroid.z.abs() < 1e-4 {
+                Vec3::new(0.0, centroid.y.signum(), 0.0)
+            } else {
+                centroid
+            };
+            assert!(normal.dot(outward) > 0.0, "{label} 第 {index} 个三角形朝里");
+        }
+    }
+
+    #[test]
+    fn icosphere_triangle_count_matches_three_js() {
+        // three.js：20 · (detail + 1)² 个三角形。
+        for detail in [0, 1, 4, 16] {
+            let mesh = Mesh::icosphere(detail);
+            assert_eq!(mesh.triangle_count(), 20 * ((detail + 1) * (detail + 1)) as usize);
+        }
+    }
+
+    #[test]
+    fn icosphere_sits_on_the_sphere_and_faces_outward() {
+        let mesh = Mesh::icosphere(3);
+        for vertex in mesh.vertices() {
+            assert!((vertex.position().length() - 0.5).abs() < 1e-5);
+        }
+        assert_faces_point_outward(&mesh, "二十面体球");
+    }
+
+    #[test]
+    fn cone_faces_outward_and_side_normals_tilt_up() {
+        let mesh = Mesh::cone(16);
+        assert_faces_point_outward(&mesh, "圆锥");
+        // 侧面的法线必须带向上的分量，否则光照看起来像圆柱。
+        assert!(mesh.vertices().iter().filter(|v| v.normal[1] > 0.1).count() >= 16 * 3);
+    }
+
+    #[test]
+    fn wireframe_splits_triangles_and_writes_barycentrics() {
+        let source = Mesh::cube();
+        let wire = source.wireframe();
+        assert_eq!(wire.triangle_count(), source.triangle_count());
+        assert_eq!(wire.vertices().len(), source.triangle_count() * 3);
+        for triangle in wire.vertices().chunks_exact(3) {
+            let uv1: Vec<[f32; 2]> = triangle.iter().map(|v| v.uv1).collect();
+            assert_eq!(uv1, vec![[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]]);
+        }
+        // 位置、法线原样保留。
+        assert_eq!(wire.aabb(), source.aabb());
     }
 }

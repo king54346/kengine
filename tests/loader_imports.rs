@@ -197,6 +197,11 @@ fn the_point_sprite_shader_still_validates() {
     kengine::krender::validate_material_hook(include_str!("../src/kpbr/src/points.wgsl")).unwrap();
 }
 
+#[test]
+fn the_wireframe_shader_still_validates() {
+    kengine::krender::validate_material_hook(include_str!("../src/kpbr/src/wireframe.wgsl")).unwrap();
+}
+
 /// 把 three.js 仓库里所有压缩纹理样本都过一遍。
 ///
 /// 这批文件覆盖了 DDS / KTX / KTX2 / PVR 四种容器和十几种像素格式，
