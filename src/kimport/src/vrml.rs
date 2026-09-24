@@ -198,7 +198,7 @@ async fn read_image(io: &Arc<dyn ResourceIo>, base: &Path, url: &str) -> Option<
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
-    Word,
+    Word(String),
     Str(String),
     Open,
     Close,

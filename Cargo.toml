@@ -534,6 +534,18 @@ name = "loader_vox"
 path = "examples/kengine/new/loader_vox.rs"
 
 [[example]]
+name = "loader_vrml"
+path = "examples/kengine/new/loader_vrml.rs"
+
+[[example]]
+name = "loader_xyz"
+path = "examples/kengine/new/loader_xyz.rs"
+
+[[example]]
+name = "lod"
+path = "examples/kengine/new/lod.rs"
+
+[[example]]
 name = "loader_gallery"
 path = "examples/kengine/new/loader_gallery.rs"
 
