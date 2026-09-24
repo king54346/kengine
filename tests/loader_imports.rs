@@ -198,6 +198,11 @@ fn the_point_sprite_shader_still_validates() {
 }
 
 #[test]
+fn the_unlit_shader_still_validates() {
+    kengine::krender::validate_material_hook(include_str!("../src/kpbr/src/unlit.wgsl")).unwrap();
+}
+
+#[test]
 fn the_wireframe_shader_still_validates() {
     kengine::krender::validate_material_hook(include_str!("../src/kpbr/src/wireframe.wgsl")).unwrap();
 }

@@ -362,6 +362,34 @@ fn bridge(outer: Vec<Vec2>, hole: Vec<Vec2>) -> Vec<Vec2> {
     merged
 }
 
+/// 把一个任意绕向的简单多边形切成三角形，下标指回输入，三角形的绕向
+/// 与输入一致（顺时针进、顺时针出）。
+///
+/// 给 VRML 的非凸面、Extrusion 端盖这类「一圈点围成一个面」的场合用；
+/// 带洞的走 [`fill`]。
+pub(crate) fn triangulate(points: &[Vec2]) -> Vec<u32> {
+    let area: f32 = (0..points.len())
+        .map(|i| {
+            let (a, b) = (points[i], points[(i + 1) % points.len()]);
+            a.x * b.y - b.x * a.y
+        })
+        .sum();
+    if area >= 0.0 {
+        return ear_clip(points);
+    }
+    // 顺时针：倒过来切，再把下标映射回去并把每个三角形的绕向翻回来。
+    let reversed: Vec<Vec2> = points.iter().rev().copied().collect();
+    let last = points.len() as u32 - 1;
+    let mut indices = ear_clip(&reversed);
+    for triangle in indices.chunks_exact_mut(3) {
+        for index in triangle.iter_mut() {
+            *index = last - *index;
+        }
+        triangle.swap(1, 2);
+    }
+    indices
+}
+
 /// 耳切。输入必须是逆时针的简单多边形。
 fn ear_clip(polygon: &[Vec2]) -> Vec<u32> {
     let count = polygon.len();

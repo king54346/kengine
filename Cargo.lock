@@ -2246,6 +2246,7 @@ dependencies = [
  "ruzstd",
  "serde_json",
  "texture2ddecoder",
+ "weezl",
 ]
 
 [[package]]

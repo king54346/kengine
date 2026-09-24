@@ -16,6 +16,7 @@
 #![warn(missing_docs)]
 
 mod avif;
+mod gif;
 pub mod container;
 mod loader;
 
@@ -233,6 +234,10 @@ impl Texture {
         // AVIF：`image` 的 AVIF 解码要 C 写的 dav1d，这里走纯 Rust 的那条。
         if avif::sniff(bytes) {
             let (width, height, rgba) = avif::decode(bytes)?;
+            return Ok(Self::new(width, height, rgba));
+        }
+        if gif::sniff(bytes) {
+            let (width, height, rgba) = gif::decode(bytes)?;
             return Ok(Self::new(width, height, rgba));
         }
         let image = image::load_from_memory(bytes).map_err(|e| TextureError(e.to_string()))?;
