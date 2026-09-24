@@ -60,6 +60,7 @@ pub mod threemf;
 pub mod tiles;
 pub mod vox;
 pub mod xml;
+pub mod xyz;
 pub mod zip;
 
 use kasset::{LoadError, ResourceIo};
@@ -92,12 +93,13 @@ pub use threedm::{Rhino3dmLoader, Rhino3dmSceneLoader};
 pub use threemf::ThreeMfLoader;
 pub use tiles::{B3dmLoader, TilesetLoader};
 pub use vox::VoxLoader;
+pub use xyz::XyzLoader;
 
 /// 常用类型的集中导出。
 pub mod prelude {
     pub use crate::{
         Md2Loader, MddLoader, NrrdLoader, ObjLoader, PcdLoader, PdbLoader, PlyLoader, StlLoader,
-        VoxLoader, md2::Md2, mdd::PointCache, nrrd::Volume, pcd::PointCloud, pdb::Molecule,
+        VoxLoader, XyzLoader, md2::Md2, mdd::PointCache, nrrd::Volume, pcd::PointCloud, pdb::Molecule,
     };
 }
 

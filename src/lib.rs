@@ -149,7 +149,7 @@ pub mod prelude {
     };
     pub use krender::{AntiAlias, PostSettings, RenderStats};
     pub use kscene::{
-        AnimationPlayer, Cell, Collider, Joint, LimbDesc, Node, Ragdoll, RagdollBuilder,
+        AnimationPlayer, Cell, Collider, Joint, LimbDesc, Lod, Node, Ragdoll, RagdollBuilder,
         RagdollLimb, RigidBody, Scene, SceneDebugOptions, SceneRayHit, ScriptSlot, Skin, SortMode,
         SoundSource, SpriteInstance, Streaming, Terrain, Transform, hinge_limits,
     };
