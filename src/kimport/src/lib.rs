@@ -23,7 +23,7 @@
 //! 装不进 `Model` 的才有自己的类型：[`pcd::PointCloud`]（点云）、
 //! [`pdb::Molecule`]（原子与化学键）、[`nrrd::Volume`]（体数据）、
 //! [`mdd::PointCache`]（逐帧顶点缓存）、[`svg::Document`]（二维路径）、
-//! [`lottie::Animation`]（矢量动画）。
+//! [`lottie::Animation`]（矢量动画）、[`vrml::VrmlScene`]（网格之外还有线、点和背景渐变）。
 //!
 //! ```no_run
 //! use kasset::ResourceManager;
@@ -59,6 +59,7 @@ pub mod threedm;
 pub mod threemf;
 pub mod tiles;
 pub mod vox;
+pub mod vrml;
 pub mod xml;
 pub mod xyz;
 pub mod zip;
@@ -93,13 +94,14 @@ pub use threedm::{Rhino3dmLoader, Rhino3dmSceneLoader};
 pub use threemf::ThreeMfLoader;
 pub use tiles::{B3dmLoader, TilesetLoader};
 pub use vox::VoxLoader;
+pub use vrml::VrmlLoader;
 pub use xyz::XyzLoader;
 
 /// 常用类型的集中导出。
 pub mod prelude {
     pub use crate::{
         Md2Loader, MddLoader, NrrdLoader, ObjLoader, PcdLoader, PdbLoader, PlyLoader, StlLoader,
-        VoxLoader, XyzLoader, md2::Md2, mdd::PointCache, nrrd::Volume, pcd::PointCloud, pdb::Molecule,
+        VoxLoader, VrmlLoader, XyzLoader, md2::Md2, mdd::PointCache, nrrd::Volume, pcd::PointCloud, pdb::Molecule,
     };
 }
 
