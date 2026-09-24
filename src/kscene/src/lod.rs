@@ -95,7 +95,8 @@ impl Lod {
         let distance = if distance.is_finite() { distance.abs() } else { f32::MAX };
         let level = LodLevel {
             distance,
-            hysteresis: hysteresis.clamp(0.0, 1.0),
+            // `NaN.clamp()` 还是 NaN，得单独挡。
+            hysteresis: if hysteresis.is_nan() { 0.0 } else { hysteresis.clamp(0.0, 1.0) },
         };
         let index = self.levels.partition_point(|l| l.distance <= distance);
         self.levels.insert(index, level);
@@ -233,7 +234,93 @@ mod tests {
         let mut lod = Lod::new();
         lod.add_level(f32::NAN, f32::INFINITY);
         lod.add_level(10.0, -1.0);
+        lod.add_level(20.0, f32::NAN);
         assert_eq!(lod.select(f32::NAN), 0);
         assert!(lod.levels().iter().all(|l| (0.0..=1.0).contains(&l.hysteresis)));
+    }
+}
+
+#[cfg(test)]
+mod scene_tests {
+    use super::*;
+    use crate::{Camera, Mesh, Node, Scene};
+    use kcore::pool::Handle;
+    use kmath::Vec3;
+
+    /// 一个三级 LOD 挂在原点，相机在 z = `distance` 处。
+    fn scene_at(distance: f32) -> (Scene, Handle<Node>, Vec<Handle<Node>>, Handle<Node>) {
+        let mut scene = Scene::new();
+        let camera = scene.add_node(
+            Node::new("Camera")
+                .with_camera(Camera::default())
+                .with_position(Vec3::new(0.0, 0.0, distance)),
+        );
+        let lod = scene.add_node(
+            Node::new("Lod").with_lod(Lod::new().with_level(0.0).with_level(50.0).with_level(300.0)),
+        );
+        let levels = (0..3)
+            .map(|detail| {
+                let child = scene.add_node(Node::new("level").with_mesh(Mesh::icosphere(detail)));
+                scene.link_nodes(child, lod);
+                child
+            })
+            .collect();
+        // 第一帧建相机索引，第二帧才量得到距离。
+        scene.update();
+        scene.update();
+        (scene, lod, levels, camera)
+    }
+
+    fn shown(scene: &Scene, levels: &[Handle<Node>]) -> Vec<bool> {
+        levels.iter().map(|&h| scene[h].global_visible).collect()
+    }
+
+    #[test]
+    fn only_the_selected_level_is_drawn() {
+        let (scene, lod, levels, _) = scene_at(100.0);
+        assert_eq!(scene[lod].lod().unwrap().current(), 1);
+        assert_eq!(shown(&scene, &levels), vec![false, true, false]);
+        assert_eq!(scene.visible_meshes().count(), 1, "没选中的级别不该进绘制列表");
+    }
+
+    #[test]
+    fn moving_the_camera_switches_level_in_the_same_frame() {
+        let (mut scene, _, levels, camera) = scene_at(10.0);
+        assert_eq!(shown(&scene, &levels), vec![true, false, false]);
+        scene[camera].transform.position = Vec3::new(0.0, 0.0, 1000.0);
+        scene.update();
+        assert_eq!(shown(&scene, &levels), vec![false, false, true]);
+    }
+
+    #[test]
+    fn user_visibility_flags_are_left_alone() {
+        let (mut scene, lod, levels, _) = scene_at(100.0);
+        for &h in &levels {
+            assert!(scene[h].visible, "LOD 不能改写用户的 visible");
+        }
+        // 整个 LOD 物体被用户藏起来时，选中的那一级也不画。
+        scene[lod].visible = false;
+        scene.update();
+        assert_eq!(shown(&scene, &levels), vec![false, false, false]);
+    }
+
+    #[test]
+    fn manual_selection_sticks_when_auto_update_is_off() {
+        let (mut scene, lod, levels, _) = scene_at(100.0);
+        let component = scene[lod].lod_mut().unwrap();
+        component.auto_update = false;
+        component.set_current(2);
+        scene.update();
+        assert_eq!(shown(&scene, &levels), vec![false, false, true]);
+    }
+
+    #[test]
+    fn lod_survives_a_scene_roundtrip() {
+        let (mut scene, lod, _, _) = scene_at(100.0);
+        let bytes = scene.save_to_vec().expect("存得下来");
+        let restored = Scene::load_from_slice(&bytes, None).expect("读得回来");
+        let levels: Vec<f32> =
+            restored[lod].lod().expect("LOD 该原样回来").levels().iter().map(|l| l.distance).collect();
+        assert_eq!(levels, vec![0.0, 50.0, 300.0]);
     }
 }
