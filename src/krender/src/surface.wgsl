@@ -68,17 +68,33 @@
 // 光照看起来比几何形状更「平」，这是实时位移贴图的通行取舍
 // （three.js 的 `MeshStandardMaterial.displacementMap` 也是这样）。
 struct VertexSurface {
-    // ── 只读 ──
+    // ── uv 两套可读可写：改了就是传给片元的那一份（主画面和阴影镂空一致），
+    //    也可以当两条自定义的逐顶点数据（three.js 的 varying）。
     /// 材质纹理坐标（未经 `uv_transform`，和顶点属性里的原始 `uv` 一致）。
     uv: vec2<f32>,
     /// 第二套纹理坐标（lightmap 用的那一套）。
     uv1: vec2<f32>,
+
+    // ── 只读 ──
     /// 引擎启动至今的秒数。
     time: f32,
-    /// 自定义材质参数，四个 `vec4` 槽位，与 `Surface.params` 同一份数据。
-    params: array<vec4<f32>, 4>,
+    /// 自定义材质参数，与 `Surface.params` 同一份数据。
+    params: MaterialParams,
+    /// 物体的模型矩阵（模型空间 → 世界空间）。蒙皮网格是单位阵（骨骼矩阵里已经含了位姿）。
+    ///
+    /// `position` 是模型空间的；要在世界空间里做事——正对相机的公告板（`globals.camera_position`
+    /// 是世界空间的）、按世界坐标的风场——先乘它，算完再换回模型空间写回 `position`。
+    model: mat4x4<f32>,
+    /// 顶点切线（xyz）和副切线手性（w）。没有法线贴图的网格里，这四个数也可以当一条自定义的
+    /// 逐顶点数据用（three.js 的自定义 attribute）。
+    tangent: vec4<f32>,
+    /// 实例化节点（`Node::with_instances`）里这个实例的自定义数据（`Instance::data`）；
+    /// 普通物体是 0。逐实例的颜色已经乘进基础色了，这一项留给钩子自己用（风的相位、生长进度……）。
+    instance_data: vec4<f32>,
 
     // ── 可写 ──
+    /// 顶点色（线性）。改了它，片元里的 `base_color` 乘的就是改过的值（主画面；阴影和预 pass 不看颜色）。
+    color: vec3<f32>,
     /// 模型空间坐标（形变之后、蒙皮之前）。
     position: vec3<f32>,
     /// 模型空间法线（同上）。
@@ -94,6 +110,9 @@ struct Surface {
     world_position: vec3<f32>,
     /// 插值后的几何法线（世界空间，已归一化）。
     geometric_normal: vec3<f32>,
+    /// 看到的是不是正面（three.js 的 `frontFacing`）。双面材质给背面换个颜色、剖切面上色时用。
+    /// `geometric_normal` 已经按它翻过了，背面上也朝着相机。
+    front_facing: bool,
     /// 已经过 `uv_transform` 的纹理坐标。
     uv: vec2<f32>,
     /// 第二套纹理坐标（lightmap 用），**不**经过 `uv_transform`——
@@ -118,16 +137,18 @@ struct Surface {
     tangent: vec3<f32>,
     /// 副切线：`cross(geometric_normal, tangent)` 乘手性。
     bitangent: vec3<f32>,
-    /// 自定义材质参数，四个 `vec4` 槽位。
+    /// 自定义材质参数，八个 `vec4` 槽位（类型别名 `MaterialParams`）。
     ///
     /// Rust 侧是 `material.set_param(i, ...)`，标量与 `vec2`/`vec3`
     /// 补零升到 `vec4`。**逐对象**，所以同一批实例可以各带各的值而
     /// 不打断合批。
     ///
-    /// 自定义贴图不在这里——那是两个全局变量 `custom_texture0` /
-    /// `custom_texture1`，钩子里直接
+    /// 自定义贴图不在这里——那是四个全局变量 `custom_texture0` …
+    /// `custom_texture3`，钩子里直接
     /// `textureSample(custom_texture0, base_color_sampler, surface.uv)`。
-    params: array<vec4<f32>, 4>,
+    params: MaterialParams,
+    /// 实例的自定义数据，和 `VertexSurface.instance_data` 同一份；普通物体是 0。
+    instance_data: vec4<f32>,
 
     // ── 可写：表面属性 ──
 
@@ -143,6 +164,12 @@ struct Surface {
     occlusion: f32,
     /// 自发光，不受光照影响。
     emissive: vec3<f32>,
+    /// **不被阴影挡的光**，`material_lighting` 往里累加（`(*surface).transmitted += ...`），最后加进颜色。
+    ///
+    /// 光照钩子的返回值会乘上阴影可见度——影子里返回什么都是 0。透过物体的光（玻璃、水后面的焦散，
+    /// 半透明物体的透光）恰恰落在影子里：按 `1 - input.visibility` 算一份加到这里，影子里就有了光
+    /// （three.js 的 `shadowMap.transmitted` 那类效果，这里由接收面自己画）。初值 0。
+    transmitted: vec3<f32>,
 };
 
 // ── 第二个钩子：光照模型 ──
@@ -220,6 +247,12 @@ struct LightingInput {
     /// 面光源的漫反射该用它代替 `n·l`：贴着板子的表面有半个天空是光源，
     /// 余弦积分接近 1，而指向中心的 `n·l` 可能很小。
     form_factor: f32,
+    /// 这盏灯在这一点的阴影可见度（1 = 完全受光，0 = 全在影子里，含接触阴影）。
+    ///
+    /// 引擎照样会在你返回之后把它乘上去，**一般用不着读**。读它的是只接影子的材质：
+    /// 自己不受光、只在影子处变暗（three.js 的 `ShadowMaterial`）——把
+    /// `(*surface).base_color.a` 改成 `max(原值, (1 − visibility) × 不透明度)`，返回 0。
+    visibility: f32,
 };
 
 // ── 第三个钩子：环境光 ──
@@ -249,6 +282,24 @@ struct LightingInput {
 // # 雾和自发光不在这里
 //
 // 它们在环境光之后，而且和「这个表面怎么反射环境」无关。
+
+// ── 第四个钩子：最终输出 ──
+//
+// 光照、环境光、雾、自发光全加完之后，写进 HDR 目标之前的最后一步（three.js 的 `outputNode`）。
+// 拿到的是这个片元最终的线性 HDR 颜色（rgb）和不透明度（a），返回改过的。
+//
+// ```wgsl
+// fn material_output(surface: ptr<function, Surface>, color: vec4<f32>) -> vec4<f32> {
+//     // 地球的夜面：背光的一侧换成城市灯光贴图（不受光照），按太阳朝向过渡。
+//     let night = textureSample(custom_texture1, base_color_sampler, (*surface).uv).rgb;
+//     let day = smoothstep(-0.25, 0.5, dot((*surface).geometric_normal, SUN));
+//     return vec4<f32>(mix(night, color.rgb, day), color.a);
+// }
+// ```
+//
+// 适合「按光照结果再混一层」的效果：昼夜交替、大气边缘光、把整个物体按亮度重新着色。
+// 只想加点自发光的用 `material_surface` 里的 `emissive` 就够了，那条路还会被雾衰减；这里不会。
+// 不写就是原样返回，零开销。
 
 struct AmbientInput {
     /// 引擎算好的漫反射环境光。

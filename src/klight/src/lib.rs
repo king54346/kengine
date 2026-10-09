@@ -155,6 +155,11 @@ pub struct Light {
     /// **只对聚光灯有意义**。点光源没有朝向，投不出图案；
     /// 方向光的投影是正交的，那要另一套矩阵。
     pub cookie: u32,
+    /// 阴影边缘的模糊半径，单位是**阴影图纹素**（three.js 的 `shadow.radius`）。
+    ///
+    /// 0 是默认的 3×3 等效 PCF（约一个纹素）。调大是一圈等宽的软边——和面光源那种「离遮挡物越远越糊」
+    /// 不是一回事（那个看 [`Light::rect`]，面光源忽略这个值）。上限 24：再大 5×5 的采样点就散成看得见的格子了。
+    pub shadow_radius: f32,
 }
 
 impl Default for Light {
@@ -169,6 +174,7 @@ impl Default for Light {
             // 「没设过掩码的灯」和「只在第 0 层的灯」就分不开了。
             mask: u32::MAX,
             cookie: 0,
+            shadow_radius: 0.0,
         }
     }
 }
@@ -287,6 +293,13 @@ impl kcore::visitor::Visit for Light {
         } else if region.is_reading() {
             self.cookie = 0;
         }
+
+        let mut radius = self.shadow_radius;
+        if radius.visit("ShadowRadius", &mut region).is_ok() {
+            self.shadow_radius = radius;
+        } else if region.is_reading() {
+            self.shadow_radius = 0.0;
+        }
         Ok(())
     }
 }
@@ -399,6 +412,57 @@ impl Light {
         self
     }
 
+    /// 按**光通量**（流明）设强度——灯泡包装盒上印的那个数。
+    ///
+    /// 换算和 three.js 的 `light.power` 一样：点光往整个球面发光，
+    /// 强度（坎德拉）= 流明 / 4π；聚光按 three.js 的约定是 流明 / π；
+    /// 面光源是 流明 / (π × 面积)。方向光和半球光没有「总光通量」可言，
+    /// 这里原样当强度用。
+    pub fn with_power(mut self, lumens: f32) -> Self {
+        self.set_power(lumens);
+        self
+    }
+
+    /// 改光通量。见 [`with_power`](Self::with_power)。
+    pub fn set_power(&mut self, lumens: f32) {
+        use std::f32::consts::PI;
+        self.intensity = match self.kind {
+            LightKind::Point { .. } => lumens / (4.0 * PI),
+            LightKind::Spot { .. } => lumens / PI,
+            LightKind::Rect { width, height, .. } => lumens / (PI * (width * height).max(1e-6)),
+            _ => lumens,
+        };
+    }
+
+    /// 当前的光通量（流明）。[`set_power`](Self::set_power) 的逆运算。
+    pub fn power(&self) -> f32 {
+        use std::f32::consts::PI;
+        match self.kind {
+            LightKind::Point { .. } => self.intensity * 4.0 * PI,
+            LightKind::Spot { .. } => self.intensity * PI,
+            LightKind::Rect { width, height, .. } => self.intensity * PI * width * height,
+            _ => self.intensity,
+        }
+    }
+
+    /// 半球光（天光）按**照度**（勒克斯）设强度：阴天 1000、正午直射 50000。
+    ///
+    /// 均匀天空的照度是 E 时，理想漫反射表面的出射辐射亮度是
+    /// 反照率 × E / π；引擎的半球光直接乘反照率，所以强度取 E / π。
+    pub fn with_illuminance(mut self, lux: f32) -> Self {
+        self.intensity = match self.kind {
+            LightKind::Hemisphere { .. } => lux / std::f32::consts::PI,
+            _ => lux,
+        };
+        self
+    }
+
+    /// 阴影边缘的模糊半径（阴影图纹素），见 [`Light::shadow_radius`]。
+    pub fn with_shadow_radius(mut self, texels: f32) -> Self {
+        self.shadow_radius = texels.clamp(0.0, 24.0);
+        self
+    }
+
     /// 让该光源投射阴影。
     pub fn with_shadows(mut self) -> Self {
         self.cast_shadows = true;
@@ -459,7 +523,13 @@ impl Light {
             direction: [direction.x, direction.y, direction.z, self.kind.range()],
             color: [self.color.x, self.color.y, self.color.z, self.intensity],
             params,
-            extra: [self.mask, self.cookie, 0, 0],
+            // w = 阴影模糊半径 × 100（整数存，纹素）。
+            extra: [
+                self.mask,
+                self.cookie,
+                0,
+                (self.shadow_radius.clamp(0.0, 24.0) * 100.0).round() as u32,
+            ],
             right: [right.x, right.y, right.z, tan_outer],
         }
     }
@@ -717,5 +787,29 @@ mod test {
         // 空槽位用默认值填充，强度为 0 时不会影响画面。
         let light = GpuLight::default();
         assert_eq!(light.color[3], 0.0);
+    }
+}
+
+#[cfg(test)]
+mod power_tests {
+    use super::*;
+
+    #[test]
+    fn power_round_trips_for_every_kind_that_has_one() {
+        for light in [
+            Light::point(10.0),
+            Light::spot(10.0, 20.0, 30.0),
+            Light::rect(2.0, 1.0, 10.0),
+        ] {
+            let light = light.with_power(1700.0);
+            assert!((light.power() - 1700.0).abs() < 1e-2, "{:?}", light.kind);
+        }
+    }
+
+    #[test]
+    fn a_100_watt_bulb_is_about_135_candela() {
+        // 1700 lm / 4π ≈ 135 cd——three.js 的 lights_physical 例子里那只灯泡。
+        let light = Light::point(10.0).with_power(1700.0);
+        assert!((light.intensity - 135.28).abs() < 0.1);
     }
 }

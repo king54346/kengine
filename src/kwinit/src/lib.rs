@@ -115,9 +115,8 @@ impl<H: AppHandler> ApplicationHandler for Backend<H> {
             }
         };
 
-        // 打开输入法。默认是关的——不开的话中日韩输入完全收不到，
-        // 而且不会有任何报错，表现为「打中文没反应」。
-        window.set_ime_allowed(true);
+        // 输入法默认关着（winit 的默认）：开着的话中文输入法会截走游戏按键——按 Shift 切中英文、
+        // 字母键弹候选框。要打字时由上层按需打开（kapp 看 `Input::ime_allowed`）。
 
         self.window = Some(window.clone());
         self.handler.on_resume(window);

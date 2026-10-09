@@ -18,7 +18,11 @@ loader! {
 }
 
 /// 解析 KMZ。
-pub async fn parse(bytes: Vec<u8>, path: PathBuf, _io: Arc<dyn ResourceIo>) -> Result<Model, LoadError> {
+pub async fn parse(
+    bytes: Vec<u8>,
+    path: PathBuf,
+    _io: Arc<dyn ResourceIo>,
+) -> Result<Model, LoadError> {
     let archive = zip::Archive::open(&bytes)?;
     let from_kml = archive
         .find_extension("kml")
@@ -38,24 +42,41 @@ pub async fn parse(bytes: Vec<u8>, path: PathBuf, _io: Arc<dyn ResourceIo>) -> R
             .entries()
             .iter()
             // macOS 打包会塞进 `__MACOSX/._xxx` 这种资源分叉文件，跳过。
-            .find(|e| e.name.to_ascii_lowercase().ends_with(".dae") && !e.name.starts_with("__MACOSX"))
+            .find(|e| {
+                e.name.to_ascii_lowercase().ends_with(".dae") && !e.name.starts_with("__MACOSX")
+            })
             .map(|e| e.name.clone())
             .ok_or_else(|| bad("KMZ 里没有 .dae 模型"))?,
     };
-    let data = archive.read_named(&dae).ok_or_else(|| bad(format!("KMZ 里的 {dae} 读不出来")))?;
-    let directory = dae.rsplit_once('/').map_or(String::new(), |(d, _)| format!("{d}/"));
-    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "KMZ".into());
+    let data = archive
+        .read_named(&dae)
+        .ok_or_else(|| bad(format!("KMZ 里的 {dae} 读不出来")))?;
+    let directory = dae
+        .rsplit_once('/')
+        .map_or(String::new(), |(d, _)| format!("{d}/"));
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "KMZ".into());
     let collada = collada::build_with(&data, &name, |file| {
         let file = file.replace('\\', "/");
         let file = file.trim_start_matches("./");
-        archive.read_named(&format!("{directory}{file}")).or_else(|| archive.read_named(file)).or_else(|| {
-            let base = file.rsplit('/').next().unwrap_or(file);
-            archive
-                .entries()
-                .iter()
-                .find(|e| e.name.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case(base)))
-                .and_then(|e| archive.read(e).ok())
-        })
+        archive
+            .read_named(&format!("{directory}{file}"))
+            .or_else(|| archive.read_named(file))
+            .or_else(|| {
+                let base = file.rsplit('/').next().unwrap_or(file);
+                archive
+                    .entries()
+                    .iter()
+                    .find(|e| {
+                        e.name
+                            .rsplit('/')
+                            .next()
+                            .is_some_and(|n| n.eq_ignore_ascii_case(base))
+                    })
+                    .and_then(|e| archive.read(e).ok())
+            })
     })?;
     Ok(collada.model)
 }

@@ -516,6 +516,7 @@ fn import_materials(
             } else {
                 ktexture::FilterMode::Linear
             },
+            ..Default::default()
         };
         let image = (*image)
             .clone()
@@ -539,10 +540,10 @@ fn import_materials(
                 .with_metallic(pbr.metallic_factor())
                 .with_roughness(pbr.roughness_factor());
 
-            if let Some(info) = pbr.base_color_texture() {
-                if let Some(texture) = texture_for(info.texture(), false) {
-                    material = material.with_base_color_texture(texture);
-                }
+            if let Some(info) = pbr.base_color_texture()
+                && let Some(texture) = texture_for(info.texture(), false)
+            {
+                material = material.with_base_color_texture(texture);
             }
             if let Some(info) = pbr.metallic_roughness_texture()
                 && let Some(texture) = texture_for(info.texture(), true)
@@ -576,18 +577,24 @@ fn import_materials(
             if source.alpha_mode() == gltf::material::AlphaMode::Blend {
                 material.set_blend_mode(kmaterial::BlendMode::Alpha);
             }
-            let mut physical = kpbr::physical::Physical::default();
-            physical.unlit = source.unlit();
-            physical.alpha_cutoff = if source.alpha_mode() == gltf::material::AlphaMode::Mask {
-                source.alpha_cutoff().unwrap_or(0.5)
-            } else {
-                0.0
+            let mut physical = kpbr::physical::Physical {
+                unlit: source.unlit(),
+                alpha_cutoff: if source.alpha_mode() == gltf::material::AlphaMode::Mask {
+                    source.alpha_cutoff().unwrap_or(0.5)
+                } else {
+                    0.0
+                },
+                ..Default::default()
             };
             physical.transmission = source
                 .transmission()
                 .map_or(0.0, |t| t.transmission_factor());
             physical.ior = source.ior().unwrap_or(1.5);
             physical.thickness = source.volume().map_or(0.0, |v| v.thickness_factor());
+            if let Some(volume) = source.volume() {
+                physical.attenuation_color = Vec3::from(volume.attenuation_color());
+                physical.attenuation_distance = volume.attenuation_distance();
+            }
             let number = |extension: &str, key: &str, default: f32| {
                 source
                     .extension_value(extension)

@@ -39,6 +39,27 @@ pub struct Node {
     /// 典型用法是「这盏灯只打在角色身上」——把角色放进一个单独的层，
     /// 那盏灯只开那一层。拿「把灯挪远」之类的物理手段去凑永远凑不准。
     pub light_mask: u32,
+    /// 属于哪些**渲染层**。位掩码，和相机的
+    /// [`Camera::layers`](kcamera::Camera::layers) 按位与，非零才被那台相机画。
+    ///
+    /// 默认是第 0 层（`1`）。和 `light_mask` 是两件事：那个管「哪些灯照我」，
+    /// 这个管「哪些相机看得见我」。
+    pub render_layers: u32,
+    /// 后处理遮罩：低 4 位各对应遮罩纹理的一个通道（r/g/b/a）。
+    ///
+    /// 非 0 的物体会被额外画进一张全屏遮罩，**可见**的部分写 1、被挡住的
+    /// 部分写 0.5——描边要分「看得见的边」和「藏在后面的边」两种颜色，
+    /// 选择性辉光只让被选中的东西发光，遮罩合成用它挖洞，全靠这张图。
+    ///
+    /// **不受相机层影响**：一个不在任何相机层里的物体照样能进遮罩，
+    /// 那正是「只当模板、不出现在画面里」的写法。
+    pub post_mask: u32,
+    /// 投不投影子。默认投。
+    ///
+    /// 典型的例外是**包着灯的东西**：灯泡的玻璃罩、标出光源位置的小球——
+    /// 它们投影的话，灯的阴影图里整个世界都在它们背后，什么都照不到。
+    /// three.js 的 `castShadow = false`。
+    pub casts_shadows: bool,
 
     pub(crate) mesh: Option<Mesh>,
     pub(crate) material: Option<Material>,
@@ -50,6 +71,8 @@ pub struct Node {
     /// 外观——同一份带分组的几何，两个节点该能配不一样的一组材质。
     /// 详见 `kmesh::MeshGroup` 的文档。
     pub(crate) materials: Vec<Material>,
+    /// 实例化：有它时网格按每个实例画一份（见 [`Instance`](crate::Instance)）。`Arc`：克隆节点不复制十万个实例。
+    pub(crate) instances: Option<std::sync::Arc<Vec<crate::Instance>>>,
     pub(crate) camera: Option<Camera>,
     pub(crate) light: Option<Light>,
     pub(crate) particles: Option<Box<ParticleSystem>>,
@@ -83,6 +106,16 @@ pub struct Node {
     pub(crate) global_visible: bool,
     /// 世界空间包围盒，由 `Scene::update` 维护。
     pub(crate) global_aabb: Aabb,
+    /// 上一次算世界变换时的局部变换。`transform` 是公开字段、谁都能直接改，
+    /// 没法在写入口子上标脏，所以 `Scene::update` 拿它比一下就知道动没动。
+    pub(crate) last_local: Transform,
+    /// 世界变换必须重算：新建、换了父节点、从别处复制过来。
+    pub(crate) world_dirty: bool,
+    /// 包围盒必须重算：世界变换变了、换了网格或改了网格顶点。
+    ///
+    /// 和 `world_dirty` 分开，是因为包围盒只给**可见的**节点算：
+    /// 隐藏时挪过的节点，重新显示那一帧也得补算。
+    pub(crate) bounds_dirty: bool,
 }
 
 impl Default for Node {
@@ -100,9 +133,13 @@ impl Node {
             visible: true,
             receives_decals: true,
             light_mask: u32::MAX,
+            render_layers: 1,
+            post_mask: 0,
+            casts_shadows: true,
             mesh: None,
             material: None,
             materials: Vec::new(),
+            instances: None,
             camera: None,
             light: None,
             // 装箱：粒子系统里有九个数组，直接内联会把每个 Node 撑大一大截，
@@ -125,6 +162,9 @@ impl Node {
             global_transform: Mat4::IDENTITY,
             global_visible: true,
             global_aabb: Aabb::EMPTY,
+            last_local: Transform::IDENTITY,
+            world_dirty: true,
+            bounds_dirty: true,
         }
     }
 
@@ -137,6 +177,35 @@ impl Node {
         self
     }
 
+    /// 实例化：网格按每个实例画一份，一次绘制画完。见 [`Instance`](crate::Instance)。
+    pub fn with_instances(mut self, instances: Vec<crate::Instance>) -> Self {
+        self.set_instances(instances);
+        self
+    }
+
+    /// 换一组实例。
+    pub fn set_instances(&mut self, instances: Vec<crate::Instance>) {
+        self.instances = Some(std::sync::Arc::new(instances));
+        self.bounds_dirty = true;
+    }
+
+    /// 不再实例化（网格画一份）。
+    pub fn clear_instances(&mut self) {
+        self.instances = None;
+        self.bounds_dirty = true;
+    }
+
+    /// 实例；没有实例化时是 `None`。
+    pub fn instances(&self) -> Option<&[crate::Instance]> {
+        self.instances.as_deref().map(Vec::as_slice)
+    }
+
+    /// 改实例（挪位置、换颜色）。改完包围盒下一帧重算。
+    pub fn instances_mut(&mut self) -> Option<&mut Vec<crate::Instance>> {
+        self.bounds_dirty = true;
+        self.instances.as_mut().map(std::sync::Arc::make_mut)
+    }
+
     /// 指定材质。未指定时渲染器使用标准材质。
     pub fn with_material(mut self, material: Material) -> Self {
         self.material = Some(material);
@@ -146,6 +215,24 @@ impl Node {
     /// 挂上光源。位置与朝向取自本节点的世界变换（照射方向为 -Z）。
     pub fn with_light(mut self, light: Light) -> Self {
         self.light = Some(light);
+        self
+    }
+
+    /// 指定这个物体属于哪些渲染层。见 [`render_layers`](Self::render_layers)。
+    pub fn with_render_layers(mut self, layers: u32) -> Self {
+        self.render_layers = layers;
+        self
+    }
+
+    /// 投不投影子，见 [`Node::casts_shadows`]。
+    pub fn with_casts_shadows(mut self, casts: bool) -> Self {
+        self.casts_shadows = casts;
+        self
+    }
+
+    /// 设置后处理遮罩位，见 [`Node::post_mask`]。
+    pub fn with_post_mask(mut self, mask: u32) -> Self {
+        self.post_mask = mask;
         self
     }
 
@@ -270,6 +357,12 @@ impl Node {
         self
     }
 
+    /// 指定局部旋转。
+    pub fn with_rotation(mut self, rotation: kmath::Quat) -> Self {
+        self.transform.rotation = rotation;
+        self
+    }
+
     /// 指定局部缩放。
     pub fn with_scale(mut self, scale: Vec3) -> Self {
         self.transform.scale = scale;
@@ -287,6 +380,7 @@ impl Node {
     /// 而剔除拿它当真相：不重算的话，物体会在还该看得见的时候被剔掉，
     /// 或者反过来，包围盒大得离谱拖慢剔除。
     pub fn mesh_mut(&mut self) -> Option<&mut Mesh> {
+        self.bounds_dirty = true;
         self.mesh.as_mut()
     }
 
@@ -301,6 +395,7 @@ impl Node {
     pub fn set_mesh(&mut self, mesh: Mesh) {
         self.morph_weights = mesh.morph_weights().to_vec();
         self.mesh = Some(mesh);
+        self.bounds_dirty = true;
     }
 
     /// 挂上（或替换）材质。
@@ -393,6 +488,36 @@ impl Node {
     /// 骨架的可变引用。
     pub fn skin_mut(&mut self) -> Option<&mut Skin> {
         self.skin.as_deref_mut()
+    }
+
+    /// 蒙皮之后每个顶点的**世界**坐标（CPU 上算一遍，和 GPU 蒙皮同一个公式）。
+    ///
+    /// 蒙皮在顶点着色器里做，CPU 侧的网格永远是绑定姿态。要拿到「此刻角色的形状」
+    /// ——把顶点当点云画、从身上发射粒子、按真实姿态做命中——就用这个。
+    /// 骨骼矩阵是上一次场景更新算的（`Scene::update` 之后调）。
+    /// 不是蒙皮网格（没有网格、没有骨架或网格没有蒙皮数据）时返回 [`None`]。形变目标不计入。
+    pub fn skinned_positions(&self) -> Option<Vec<Vec3>> {
+        let mesh = self.mesh()?;
+        let skin_data = mesh.skin()?;
+        let matrices = self.skin()?.matrices();
+        Some(
+            mesh.vertices()
+                .iter()
+                .zip(skin_data)
+                .map(|(vertex, influence)| {
+                    let position = vertex.position();
+                    let mut skinned = Vec3::ZERO;
+                    for (joint, weight) in influence.joints.iter().zip(influence.weights) {
+                        if weight > 0.0
+                            && let Some(matrix) = matrices.get(usize::from(*joint))
+                        {
+                            skinned += matrix.transform_point3(position) * weight;
+                        }
+                    }
+                    skinned
+                })
+                .collect(),
+        )
     }
 
     /// 动画播放器的只读引用。

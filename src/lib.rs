@@ -60,6 +60,7 @@ pub use kapp;
 pub use kasset;
 pub use kaudio;
 pub use kcamera;
+pub use kcomponents;
 pub use kcore;
 pub use kfont;
 pub use kgizmo;
@@ -67,10 +68,12 @@ pub use kgltf;
 pub use kimport;
 pub use kinput;
 pub use klight;
+pub use klocale;
 pub use klog;
 pub use kmaterial;
 pub use kmath;
 pub use kmesh;
+pub use knav;
 pub use kparticle;
 pub use kpbr;
 pub use kphysics;
@@ -84,7 +87,9 @@ pub use kterrain;
 pub use ktexture;
 pub use kui;
 pub use kui_widgets;
+pub use kvideo;
 pub use kwinit;
+pub use kxunxian;
 
 mod task;
 
@@ -96,21 +101,21 @@ pub mod prelude {
         ResourceManager,
     };
     pub use kcamera::{
-        Camera, FlyCamera, Frustum, OrbitCamera, PanCamera, Projection, ScreenShake,
+        Camera, CameraTarget, FlyCamera, Frustum, OrbitCamera, PanCamera, Projection, ScreenShake,
     };
     pub use kcore::pool::Handle;
     // `Color` 在引擎里只有调试线用得上，导出时冠上来源，免得和材质的
     // 颜色向量混起来。
     pub use kgizmo::{Color as GizmoColor, Gizmos, Layer as GizmoLayer, LineSet, LineSetBuilder};
     pub use kgltf::{GltfLoader, Model};
-    pub use kinput::{Binding, Input, KeyCode, MouseButton};
+    pub use kinput::{Binding, GamepadAxis, GamepadButton, Input, KeyCode, MouseButton};
     pub use kmaterial::{Material, MaterialValue};
     // `Plane` 出现在 `kparticle::Collision::planes` 的签名里，
     // 不放进 prelude 的话用起来要额外写一行 `use kengine::kmath::Plane`。
     // 几何图元（`Circle`、`Sphere`…）**有意不放进来**：那些名字太通用，
     // 放进 prelude 容易和游戏自己的类型撞。要用就显式
     // `use kengine::kmath::Circle`。
-    pub use kmath::{Aabb, EulerRot, Mat4, Plane, Quat, Rng, Vec2, Vec3, Vec4};
+    pub use kmath::{Aabb, EulerRot, Mat3, Mat4, Plane, Quat, Rng, Vec2, Vec3, Vec4};
     // 动画状态机的 `State` 与阶段调度的 `Stage` 容易混淆，这里按原名导出，
     // 用的时候看得见它来自哪个体系。
     pub use kanim::{
@@ -121,8 +126,10 @@ pub mod prelude {
         Attenuation, AudioBuffer, AudioDevice, AudioLoader, Listener, Mixer, Sound, Spatial, Status,
     };
     pub use kfont::{Align as TextAlign, Font, TextStyle, Wrap as TextWrap};
+    // 本地化：`tr!("key")` / `tr!("key", name = value)`（宏和函数同名，一起导出）。
     pub use klight::cascade::{Cascade, CascadeSettings};
     pub use klight::{Light, LightKind};
+    pub use klocale::{FtlLoader, StringTable, tr};
     // IES 配光曲线：和 `HdrImage` / `HdrLoader` 同一个待遇——
     // 一个数据类型加一个加载器，摆灯时要用。
     pub use klight::ies::{IesLoader, IesProfile};
@@ -136,6 +143,7 @@ pub mod prelude {
         PbrMaterial,
         hdr::HdrImage,
         loader::HdrLoader,
+        phong::{PhongExt, PhongMaterial},
         prefilter::{PrefilterSettings, prefilter},
         // 光照探针现在管的是**漫反射和镜面两半**，不再只是「反射探针」，
         // 摆场景时几乎一定会用到，所以进 prelude。
@@ -147,18 +155,22 @@ pub mod prelude {
         RayCastOptions, RayHit, RigidBodyDesc, RigidBodyType, ShapeCastOptions, SoftBody,
         SoftBodySettings, SphericalLimits, VehicleController, WheelDesc, WheelState, WheelTuning,
     };
-    pub use krender::{AntiAlias, PostSettings, RenderStats};
+    pub use krender::{
+        AntiAlias, ContactShadows, PassOutput, PostEffect, PostInputs, PostSettings, PostStack,
+        PostStage, PresentMode, RenderStats, SsaoSettings, ToneMapping, Upscaling, effects,
+    };
     pub use kscene::{
-        AnimationPlayer, Cell, Collider, Joint, LimbDesc, Lod, Node, Ragdoll, RagdollBuilder,
-        RagdollLimb, RigidBody, Scene, SceneDebugOptions, SceneRayHit, ScriptSlot, Skin, SortMode,
-        SoundSource, SpriteInstance, Streaming, Terrain, Transform, hinge_limits,
+        AnimationPlayer, Cell, Collider, Instance, Joint, LimbDesc, Lod, NavGrid, NavGridSettings,
+        Node, Ragdoll, RagdollBuilder, RagdollLimb, RigidBody, Scene, SceneDebugOptions,
+        SceneRayHit, ScriptSlot, Skin, SortMode, SoundSource, SpriteInstance, Streaming, Terrain,
+        Transform, hinge_limits,
     };
     pub use kscript::{Script, ScriptLoader, ScriptRuntime, ScriptStats, Signal};
     pub use kshader::{Shader, ShaderLoader};
     pub use ksprite::{
         Anchor, Atlas, PlayMode, Slices, Sprite, SpriteAnimation, SpriteRegion, TileMap,
     };
-    pub use ktexture::{Sampler, Texture, TextureLoader};
+    pub use ktexture::{FilterMode, Sampler, Texture, TextureFormat, TextureLoader, WrapMode};
     // 核心层：布局、样式、绘制图元。
     pub use kui::{
         AlignCross, Direction as UiDirection, Display as UiDisplay, Edges, Id as UiId, Justify,

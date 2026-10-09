@@ -263,6 +263,37 @@ impl Model {
         self.skins.get(index)
     }
 
+    /// 把 `other` 的动画剪辑按**节点名**换到本模型上，返回换好的剪辑。
+    ///
+    /// Mixamo 那套工作流：角色一个文件，每个动作各一个文件，骨架节点同名。动作文件导进来是一整个模型，
+    /// 剪辑的轨道指向**它自己**的节点序号；这里按名字找到本模型里的同名节点、把序号换过来。
+    /// 本模型里找不到同名节点的轨道丢掉（动作文件多带的网格节点之类）。
+    pub fn retarget_animations_from(&self, other: &Model) -> Vec<AnimationClip> {
+        let mapping: Vec<Option<usize>> = other
+            .nodes
+            .iter()
+            .map(|node| self.find_node(&node.name))
+            .collect();
+        other
+            .animations
+            .iter()
+            .map(|clip| {
+                let tracks = clip
+                    .tracks()
+                    .iter()
+                    .filter_map(|track| {
+                        let target = mapping.get(track.target).copied().flatten()?;
+                        Some(kanim::Track {
+                            target,
+                            channel: track.channel.clone(),
+                        })
+                    })
+                    .collect();
+                AnimationClip::new(clip.name(), tracks)
+            })
+            .collect()
+    }
+
     /// 全部动画剪辑，可与其它实例共享。
     pub fn animations(&self) -> &Arc<Vec<AnimationClip>> {
         &self.animations

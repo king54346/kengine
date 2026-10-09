@@ -1635,7 +1635,7 @@ fn packed_io() -> Option<std::sync::Arc<dyn kengine::kasset::ResourceIo>> {
         return None;
     }
 
-    let mut writer = PackWriter::new();
+    let mut writer = PackWriter::new().compressed();
     let count = writer.add_directory("assets").unwrap_or(0);
     let bytes = writer.finish();
     klog::info!(

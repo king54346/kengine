@@ -67,7 +67,9 @@ impl<'a> Archive<'a> {
         let mut at = u32_at(bytes, eocd + 16)? as usize;
         if count == 0xffff || at == 0xffff_ffff {
             // ZIP64：目录尾之前 20 字节是定位记录，它指向真正的 ZIP64 目录尾。
-            let locator = eocd.checked_sub(20).ok_or_else(|| bad("ZIP64 定位记录缺失"))?;
+            let locator = eocd
+                .checked_sub(20)
+                .ok_or_else(|| bad("ZIP64 定位记录缺失"))?;
             if u32_at(bytes, locator)? != 0x0706_4b50 {
                 return Err(bad("ZIP64 定位记录缺失"));
             }
@@ -173,7 +175,10 @@ impl<'a> Archive<'a> {
                     .map_err(|e| bad(format!("ZIP 条目 {} 解压失败：{e}", entry.name)))?;
                 Ok(out)
             }
-            other => Err(bad(format!("ZIP 条目 {} 用了不支持的压缩方式 {other}", entry.name))),
+            other => Err(bad(format!(
+                "ZIP 条目 {} 用了不支持的压缩方式 {other}",
+                entry.name
+            ))),
         }
     }
 

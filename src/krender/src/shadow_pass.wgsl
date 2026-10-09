@@ -5,6 +5,8 @@ struct ShadowGlobals {
     light_view_proj: mat4x4<f32>,
     // x = 深度偏移，y = 法线偏移，z = 阴影贴图边长，w = 是否启用（0/1）
     params: vec4<f32>,
+    // x = 秒（这里用不上；带顶点钩子的材质那条阴影管线要，见 shadow_hooked.wgsl）
+    frame: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> shadow_globals: ShadowGlobals;
@@ -27,6 +29,24 @@ struct MorphDelta {
 @group(1) @binding(1) var<storage, read> shadow_joints: array<mat4x4<f32>>;
 @group(1) @binding(2) var<storage, read> shadow_morph_deltas: array<MorphDelta>;
 @group(1) @binding(3) var<storage, read> shadow_morph_weights: array<f32>;
+// 主 pass 的实例槽和实例数据（见 geometry.wgsl）：x = 对象下标，y = 实例数据下标或 NO_INSTANCE。
+@group(1) @binding(4) var<storage, read> shadow_instance_slots: array<vec2<u32>>;
+struct ShadowInstance {
+    transform: mat4x4<f32>,
+    color: vec4<f32>,
+    data: vec4<f32>,
+};
+@group(1) @binding(5) var<storage, read> shadow_instances: array<ShadowInstance>;
+
+// 这个 GPU 实例的对象，模型矩阵已经乘上了实例的局部变换。
+fn shadow_object(instance: u32) -> ShadowObject {
+    let slot = shadow_instance_slots[instance];
+    var object = shadow_objects[slot.x];
+    if (slot.y != 0xffffffffu) {
+        object.model = object.model * shadow_instances[slot.y].transform;
+    }
+    return object;
+}
 
 // 深度 pass 只关心位置，法线增量用不上。
 fn shadow_morph_position(vertex_index: u32, object: ShadowObject, position: vec3<f32>) -> vec3<f32> {
@@ -55,7 +75,7 @@ fn shadow_vs(
     @builtin(vertex_index) vertex_index: u32,
     @builtin(instance_index) instance: u32,
 ) -> @builtin(position) vec4<f32> {
-    let object = shadow_objects[instance];
+    let object = shadow_object(instance);
     // 形变也要参与投影，否则张开的嘴投出来的影子还是闭着的。
     let morphed = shadow_morph_position(vertex_index, object, position);
     return shadow_globals.light_view_proj * object.model * vec4<f32>(morphed, 1.0);
@@ -70,7 +90,7 @@ fn shadow_skinned_vs(
     @builtin(vertex_index) vertex_index: u32,
     @builtin(instance_index) instance: u32,
 ) -> @builtin(position) vec4<f32> {
-    let object = shadow_objects[instance];
+    let object = shadow_object(instance);
     let morphed = shadow_morph_position(vertex_index, object, position);
     let offset = object.skin.x;
     let skin = weights.x * shadow_joints[offset + joints.x]

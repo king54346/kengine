@@ -90,12 +90,11 @@ impl ResourceManager {
         let resource = UntypedResource::new_pending(path.clone());
         state.resources.insert(path.clone(), resource.clone());
 
-        let extension = path
-            .extension()
-            .map(|e| e.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        let Some(loader) = state.loaders.find(&extension) else {
+        let Some((loader, _)) = state.loaders.find_for_path(&path) else {
+            let extension = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_default();
             klog::warn!("没有能处理 `{extension}` 的加载器：{}", path.display());
             resource
                 .clone()
@@ -147,11 +146,7 @@ impl ResourceManager {
             return false;
         };
 
-        let extension = path
-            .extension()
-            .map(|e| e.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let Some(loader) = state.loaders.find(&extension) else {
+        let Some((loader, _)) = state.loaders.find_for_path(&path) else {
             return false;
         };
 

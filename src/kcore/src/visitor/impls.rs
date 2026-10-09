@@ -319,7 +319,7 @@ where
                     None => {
                         return Err(VisitError::SharedReferenceNotUnique(
                             std::any::type_name::<T>(),
-                        ))
+                        ));
                     }
                 }
             }
@@ -425,7 +425,7 @@ where
                     None => {
                         return Err(VisitError::SharedReferenceNotUnique(
                             std::any::type_name::<T>(),
-                        ))
+                        ));
                     }
                 }
             }
@@ -480,7 +480,9 @@ where
             if serialize_data {
                 // 从 Weak 升级出来的 `Rc` 必然与数据的所有者共享（升级本身就多出一个
                 // 强引用），无法独占访问其内容，这里没有安全路径，只能报错。
-                return Err(VisitError::SharedReferenceNotUnique(std::any::type_name::<T>()));
+                return Err(VisitError::SharedReferenceNotUnique(
+                    std::any::type_name::<T>(),
+                ));
             }
         } else {
             let mut index = 0u64;
@@ -535,7 +537,9 @@ where
             id.visit("Id", &mut region)?;
             if serialize_data {
                 // 从 Weak 升级出来的 `Arc` 必然与数据的所有者共享，无法独占访问。
-                return Err(VisitError::SharedReferenceNotUnique(std::any::type_name::<T>()));
+                return Err(VisitError::SharedReferenceNotUnique(
+                    std::any::type_name::<T>(),
+                ));
             }
         } else {
             let mut index = 0u64;

@@ -684,3 +684,20 @@ fn a_reloaded_script_starts_from_a_clean_state() {
 
     assert_eq!(signals[0].value, 1.0, "重载后计数该从头开始");
 }
+
+#[test]
+fn a_reloaded_script_keeps_what_it_saves() {
+    // 实现了 `_save` / `_load` 的脚本，重载前存、重载后读——改一行代码不用从头再玩。
+    let source = "let n = 0; return { _process() { n += 1; emit('n', n); }, _save() { return { n }; }, _load(s) { n = s.n; } };";
+    let manager = resources(&[("a.js", source)]);
+    let mut runtime = ScriptRuntime::new();
+    let mut scene = Scene::new();
+    scene.add_node(Node::new("n").with_script("a.js"));
+
+    process(&mut runtime, &mut scene, &manager, 3, 0.016);
+    let manager = resources(&[("a.js", &source.replace("n += 1", "n += 10"))]);
+    runtime.reload_path(&mut scene, std::path::Path::new("a.js"));
+    let signals = process(&mut runtime, &mut scene, &manager, 1, 0.016);
+
+    assert_eq!(signals[0].value, 13.0, "新代码接着旧状态往下走");
+}

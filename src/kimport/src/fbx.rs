@@ -146,10 +146,14 @@ impl FbxNode {
     }
     /// 子记录的第一个属性当数组读（ASCII 的 `*N { a: ... }` 与二进制数组都在这里）。
     fn array_f64(&self, name: &str) -> Vec<f64> {
-        self.child(name).map(|c| c.props.iter().flat_map(Prop::floats).collect()).unwrap_or_default()
+        self.child(name)
+            .map(|c| c.props.iter().flat_map(Prop::floats).collect())
+            .unwrap_or_default()
     }
     fn array_i64(&self, name: &str) -> Vec<i64> {
-        self.child(name).map(|c| c.props.iter().flat_map(Prop::ints).collect()).unwrap_or_default()
+        self.child(name)
+            .map(|c| c.props.iter().flat_map(Prop::ints).collect())
+            .unwrap_or_default()
     }
     fn child_str(&self, name: &str) -> Option<&str> {
         self.child(name)?.props.first()?.as_str()
@@ -177,11 +181,20 @@ impl FbxNode {
 fn properties(node: &FbxNode) -> HashMap<String, Vec<Prop>> {
     let mut out = HashMap::new();
     for block in ["Properties70", "Properties60"] {
-        let Some(table) = node.child(block) else { continue };
+        let Some(table) = node.child(block) else {
+            continue;
+        };
         let skip = if block == "Properties70" { 4 } else { 3 };
-        for p in table.children.iter().filter(|c| c.name == "P" || c.name == "Property") {
+        for p in table
+            .children
+            .iter()
+            .filter(|c| c.name == "P" || c.name == "Property")
+        {
             if let Some(name) = p.props.first().and_then(Prop::as_str) {
-                out.insert(name.to_string(), p.props.iter().skip(skip).cloned().collect());
+                out.insert(
+                    name.to_string(),
+                    p.props.iter().skip(skip).cloned().collect(),
+                );
             }
         }
     }
@@ -214,13 +227,23 @@ struct Binary<'a> {
 
 impl Binary<'_> {
     fn u32(&self, at: usize) -> Result<u32, LoadError> {
-        self.data.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().expect("4 字节"))).ok_or_else(|| bad("FBX 被截断"))
+        self.data
+            .get(at..at + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().expect("4 字节")))
+            .ok_or_else(|| bad("FBX 被截断"))
     }
     fn u64(&self, at: usize) -> Result<u64, LoadError> {
-        self.data.get(at..at + 8).map(|b| u64::from_le_bytes(b.try_into().expect("8 字节"))).ok_or_else(|| bad("FBX 被截断"))
+        self.data
+            .get(at..at + 8)
+            .map(|b| u64::from_le_bytes(b.try_into().expect("8 字节")))
+            .ok_or_else(|| bad("FBX 被截断"))
     }
     fn offset(&self, at: usize) -> Result<(u64, usize), LoadError> {
-        if self.wide { Ok((self.u64(at)?, 8)) } else { Ok((self.u32(at)? as u64, 4)) }
+        if self.wide {
+            Ok((self.u64(at)?, 8))
+        } else {
+            Ok((self.u32(at)? as u64, 4))
+        }
     }
 
     /// 读一个节点记录，返回 `(节点, 下一条记录的位置)`；空记录返回 `None`。
@@ -240,7 +263,12 @@ impl Binary<'_> {
             return Err(bad("FBX 节点记录越界"));
         }
         let name_at = at + 3 * w + 1;
-        let name = String::from_utf8_lossy(self.data.get(name_at..name_at + name_len).ok_or_else(|| bad("FBX 被截断"))?).into_owned();
+        let name = String::from_utf8_lossy(
+            self.data
+                .get(name_at..name_at + name_len)
+                .ok_or_else(|| bad("FBX 被截断"))?,
+        )
+        .into_owned();
         let mut cursor = name_at + name_len;
         let mut props = Vec::with_capacity(count.min(1024) as usize);
         for _ in 0..count {
@@ -257,31 +285,67 @@ impl Binary<'_> {
             }
             cursor = next;
         }
-        Ok((Some(FbxNode { name, props, children }), end))
+        Ok((
+            Some(FbxNode {
+                name,
+                props,
+                children,
+            }),
+            end,
+        ))
     }
 
     fn prop(&self, at: usize) -> Result<(Prop, usize), LoadError> {
         let kind = *self.data.get(at).ok_or_else(|| bad("FBX 被截断"))?;
         let body = at + 1;
-        let slice = |n: usize| self.data.get(body..body + n).ok_or_else(|| bad("FBX 属性被截断"));
+        let slice = |n: usize| {
+            self.data
+                .get(body..body + n)
+                .ok_or_else(|| bad("FBX 属性被截断"))
+        };
         Ok(match kind {
             b'C' | b'B' => (Prop::Int(slice(1)?[0] as i64), body + 1),
-            b'Y' => (Prop::Int(i16::from_le_bytes(slice(2)?.try_into().expect("2")) as i64), body + 2),
-            b'I' => (Prop::Int(i32::from_le_bytes(slice(4)?.try_into().expect("4")) as i64), body + 4),
-            b'L' => (Prop::Int(i64::from_le_bytes(slice(8)?.try_into().expect("8"))), body + 8),
-            b'F' => (Prop::Float(f32::from_le_bytes(slice(4)?.try_into().expect("4")) as f64), body + 4),
-            b'D' => (Prop::Float(f64::from_le_bytes(slice(8)?.try_into().expect("8"))), body + 8),
+            b'Y' => (
+                Prop::Int(i16::from_le_bytes(slice(2)?.try_into().expect("2")) as i64),
+                body + 2,
+            ),
+            b'I' => (
+                Prop::Int(i32::from_le_bytes(slice(4)?.try_into().expect("4")) as i64),
+                body + 4,
+            ),
+            b'L' => (
+                Prop::Int(i64::from_le_bytes(slice(8)?.try_into().expect("8"))),
+                body + 8,
+            ),
+            b'F' => (
+                Prop::Float(f32::from_le_bytes(slice(4)?.try_into().expect("4")) as f64),
+                body + 4,
+            ),
+            b'D' => (
+                Prop::Float(f64::from_le_bytes(slice(8)?.try_into().expect("8"))),
+                body + 8,
+            ),
             b'S' | b'R' => {
                 let n = self.u32(body)? as usize;
-                let bytes = self.data.get(body + 4..body + 4 + n).ok_or_else(|| bad("FBX 字符串被截断"))?;
-                let prop = if kind == b'S' { Prop::Str(String::from_utf8_lossy(bytes).into_owned()) } else { Prop::Bytes(bytes.to_vec()) };
+                let bytes = self
+                    .data
+                    .get(body + 4..body + 4 + n)
+                    .ok_or_else(|| bad("FBX 字符串被截断"))?;
+                let prop = if kind == b'S' {
+                    Prop::Str(String::from_utf8_lossy(bytes).into_owned())
+                } else {
+                    Prop::Bytes(bytes.to_vec())
+                };
                 (prop, body + 4 + n)
             }
             b'f' | b'd' | b'l' | b'i' | b'b' => {
                 let length = self.u32(body)? as usize;
                 let encoding = self.u32(body + 4)?;
                 let compressed = self.u32(body + 8)? as usize;
-                let raw = self.data.get(body + 12..body + 12 + compressed).ok_or_else(|| bad("FBX 数组被截断"))?;
+                let raw = self
+                    .data
+                    .get(body + 12..body + 12 + compressed)
+                    .ok_or_else(|| bad("FBX 数组被截断"))?;
                 let width = match kind {
                     b'd' | b'l' => 8,
                     b'b' => 1,
@@ -304,10 +368,30 @@ impl Binary<'_> {
                     return Err(bad("FBX 数组长度不足"));
                 }
                 let prop = match kind {
-                    b'f' => Prop::Floats(data.chunks_exact(4).take(length).map(|c| f32::from_le_bytes(c.try_into().expect("4")) as f64).collect()),
-                    b'd' => Prop::Floats(data.chunks_exact(8).take(length).map(|c| f64::from_le_bytes(c.try_into().expect("8"))).collect()),
-                    b'l' => Prop::Ints(data.chunks_exact(8).take(length).map(|c| i64::from_le_bytes(c.try_into().expect("8"))).collect()),
-                    b'i' => Prop::Ints(data.chunks_exact(4).take(length).map(|c| i32::from_le_bytes(c.try_into().expect("4")) as i64).collect()),
+                    b'f' => Prop::Floats(
+                        data.chunks_exact(4)
+                            .take(length)
+                            .map(|c| f32::from_le_bytes(c.try_into().expect("4")) as f64)
+                            .collect(),
+                    ),
+                    b'd' => Prop::Floats(
+                        data.chunks_exact(8)
+                            .take(length)
+                            .map(|c| f64::from_le_bytes(c.try_into().expect("8")))
+                            .collect(),
+                    ),
+                    b'l' => Prop::Ints(
+                        data.chunks_exact(8)
+                            .take(length)
+                            .map(|c| i64::from_le_bytes(c.try_into().expect("8")))
+                            .collect(),
+                    ),
+                    b'i' => Prop::Ints(
+                        data.chunks_exact(4)
+                            .take(length)
+                            .map(|c| i32::from_le_bytes(c.try_into().expect("4")) as i64)
+                            .collect(),
+                    ),
                     _ => Prop::Ints(data.iter().take(length).map(|&b| b as i64).collect()),
                 };
                 (prop, body + 12 + compressed)
@@ -318,8 +402,16 @@ impl Binary<'_> {
 }
 
 fn parse_binary(data: &[u8]) -> Result<Vec<FbxNode>, LoadError> {
-    let version = u32::from_le_bytes(data.get(23..27).ok_or_else(|| bad("FBX 头部被截断"))?.try_into().expect("4"));
-    let reader = Binary { data, wide: version >= 7500 };
+    let version = u32::from_le_bytes(
+        data.get(23..27)
+            .ok_or_else(|| bad("FBX 头部被截断"))?
+            .try_into()
+            .expect("4"),
+    );
+    let reader = Binary {
+        data,
+        wide: version >= 7500,
+    };
     let mut at = 27;
     let mut nodes = Vec::new();
     while at < data.len() {
@@ -369,7 +461,9 @@ impl Lexer<'_> {
             }
             break;
         }
-        let Some(&c) = self.text.get(self.at) else { return Token::Eof };
+        let Some(&c) = self.text.get(self.at) else {
+            return Token::Eof;
+        };
         self.at += 1;
         match c {
             b',' => Token::Comma,
@@ -389,7 +483,10 @@ impl Lexer<'_> {
             }
             _ => {
                 let start = self.at - 1;
-                while self.at < self.text.len() && !matches!(self.text[self.at], b',' | b'{' | b'}' | b':' | b'"') && !self.text[self.at].is_ascii_whitespace() {
+                while self.at < self.text.len()
+                    && !matches!(self.text[self.at], b',' | b'{' | b'}' | b':' | b'"')
+                    && !self.text[self.at].is_ascii_whitespace()
+                {
                     self.at += 1;
                 }
                 let word = String::from_utf8_lossy(&self.text[start..self.at]).into_owned();
@@ -431,7 +528,10 @@ fn ascii_nodes(lexer: &mut Lexer, depth: usize) -> Result<Vec<FbxNode>, LoadErro
 }
 
 fn ascii_node(lexer: &mut Lexer, name: String, depth: usize) -> Result<FbxNode, LoadError> {
-    let mut node = FbxNode { name, ..Default::default() };
+    let mut node = FbxNode {
+        name,
+        ..Default::default()
+    };
     loop {
         match lexer.peek().clone() {
             Token::Value(v) => {
@@ -469,7 +569,11 @@ fn ascii_node(lexer: &mut Lexer, name: String, depth: usize) -> Result<FbxNode, 
                         return Err(bad("FBX 数组超过上限"));
                     }
                 }
-                node.props.push(if all_int { Prop::Ints(ints) } else { Prop::Floats(floats) });
+                node.props.push(if all_int {
+                    Prop::Ints(ints)
+                } else {
+                    Prop::Floats(floats)
+                });
             }
             Token::Open => {
                 lexer.next();
@@ -486,7 +590,11 @@ pub fn parse_document(bytes: &[u8]) -> Result<Vec<FbxNode>, LoadError> {
     if bytes.starts_with(BINARY_MAGIC) {
         parse_binary(bytes)
     } else {
-        let mut lexer = Lexer { text: bytes, at: 0, peeked: None };
+        let mut lexer = Lexer {
+            text: bytes,
+            at: 0,
+            peeked: None,
+        };
         ascii_nodes(&mut lexer, 0)
     }
 }
@@ -504,22 +612,35 @@ struct Scene<'a> {
 
 impl<'a> Scene<'a> {
     fn children(&self, parent: i64) -> impl Iterator<Item = (i64, Option<&str>)> + '_ {
-        self.connections.iter().filter(move |c| c.1 == parent).map(|c| (c.0, c.2.as_deref()))
+        self.connections
+            .iter()
+            .filter(move |c| c.1 == parent)
+            .map(|c| (c.0, c.2.as_deref()))
     }
     fn parents(&self, child: i64) -> impl Iterator<Item = (i64, Option<&str>)> + '_ {
-        self.connections.iter().filter(move |c| c.0 == child).map(|c| (c.1, c.2.as_deref()))
+        self.connections
+            .iter()
+            .filter(move |c| c.0 == child)
+            .map(|c| (c.1, c.2.as_deref()))
     }
     fn object(&self, id: i64) -> Option<&'a FbxNode> {
         self.objects.get(&id).copied()
     }
     fn children_of_kind(&self, parent: i64, kind: &str) -> Vec<&'a FbxNode> {
-        self.children(parent).filter_map(|(c, _)| self.object(c)).filter(|o| o.name == kind).collect()
+        self.children(parent)
+            .filter_map(|(c, _)| self.object(c))
+            .filter(|o| o.name == kind)
+            .collect()
     }
 }
 
 fn euler(order: i64, degrees: Vec3) -> Quat {
     let r = degrees * (std::f32::consts::PI / 180.0);
-    let (x, y, z) = (Quat::from_rotation_x(r.x), Quat::from_rotation_y(r.y), Quat::from_rotation_z(r.z));
+    let (x, y, z) = (
+        Quat::from_rotation_x(r.x),
+        Quat::from_rotation_y(r.y),
+        Quat::from_rotation_z(r.z),
+    );
     // FBX 的 eEulerABC 是「先绕 A、再绕 B、最后绕 C」（固定轴），矩阵是 R_C · R_B · R_A。
     match order {
         1 => y * z * x, // eEulerXZY
@@ -558,7 +679,10 @@ impl Transform {
             rotation_pivot: prop_vec3(props, "RotationPivot", Vec3::ZERO),
             scaling_offset: prop_vec3(props, "ScalingOffset", Vec3::ZERO),
             scaling_pivot: prop_vec3(props, "ScalingPivot", Vec3::ZERO),
-            order: props.get("RotationOrder").and_then(|v| v.first()?.as_i64()).unwrap_or(0),
+            order: props
+                .get("RotationOrder")
+                .and_then(|v| v.first()?.as_i64())
+                .unwrap_or(0),
         }
     }
 
@@ -585,7 +709,11 @@ fn decompose(matrix: Mat4) -> NodeTransform {
     let (scale, rotation, position) = matrix.to_scale_rotation_translation();
     NodeTransform {
         position,
-        rotation: if rotation.is_finite() { rotation.normalize() } else { Quat::IDENTITY },
+        rotation: if rotation.is_finite() {
+            rotation.normalize()
+        } else {
+            Quat::IDENTITY
+        },
         scale,
     }
 }
@@ -607,13 +735,25 @@ struct Layer {
 }
 
 impl Layer {
-    fn read(geometry: &FbxNode, element: &str, data: &str, index: &str, components: usize) -> Option<Self> {
+    fn read(
+        geometry: &FbxNode,
+        element: &str,
+        data: &str,
+        index: &str,
+        components: usize,
+    ) -> Option<Self> {
         let layer = geometry.child(element)?;
-        let reference = layer.child_str("ReferenceInformationType").unwrap_or("Direct");
+        let reference = layer
+            .child_str("ReferenceInformationType")
+            .unwrap_or("Direct");
         Some(Self {
             values: layer.array_f64(data),
-            indices: (reference == "IndexToDirect" || reference == "Index").then(|| layer.array_i64(index)),
-            mapping: layer.child_str("MappingInformationType").unwrap_or("ByPolygonVertex").to_string(),
+            indices: (reference == "IndexToDirect" || reference == "Index")
+                .then(|| layer.array_i64(index)),
+            mapping: layer
+                .child_str("MappingInformationType")
+                .unwrap_or("ByPolygonVertex")
+                .to_string(),
             components,
         })
     }
@@ -630,7 +770,8 @@ impl Layer {
             Some(indices) => usize::try_from(*indices.get(slot)?).ok()?,
             None => slot,
         };
-        self.values.get(slot * self.components..(slot + 1) * self.components)
+        self.values
+            .get(slot * self.components..(slot + 1) * self.components)
     }
 }
 
@@ -654,22 +795,25 @@ fn build_geometry(geometry: &FbxNode, geometric: Mat4) -> Result<Vec<Built>, Loa
     let materials = geometry.child("LayerElementMaterial").map(|l| {
         (
             l.array_i64("Materials"),
-            l.child_str("MappingInformationType").unwrap_or("AllSame").to_string(),
+            l.child_str("MappingInformationType")
+                .unwrap_or("AllSame")
+                .to_string(),
         )
     });
     let normal_matrix = geometric.inverse().transpose();
 
     // 材质槽 → (顶点, 索引, 位置下标, 去重表)
     #[allow(clippy::type_complexity)]
-    let mut batches: HashMap<usize, (Vec<Vertex>, Vec<u32>, Vec<usize>, HashMap<[u32; 10], u32>)> = HashMap::new();
-    let mut corner = 0usize;
+    let mut batches: HashMap<
+        usize,
+        (Vec<Vertex>, Vec<u32>, Vec<usize>, HashMap<[u32; 10], u32>),
+    > = HashMap::new();
     let mut polygon = 0usize;
     let mut current: Vec<(usize, usize)> = Vec::new();
-    for &raw in &polygon_indices {
+    for (corner, &raw) in polygon_indices.iter().enumerate() {
         let last = raw < 0;
         let vertex = if last { !raw } else { raw } as usize;
         current.push((vertex, corner));
-        corner += 1;
         if !last {
             continue;
         }
@@ -679,17 +823,32 @@ fn build_geometry(geometry: &FbxNode, geometric: Mat4) -> Result<Vec<Built>, Loa
             None => 0,
         }
         .max(0) as usize;
-        let batch = batches.entry(slot).or_insert_with(|| (Vec::new(), Vec::new(), Vec::new(), HashMap::new()));
+        let batch = batches
+            .entry(slot)
+            .or_insert_with(|| (Vec::new(), Vec::new(), Vec::new(), HashMap::new()));
         let mut corner_indices = Vec::with_capacity(current.len());
         for &(vertex, corner) in &current {
-            let p = positions.get(vertex * 3..vertex * 3 + 3).ok_or_else(|| bad("FBX 多边形引用了不存在的顶点"))?;
-            let position = geometric.transform_point3(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
+            let p = positions
+                .get(vertex * 3..vertex * 3 + 3)
+                .ok_or_else(|| bad("FBX 多边形引用了不存在的顶点"))?;
+            let position =
+                geometric.transform_point3(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
             let normal = normals
                 .as_ref()
                 .and_then(|l| l.get(corner, polygon, vertex))
-                .map(|n| normal_matrix.transform_vector3(Vec3::new(n[0] as f32, n[1] as f32, n[2] as f32)).normalize_or_zero());
-            let uv = uvs.as_ref().and_then(|l| l.get(corner, polygon, vertex)).map(|t| [t[0] as f32, 1.0 - t[1] as f32]);
-            let color = colors.as_ref().and_then(|l| l.get(corner, polygon, vertex)).map(|c| [c[0] as f32, c[1] as f32, c[2] as f32]);
+                .map(|n| {
+                    normal_matrix
+                        .transform_vector3(Vec3::new(n[0] as f32, n[1] as f32, n[2] as f32))
+                        .normalize_or_zero()
+                });
+            let uv = uvs
+                .as_ref()
+                .and_then(|l| l.get(corner, polygon, vertex))
+                .map(|t| [t[0] as f32, 1.0 - t[1] as f32]);
+            let color = colors
+                .as_ref()
+                .and_then(|l| l.get(corner, polygon, vertex))
+                .map(|c| [c[0] as f32, c[1] as f32, c[2] as f32]);
             let key = [
                 vertex as u32,
                 normal.map_or(0, |n| n.x.to_bits()),
@@ -716,7 +875,11 @@ fn build_geometry(geometry: &FbxNode, geometric: Mat4) -> Result<Vec<Built>, Loa
             corner_indices.push(index);
         }
         for k in 1..corner_indices.len().saturating_sub(1) {
-            batch.1.extend_from_slice(&[corner_indices[0], corner_indices[k], corner_indices[k + 1]]);
+            batch.1.extend_from_slice(&[
+                corner_indices[0],
+                corner_indices[k],
+                corner_indices[k + 1],
+            ]);
         }
         current.clear();
         polygon += 1;
@@ -735,26 +898,47 @@ fn build_geometry(geometry: &FbxNode, geometric: Mat4) -> Result<Vec<Built>, Loa
             mesh.recompute_normals();
         }
         mesh.recompute_tangents();
-        out.push(Built { mesh, material_slot: slot, position_index });
+        out.push(Built {
+            mesh,
+            material_slot: slot,
+            position_index,
+        });
     }
     Ok(out)
 }
 
-fn build_material(scene: &Scene, material: &FbxNode, textures: &HashMap<i64, Resource<Texture>>) -> Material {
+fn build_material(
+    scene: &Scene,
+    material: &FbxNode,
+    textures: &HashMap<i64, Resource<Texture>>,
+) -> Material {
     let props = properties(material);
-    let diffuse = prop_vec3(&props, "DiffuseColor", prop_vec3(&props, "Diffuse", Vec3::splat(0.8)));
+    let diffuse = prop_vec3(
+        &props,
+        "DiffuseColor",
+        prop_vec3(&props, "Diffuse", Vec3::splat(0.8)),
+    );
     let factor = prop_f32(&props, "DiffuseFactor").unwrap_or(1.0);
     let opacity = prop_f32(&props, "Opacity").unwrap_or_else(|| {
         let transparency = prop_f32(&props, "TransparencyFactor").unwrap_or(0.0);
         // TransparentColor 为黑时 TransparencyFactor 没有意义（很多导出器乱写）。
         let transparent = prop_vec3(&props, "TransparentColor", Vec3::ZERO);
-        if transparent.max_element() > 0.0 { 1.0 - transparency } else { 1.0 }
+        if transparent.max_element() > 0.0 {
+            1.0 - transparency
+        } else {
+            1.0
+        }
     });
     let mut out = Material::standard()
         .with_base_color((diffuse * factor).extend(opacity.clamp(0.0, 1.0)))
         .with_metallic(0.0)
-        .with_roughness(prop_f32(&props, "Shininess").or_else(|| prop_f32(&props, "ShininessExponent")).map_or(0.6, |s| (2.0 / (s.max(0.0) + 2.0)).sqrt().clamp(0.05, 1.0)));
-    let emissive = prop_vec3(&props, "EmissiveColor", Vec3::ZERO) * prop_f32(&props, "EmissiveFactor").unwrap_or(1.0);
+        .with_roughness(
+            prop_f32(&props, "Shininess")
+                .or_else(|| prop_f32(&props, "ShininessExponent"))
+                .map_or(0.6, |s| (2.0 / (s.max(0.0) + 2.0)).sqrt().clamp(0.05, 1.0)),
+        );
+    let emissive = prop_vec3(&props, "EmissiveColor", Vec3::ZERO)
+        * prop_f32(&props, "EmissiveFactor").unwrap_or(1.0);
     if emissive.max_element() > 0.0 {
         out.set(kpbr::standard::EMISSIVE, emissive);
     }
@@ -762,16 +946,25 @@ fn build_material(scene: &Scene, material: &FbxNode, textures: &HashMap<i64, Res
         out.set_blend_mode(kmaterial::BlendMode::Alpha);
     }
     for (texture_id, property) in scene.children(material.id()) {
-        let Some(texture) = textures.get(&texture_id) else { continue };
+        let Some(texture) = textures.get(&texture_id) else {
+            continue;
+        };
         match property.unwrap_or("") {
             "DiffuseColor" | "Diffuse" | "Maya|TEX_color_map" | "3dsMax|maps|texmap_diffuse" => {
-                out = out.with_base_color_texture(texture.clone()).with_base_color(Vec4::new(1.0, 1.0, 1.0, opacity));
+                out = out
+                    .with_base_color_texture(texture.clone())
+                    .with_base_color(Vec4::new(1.0, 1.0, 1.0, opacity));
             }
             "NormalMap" | "Maya|TEX_normal_map" => {
                 // 贴图是按 sRGB 读进来的，法线要线性。
-                let data = texture.data_ref().map(|t| t.clone().with_format(ktexture::TextureFormat::Linear));
+                let data = texture
+                    .data_ref()
+                    .map(|t| t.clone().with_format(ktexture::TextureFormat::Linear));
                 if let Some(data) = data {
-                    out.set(kpbr::standard::NORMAL_TEXTURE, Resource::new_ok(format!("fbx-normal-{texture_id}"), data));
+                    out.set(
+                        kpbr::standard::NORMAL_TEXTURE,
+                        Resource::new_ok(format!("fbx-normal-{texture_id}"), data),
+                    );
                     out.set("normal_scale", 1.0f32);
                 }
             }
@@ -781,7 +974,9 @@ fn build_material(scene: &Scene, material: &FbxNode, textures: &HashMap<i64, Res
                     out.set(kpbr::standard::EMISSIVE, Vec3::ONE);
                 }
             }
-            "TransparentColor" | "TransparencyFactor" => out.set_blend_mode(kmaterial::BlendMode::Alpha),
+            "TransparentColor" | "TransparencyFactor" => {
+                out.set_blend_mode(kmaterial::BlendMode::Alpha)
+            }
             _ => {}
         }
     }
@@ -795,7 +990,10 @@ fn sample_nurbs(geometry: &FbxNode) -> Vec<Vec3> {
     let degree = order - 1;
     let raw = geometry.array_f64("Points");
     let mut knots = geometry.array_f64("KnotVector");
-    let mut points: Vec<[f64; 4]> = raw.chunks_exact(4).map(|p| [p[0], p[1], p[2], if p[3] == 0.0 { 1.0 } else { p[3] }]).collect();
+    let mut points: Vec<[f64; 4]> = raw
+        .chunks_exact(4)
+        .map(|p| [p[0], p[1], p[2], if p[3] == 0.0 { 1.0 } else { p[3] }])
+        .collect();
     if points.len() < 2 || knots.is_empty() {
         return Vec::new();
     }
@@ -830,12 +1028,20 @@ fn sample_nurbs(geometry: &FbxNode) -> Vec<Vec3> {
 }
 
 /// 解析成 [`Model`]。
-pub async fn parse(bytes: Vec<u8>, path: PathBuf, io: Arc<dyn ResourceIo>) -> Result<Model, LoadError> {
+pub async fn parse(
+    bytes: Vec<u8>,
+    path: PathBuf,
+    io: Arc<dyn ResourceIo>,
+) -> Result<Model, LoadError> {
     Ok(parse_fbx(bytes, path, io).await?.model)
 }
 
 /// 解析成 [`Fbx`]。
-pub async fn parse_fbx(bytes: Vec<u8>, path: PathBuf, io: Arc<dyn ResourceIo>) -> Result<Fbx, LoadError> {
+pub async fn parse_fbx(
+    bytes: Vec<u8>,
+    path: PathBuf,
+    io: Arc<dyn ResourceIo>,
+) -> Result<Fbx, LoadError> {
     let document = parse_document(&bytes)?;
     // 贴图：内嵌的直接解，外部的按文件名找。先收集，异步读完再建场景。
     let objects = document.iter().find(|n| n.name == "Objects");
@@ -843,7 +1049,10 @@ pub async fn parse_fbx(bytes: Vec<u8>, path: PathBuf, io: Arc<dyn ResourceIo>) -
     let mut textures = HashMap::new();
     let base = crate::base_dir(&path);
     if let Some(objects) = objects {
-        let videos: HashMap<i64, &FbxNode> = objects.children_named("Video").map(|v| (v.id(), v)).collect();
+        let videos: HashMap<i64, &FbxNode> = objects
+            .children_named("Video")
+            .map(|v| (v.id(), v))
+            .collect();
         for texture in objects.children_named("Texture") {
             let id = texture.id();
             let embedded = connections
@@ -855,9 +1064,16 @@ pub async fn parse_fbx(bytes: Vec<u8>, path: PathBuf, io: Arc<dyn ResourceIo>) -
                     Prop::Str(s) if !s.is_empty() => base64_decode(s),
                     _ => None,
                 });
-            let name = texture.child_str("RelativeFilename").filter(|s| !s.is_empty()).or_else(|| texture.child_str("FileName")).unwrap_or("").to_string();
+            let name = texture
+                .child_str("RelativeFilename")
+                .filter(|s| !s.is_empty())
+                .or_else(|| texture.child_str("FileName"))
+                .unwrap_or("")
+                .to_string();
             let resource = match embedded {
-                Some(bytes) => crate::texture_from_bytes(&format!("{}#{name}", path.display()), &bytes, false),
+                Some(bytes) => {
+                    crate::texture_from_bytes(&format!("{}#{name}", path.display()), &bytes, false)
+                }
                 None if !name.is_empty() => crate::load_texture(&io, &base, &name, false).await,
                 None => None,
             };
@@ -868,7 +1084,10 @@ pub async fn parse_fbx(bytes: Vec<u8>, path: PathBuf, io: Arc<dyn ResourceIo>) -
             }
         }
     }
-    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "FBX".into());
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "FBX".into());
     build(&document, &textures, &name)
 }
 
@@ -883,7 +1102,11 @@ fn connections(document: &[FbxNode]) -> Vec<(i64, i64, Option<String>)> {
                 .filter_map(|c| {
                     let child = c.props.get(1)?.as_i64()?;
                     let parent = c.props.get(2)?.as_i64()?;
-                    Some((child, parent, c.props.get(3).and_then(Prop::as_str).map(str::to_string)))
+                    Some((
+                        child,
+                        parent,
+                        c.props.get(3).and_then(Prop::as_str).map(str::to_string),
+                    ))
                 })
                 .collect()
         })
@@ -914,14 +1137,28 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
 }
 
 /// 从文档树建场景。
-pub fn build(document: &[FbxNode], textures: &HashMap<i64, Resource<Texture>>, name: &str) -> Result<Fbx, LoadError> {
-    let objects_node = document.iter().find(|n| n.name == "Objects").ok_or_else(|| bad("FBX 里没有 Objects 段"))?;
+pub fn build(
+    document: &[FbxNode],
+    textures: &HashMap<i64, Resource<Texture>>,
+    name: &str,
+) -> Result<Fbx, LoadError> {
+    let objects_node = document
+        .iter()
+        .find(|n| n.name == "Objects")
+        .ok_or_else(|| bad("FBX 里没有 Objects 段"))?;
     let scene = Scene {
         objects: objects_node.children.iter().map(|o| (o.id(), o)).collect(),
         connections: connections(document),
     };
-    let settings = document.iter().find(|n| n.name == "GlobalSettings").map(properties).unwrap_or_default();
-    let up_axis = settings.get("UpAxis").and_then(|v| v.first()?.as_i64()).unwrap_or(1);
+    let settings = document
+        .iter()
+        .find(|n| n.name == "GlobalSettings")
+        .map(properties)
+        .unwrap_or_default();
+    let up_axis = settings
+        .get("UpAxis")
+        .and_then(|v| v.first()?.as_i64())
+        .unwrap_or(1);
     let unit_scale = prop_f32(&settings, "UnitScaleFactor").unwrap_or(1.0);
 
     // ── 节点 ──
@@ -932,7 +1169,11 @@ pub fn build(document: &[FbxNode], textures: &HashMap<i64, Resource<Texture>>, n
     let mut nodes = vec![ModelNode {
         name: name.to_string(),
         transform: NodeTransform {
-            rotation: if up_axis == 2 { Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2) } else { Quat::IDENTITY },
+            rotation: if up_axis == 2 {
+                Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)
+            } else {
+                Quat::IDENTITY
+            },
             ..Default::default()
         },
         ..Default::default()
@@ -954,13 +1195,40 @@ pub fn build(document: &[FbxNode], textures: &HashMap<i64, Resource<Texture>>, n
         let index = node_of[&model.id()];
         let parent = scene
             .parents(model.id())
-            .find_map(|(p, prop)| if prop.is_none() { node_of.get(&p).copied() } else { None })
+            .find_map(|(p, prop)| {
+                if prop.is_none() {
+                    node_of.get(&p).copied()
+                } else {
+                    None
+                }
+            })
             .unwrap_or(0);
         nodes[parent].children.push(index);
     }
+    // 节点在 FBX 全局空间里的矩阵（不含我们加的那个上轴根节点）。
+    let mut parent_of = vec![usize::MAX; nodes.len()];
+    for (index, node) in nodes.iter().enumerate() {
+        for &child in &node.children {
+            parent_of[child] = index;
+        }
+    }
+    let fbx_world = |mut index: usize| {
+        let mut matrix = Mat4::IDENTITY;
+        let mut guard = 0;
+        while index != 0 && index != usize::MAX && guard < 256 {
+            matrix = transforms[index].matrix() * matrix;
+            index = parent_of[index];
+            guard += 1;
+        }
+        matrix
+    };
 
     // ── 材质 ──
-    let mut materials = vec![Material::standard().with_base_color(Vec4::new(0.8, 0.8, 0.8, 1.0)).with_roughness(0.6)];
+    let mut materials = vec![
+        Material::standard()
+            .with_base_color(Vec4::new(0.8, 0.8, 0.8, 1.0))
+            .with_roughness(0.6),
+    ];
     let mut material_of: HashMap<i64, usize> = HashMap::new();
     for material in objects_node.children_named("Material") {
         material_of.insert(material.id(), materials.len());
@@ -977,16 +1245,22 @@ pub fn build(document: &[FbxNode], textures: &HashMap<i64, Resource<Texture>>, n
     for model in &models {
         let node = node_of[&model.id()];
         let props = properties(model);
-        let geometric = Mat4::from_translation(prop_vec3(&props, "GeometricTranslation", Vec3::ZERO))
-            * Mat4::from_quat(euler(0, prop_vec3(&props, "GeometricRotation", Vec3::ZERO)))
-            * Mat4::from_scale(prop_vec3(&props, "GeometricScaling", Vec3::ONE));
+        let geometric =
+            Mat4::from_translation(prop_vec3(&props, "GeometricTranslation", Vec3::ZERO))
+                * Mat4::from_quat(euler(0, prop_vec3(&props, "GeometricRotation", Vec3::ZERO)))
+                * Mat4::from_scale(prop_vec3(&props, "GeometricScaling", Vec3::ONE));
         let model_materials: Vec<usize> = scene
             .children(model.id())
             .filter_map(|(c, _)| material_of.get(&c).copied())
             .collect();
         for geometry in scene.children_of_kind(model.id(), "Geometry") {
-            if geometry.subclass() == "NurbsCurve" || geometry.child_str("Type") == Some("NurbsCurve") {
-                let points: Vec<Vec3> = sample_nurbs(geometry).into_iter().map(|p| geometric.transform_point3(p)).collect();
+            if geometry.subclass() == "NurbsCurve"
+                || geometry.child_str("Type") == Some("NurbsCurve")
+            {
+                let points: Vec<Vec3> = sample_nurbs(geometry)
+                    .into_iter()
+                    .map(|p| geometric.transform_point3(p))
+                    .collect();
                 if points.len() > 1 {
                     curves.push((node, points));
                 }
@@ -1000,36 +1274,73 @@ pub fn build(document: &[FbxNode], textures: &HashMap<i64, Resource<Texture>>, n
             // 蒙皮：Skin 挂在几何上，Cluster 挂在 Skin 上，骨头 Model 挂在 Cluster 上。
             let mut skin_index = None;
             let mut per_position: HashMap<usize, Vec<(u16, f32)>> = HashMap::new();
-            for skin in scene.children_of_kind(geometry.id(), "Deformer").into_iter().filter(|d| d.subclass() == "Skin") {
+            // 一份几何只认第一个 Skin（FBX 里多个 Skin 叠在同一网格上的情况没见过）。
+            if let Some(skin) = scene
+                .children_of_kind(geometry.id(), "Deformer")
+                .into_iter()
+                .find(|d| d.subclass() == "Skin")
+            {
                 let mut joints = Vec::new();
                 let mut inverse_bind = Vec::new();
-                for cluster in scene.children_of_kind(skin.id(), "Deformer").into_iter().filter(|d| d.subclass() == "Cluster") {
-                    let Some(bone) = scene.children(cluster.id()).find_map(|(c, _)| node_of.get(&c).copied()) else { continue };
+                for cluster in scene
+                    .children_of_kind(skin.id(), "Deformer")
+                    .into_iter()
+                    .filter(|d| d.subclass() == "Cluster")
+                {
+                    let Some(bone) = scene
+                        .children(cluster.id())
+                        .find_map(|(c, _)| node_of.get(&c).copied())
+                    else {
+                        continue;
+                    };
                     let joint = joints.len() as u16;
                     joints.push(bone);
-                    let transform = matrix_from_array(&cluster.array_f64("Transform"));
                     let link = matrix_from_array(&cluster.array_f64("TransformLink"));
-                    // 顶点在网格空间；link 是绑定时骨头的世界变换，transform 是绑定时网格的世界变换。
-                    inverse_bind.push(link.inverse() * transform);
+                    // 顶点在网格空间；link 是绑定时骨头的全局变换。逆绑定 = link⁻¹ × 网格的全局变换。
+                    //
+                    // 不用 Cluster 的 `Transform`：规范说它是「绑定时网格的全局变换」，
+                    // 可 Mixamo 这类导出器写进去的是 link 的逆，照规范用的话绑定姿态
+                    // 会平移两倍（人物悬在半空、四肢炸开）。three.js 和 Blender 的导入器
+                    // 也都只认 `TransformLink` + 网格节点自己的变换。
+                    inverse_bind.push(link.inverse() * fbx_world(node));
                     let indices = cluster.array_i64("Indexes");
                     let weights = cluster.array_f64("Weights");
                     for (i, w) in indices.iter().zip(&weights) {
-                        per_position.entry(*i as usize).or_default().push((joint, *w as f32));
+                        per_position
+                            .entry(*i as usize)
+                            .or_default()
+                            .push((joint, *w as f32));
                     }
                 }
                 if !joints.is_empty() {
-                    skins.push(ModelSkin { joints, inverse_bind, skeleton: None });
+                    skins.push(ModelSkin {
+                        joints,
+                        inverse_bind,
+                        skeleton: None,
+                    });
                     skin_index = Some(skins.len() - 1);
                 }
-                break;
             }
 
             // 形变：BlendShape → Channel → Shape（Geometry）。
             let mut shapes: Vec<(i64, String, f32, &FbxNode)> = Vec::new();
-            for blend in scene.children_of_kind(geometry.id(), "Deformer").into_iter().filter(|d| d.subclass() == "BlendShape") {
-                for channel in scene.children_of_kind(blend.id(), "Deformer").into_iter().filter(|d| d.subclass() == "BlendShapeChannel") {
-                    let weight = prop_f32(&properties(channel), "DeformPercent").unwrap_or(0.0) / 100.0;
-                    if let Some(shape) = scene.children_of_kind(channel.id(), "Geometry").into_iter().next() {
+            for blend in scene
+                .children_of_kind(geometry.id(), "Deformer")
+                .into_iter()
+                .filter(|d| d.subclass() == "BlendShape")
+            {
+                for channel in scene
+                    .children_of_kind(blend.id(), "Deformer")
+                    .into_iter()
+                    .filter(|d| d.subclass() == "BlendShapeChannel")
+                {
+                    let weight =
+                        prop_f32(&properties(channel), "DeformPercent").unwrap_or(0.0) / 100.0;
+                    if let Some(shape) = scene
+                        .children_of_kind(channel.id(), "Geometry")
+                        .into_iter()
+                        .next()
+                    {
                         shapes.push((channel.id(), channel.object_name(), weight, shape));
                     }
                 }
@@ -1049,7 +1360,10 @@ pub fn build(document: &[FbxNode], textures: &HashMap<i64, Resource<Texture>>, n
                             let mut list = per_position.get(p).cloned().unwrap_or_default();
                             list.sort_by(|a, b| b.1.total_cmp(&a.1));
                             list.truncate(4);
-                            let mut v = SkinVertex { joints: [0; 4], weights: [0.0; 4] };
+                            let mut v = SkinVertex {
+                                joints: [0; 4],
+                                weights: [0.0; 4],
+                            };
                             for (k, (j, w)) in list.into_iter().enumerate() {
                                 v.joints[k] = j;
                                 v.weights[k] = w;
@@ -1065,32 +1379,55 @@ pub fn build(document: &[FbxNode], textures: &HashMap<i64, Resource<Texture>>, n
                 if !shapes.is_empty() {
                     let mut targets = Vec::new();
                     let mut weights = Vec::new();
-                    for (slot, (channel_id, channel_name, weight, shape)) in shapes.iter().enumerate() {
+                    for (slot, (channel_id, channel_name, weight, shape)) in
+                        shapes.iter().enumerate()
+                    {
                         let indices = shape.array_i64("Indexes");
                         let deltas = shape.array_f64("Vertices");
                         let normals = shape.array_f64("Normals");
                         let mut by_position: HashMap<usize, (Vec3, Vec3)> = HashMap::new();
                         for (k, &index) in indices.iter().enumerate() {
-                            let d = deltas.get(k * 3..k * 3 + 3).map_or(Vec3::ZERO, |d| Vec3::new(d[0] as f32, d[1] as f32, d[2] as f32));
-                            let n = normals.get(k * 3..k * 3 + 3).map_or(Vec3::ZERO, |n| Vec3::new(n[0] as f32, n[1] as f32, n[2] as f32));
+                            let d = deltas.get(k * 3..k * 3 + 3).map_or(Vec3::ZERO, |d| {
+                                Vec3::new(d[0] as f32, d[1] as f32, d[2] as f32)
+                            });
+                            let n = normals.get(k * 3..k * 3 + 3).map_or(Vec3::ZERO, |n| {
+                                Vec3::new(n[0] as f32, n[1] as f32, n[2] as f32)
+                            });
                             by_position.insert(index as usize, (geometric.transform_vector3(d), n));
                         }
                         let morph = piece
                             .position_index
                             .iter()
                             .map(|p| {
-                                let (d, n) = by_position.get(p).copied().unwrap_or((Vec3::ZERO, Vec3::ZERO));
-                                MorphDelta { position: d.to_array(), normal: n.to_array(), ..Default::default() }
+                                let (d, n) = by_position
+                                    .get(p)
+                                    .copied()
+                                    .unwrap_or((Vec3::ZERO, Vec3::ZERO));
+                                MorphDelta {
+                                    position: d.to_array(),
+                                    normal: n.to_array(),
+                                    ..Default::default()
+                                }
                             })
                             .collect();
                         targets.push(MorphTarget::new(channel_name.clone(), morph));
                         weights.push(*weight);
-                        morph_channels.entry(*channel_id).or_default().push((node, slot));
+                        morph_channels
+                            .entry(*channel_id)
+                            .or_default()
+                            .push((node, slot));
                     }
                     mesh = mesh.with_morph_targets(targets, weights);
                 }
-                let material = model_materials.get(piece.material_slot).or_else(|| model_materials.first()).copied().unwrap_or(0);
-                nodes[node].parts.push(MeshPart { mesh: meshes.len(), material: Some(material) });
+                let material = model_materials
+                    .get(piece.material_slot)
+                    .or_else(|| model_materials.first())
+                    .copied()
+                    .unwrap_or(0);
+                nodes[node].parts.push(MeshPart {
+                    mesh: meshes.len(),
+                    material: Some(material),
+                });
                 meshes.push(mesh);
             }
             if skin_index.is_some() {
@@ -1112,7 +1449,11 @@ pub fn build(document: &[FbxNode], textures: &HashMap<i64, Resource<Texture>>, n
     if model.meshes().is_empty() && curves.is_empty() && model.nodes().len() <= 1 {
         return Err(bad("FBX 里没有可导入的几何"));
     }
-    Ok(Fbx { model, curves, unit_scale })
+    Ok(Fbx {
+        model,
+        curves,
+        unit_scale,
+    })
 }
 
 /// 一条动画曲线：tick 时刻（换成秒）+ 值。
@@ -1135,7 +1476,11 @@ impl AnimCurve {
             return self.values[n - 1];
         }
         let (t0, t1) = (self.times[next - 1], self.times[next]);
-        let f = if t1 > t0 { (time - t0) / (t1 - t0) } else { 0.0 };
+        let f = if t1 > t0 {
+            (time - t0) / (t1 - t0)
+        } else {
+            0.0
+        };
         self.values[next - 1] + (self.values[next] - self.values[next - 1]) * f
     }
 }
@@ -1149,8 +1494,16 @@ fn build_animations(
 ) -> Vec<AnimationClip> {
     let curve_of = |id: i64| -> Option<AnimCurve> {
         let curve = scene.object(id).filter(|o| o.name == "AnimationCurve")?;
-        let times = curve.array_i64("KeyTime").iter().map(|&t| (t as f64 / TICKS_PER_SECOND) as f32).collect();
-        let values = curve.array_f64("KeyValueFloat").iter().map(|&v| v as f32).collect();
+        let times = curve
+            .array_i64("KeyTime")
+            .iter()
+            .map(|&t| (t as f64 / TICKS_PER_SECOND) as f32)
+            .collect();
+        let values = curve
+            .array_f64("KeyValueFloat")
+            .iter()
+            .map(|&v| v as f32)
+            .collect();
         Some(AnimCurve { times, values })
     };
     let mut clips = Vec::new();
@@ -1188,8 +1541,15 @@ fn build_animations(
                             let Some(c) = curve_of(curve) else { continue };
                             let weights: Vec<f32> = c.values.iter().map(|v| v / 100.0).collect();
                             for &(node, index) in targets {
-                                if let Some(curve) = Curve::new(c.times.clone(), weights.clone(), Interpolation::Linear) {
-                                    tracks.push(Track { target: node, channel: Channel::MorphWeight { index, curve } });
+                                if let Some(curve) = Curve::new(
+                                    c.times.clone(),
+                                    weights.clone(),
+                                    Interpolation::Linear,
+                                ) {
+                                    tracks.push(Track {
+                                        target: node,
+                                        channel: Channel::MorphWeight { index, curve },
+                                    });
                                 }
                             }
                         }
@@ -1238,13 +1598,22 @@ fn build_animations(
                 }
             }
             if let Some(c) = Curve::new(times.clone(), positions, Interpolation::Linear) {
-                tracks.push(Track { target: node, channel: Channel::Position(c) });
+                tracks.push(Track {
+                    target: node,
+                    channel: Channel::Position(c),
+                });
             }
             if let Some(c) = Curve::new(times.clone(), rotations, Interpolation::Linear) {
-                tracks.push(Track { target: node, channel: Channel::Rotation(c) });
+                tracks.push(Track {
+                    target: node,
+                    channel: Channel::Rotation(c),
+                });
             }
             if let Some(c) = Curve::new(times, scales, Interpolation::Linear) {
-                tracks.push(Track { target: node, channel: Channel::Scale(c) });
+                tracks.push(Track {
+                    target: node,
+                    channel: Channel::Scale(c),
+                });
             }
         }
         if !tracks.is_empty() {
@@ -1299,9 +1668,18 @@ Connections:  {
         let node = &model.nodes()[1];
         assert_eq!(node.name, "Quad");
         assert!((node.transform.position - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-5);
-        assert!(node.transform.rotation.dot(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)).abs() > 0.9999);
+        assert!(
+            node.transform
+                .rotation
+                .dot(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2))
+                .abs()
+                > 0.9999
+        );
         let material = node.parts[0].material.unwrap();
-        assert_eq!(model.materials()[material].base_color(), Vec4::new(1.0, 0.0, 0.0, 1.0));
+        assert_eq!(
+            model.materials()[material].base_color(),
+            Vec4::new(1.0, 0.0, 0.0, 1.0)
+        );
     }
 
     #[test]
@@ -1316,12 +1694,34 @@ Connections:  {
     fn nurbs_curve_passes_through_clamped_endpoints() {
         let geometry = FbxNode {
             name: "Geometry".into(),
-            props: vec![Prop::Int(1), Prop::Str("Geometry::".into()), Prop::Str("NurbsCurve".into())],
+            props: vec![
+                Prop::Int(1),
+                Prop::Str("Geometry::".into()),
+                Prop::Str("NurbsCurve".into()),
+            ],
             children: vec![
-                FbxNode { name: "Order".into(), props: vec![Prop::Int(3)], children: vec![] },
-                FbxNode { name: "Form".into(), props: vec![Prop::Str("Open".into())], children: vec![] },
-                FbxNode { name: "Points".into(), props: vec![Prop::Floats(vec![0., 0., 0., 1., 1., 2., 0., 1., 2., 0., 0., 1.])], children: vec![] },
-                FbxNode { name: "KnotVector".into(), props: vec![Prop::Floats(vec![0., 0., 0., 1., 1., 1.])], children: vec![] },
+                FbxNode {
+                    name: "Order".into(),
+                    props: vec![Prop::Int(3)],
+                    children: vec![],
+                },
+                FbxNode {
+                    name: "Form".into(),
+                    props: vec![Prop::Str("Open".into())],
+                    children: vec![],
+                },
+                FbxNode {
+                    name: "Points".into(),
+                    props: vec![Prop::Floats(vec![
+                        0., 0., 0., 1., 1., 2., 0., 1., 2., 0., 0., 1.,
+                    ])],
+                    children: vec![],
+                },
+                FbxNode {
+                    name: "KnotVector".into(),
+                    props: vec![Prop::Floats(vec![0., 0., 0., 1., 1., 1.])],
+                    children: vec![],
+                },
             ],
         };
         let points = sample_nurbs(&geometry);
@@ -1329,6 +1729,9 @@ Connections:  {
         assert!((points.last().unwrap() - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-5);
         // 二次贝塞尔的中点：(1, 1, 0)。
         let middle = points[points.len() / 2];
-        assert!((middle - Vec3::new(1.0, 1.0, 0.0)).length() < 1e-4, "{middle:?}");
+        assert!(
+            (middle - Vec3::new(1.0, 1.0, 0.0)).length() < 1e-4,
+            "{middle:?}"
+        );
     }
 }

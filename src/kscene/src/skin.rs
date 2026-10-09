@@ -118,6 +118,11 @@ impl AnimationPlayer {
         self.targets.get(index).copied().unwrap_or(Handle::NONE)
     }
 
+    /// 驱动了几个目标节点。
+    pub fn target_count(&self) -> usize {
+        self.targets.len()
+    }
+
     /// 当前姿态。
     pub fn pose(&self) -> &Pose {
         self.animator.pose()

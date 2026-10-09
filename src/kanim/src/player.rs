@@ -7,7 +7,48 @@
 //! 这样上层无论多复杂，混合这一步都只有一份实现。
 
 use crate::{AnimationClip, Pose};
+use kmath::Vec3;
 use std::sync::Arc;
+
+/// 根运动：把根骨骼的位移从动画里抽出来，交给游戏（角色控制器）去移动角色。
+///
+/// 走路动画里根骨骼是真往前走的。直接播的话模型跑出了碰撞体、播完一圈「瞬移」回原点；
+/// 根运动把这段位移拿出来，姿态里根骨骼留在原地，位移按帧增量交给角色控制器——
+/// 脚步和移动距离严丝合缝，撞墙也会停。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RootMotion {
+    /// 根骨骼在模型里的节点序号（和 [`crate::Track::target`] 一个意思）。
+    pub target: usize,
+    /// 竖直方向也抽出来。默认 `false`：上下起伏留在动画里，只把水平位移交出去
+    /// （跳跃这类真要改高度的动画才设 `true`）。
+    pub vertical: bool,
+}
+
+/// 一次 [`Animator::tick`] 里发生的事：哪个状态绕回了开头、哪个播完了。
+///
+/// three.js 的 `loop` / `finished` 事件。以前只能每帧轮询时间、自己探测
+/// 「这一帧的时间比上一帧小」——倒放、一帧跨好几圈、交叉淡化中途这些
+/// 情况各要写一遍，而且很容易写错。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimationEvent {
+    /// 循环播放的状态绕回了开头（倒放时是绕回结尾）。`count` 是这一帧绕了
+    /// 几圈——帧间隔比剪辑还长时会大于 1。
+    Looped {
+        /// 状态序号。
+        state: usize,
+        /// 剪辑序号。
+        clip: usize,
+        /// 这一帧绕了几圈。
+        count: u32,
+    },
+    /// 不循环的状态到达了终点（倒放时是起点）。只报一次。
+    Finished {
+        /// 状态序号。
+        state: usize,
+        /// 剪辑序号。
+        clip: usize,
+    },
+}
 
 /// 一个正在播放的剪辑。
 #[derive(Debug, Clone)]
@@ -99,24 +140,32 @@ impl AnimationState {
         !self.looping && (self.time >= duration || (self.speed < 0.0 && self.time <= 0.0))
     }
 
-    /// 推进时间。
-    fn advance(&mut self, dt: f32, duration: f32) {
+    /// 推进时间。返回这一步里绕回开头的圈数，以及是否刚刚播完。
+    fn advance(&mut self, dt: f32, duration: f32) -> (u32, bool) {
         if !self.playing {
-            return;
+            return (0, false);
         }
+        let before = self.time;
         self.time += dt * self.speed;
 
         if duration <= 0.0 {
             self.time = 0.0;
-            return;
+            return (0, false);
         }
 
         if self.looping {
+            // 绕了几圈 = 未取余的时间落在第几个周期（倒放时往负方向数）。
+            let laps = (self.time / duration).floor().abs() as u32;
             // 用欧几里得取余而不是 `%`：倒放时 `%` 会给出负数，
             // 时间轴一旦变负，曲线采样就永远被夹在第一帧。
             self.time = self.time.rem_euclid(duration);
+            (laps, false)
         } else {
             self.time = self.time.clamp(0.0, duration);
+            let end = if self.speed >= 0.0 { duration } else { 0.0 };
+            // 这一步才到终点（上一步还没到）——只报一次。
+            let finished = self.time == end && before != end;
+            (0, finished)
         }
     }
 }
@@ -159,6 +208,12 @@ pub struct Animator {
     playing: bool,
     /// 正在进行的交叉淡化；没有时为 [`None`]。
     crossfade: Option<Crossfade>,
+    /// 上一次 `tick` / `step` 里发生的事件。每次推进前清空。
+    events: Vec<AnimationEvent>,
+    /// 根运动设置；`None` 时根骨骼照常被动画移动。
+    root_motion: Option<RootMotion>,
+    /// 上一次推进抽出来的根骨骼位移（根骨骼父节点的空间）。
+    root_delta: Vec3,
 }
 
 impl Animator {
@@ -173,7 +228,29 @@ impl Animator {
             speed: 1.0,
             playing: true,
             crossfade: None,
+            events: Vec::new(),
+            root_motion: None,
+            root_delta: Vec3::ZERO,
         }
+    }
+
+    /// 开 / 关根运动（见 [`RootMotion`]）。
+    pub fn set_root_motion(&mut self, root_motion: Option<RootMotion>) {
+        self.root_motion = root_motion;
+        self.root_delta = Vec3::ZERO;
+    }
+
+    /// 当前的根运动设置。
+    pub fn root_motion(&self) -> Option<RootMotion> {
+        self.root_motion
+    }
+
+    /// 上一次 [`tick`](Self::tick) / [`step`](Self::step) 里根骨骼走了多远（根骨骼**父节点**的空间）。
+    ///
+    /// 各个在播的状态按权重混：走路和跑步混到一半，位移也是两者的一半。循环绕回开头那一帧
+    /// 也是连续的（「结尾 − 上一刻」加上「这一刻 − 开头」），不会一下倒退一整圈。
+    pub fn root_motion_delta(&self) -> Vec3 {
+        self.root_delta
     }
 
     /// 剪辑表。
@@ -294,15 +371,73 @@ impl Animator {
         self.rebuild_pose();
     }
 
+    /// 上一次 [`tick`](Self::tick) / [`step`](Self::step) 里发生的事件：
+    /// 哪个状态绕回了开头、哪个播完了。下一次推进时清空。
+    ///
+    /// ```ignore
+    /// animator.tick(dt);
+    /// for event in animator.events() {
+    ///     if let AnimationEvent::Finished { clip, .. } = event { /* 播下一段 */ }
+    /// }
+    /// ```
+    pub fn events(&self) -> &[AnimationEvent] {
+        &self.events
+    }
+
     /// 推进所有状态的时间与交叉淡化，不重建姿态。
     fn advance(&mut self, dt: f32) {
+        self.events.clear();
+        let mut root_delta = Vec3::ZERO;
+        let mut root_weight = 0.0;
         for index in 0..self.states.len() {
             let clip = self.states[index].clip;
             let duration = self.clips[clip].duration();
             let speed = self.speed;
-            self.states[index].advance(dt * speed, duration);
+            let before = self.states[index].time;
+            let (laps, finished) = self.states[index].advance(dt * speed, duration);
+            if let Some(root) = self.root_motion
+                && let Some(curve) = self.clips[clip].position_curve(root.target)
+                && self.states[index].weight > 0.0
+            {
+                let state = &self.states[index];
+                // 这一步走过的位移：「这一刻 − 上一刻」，每绕一圈再补一整圈（倒放时减）。
+                let mut delta = curve.sample(state.time) - curve.sample(before);
+                if laps > 0 {
+                    let lap = curve.sample(duration) - curve.sample(0.0);
+                    let direction = if state.speed * speed >= 0.0 {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    delta += lap * laps as f32 * direction;
+                }
+                root_delta += delta * state.weight;
+                root_weight += state.weight;
+            }
+            if laps > 0 {
+                self.events.push(AnimationEvent::Looped {
+                    state: index,
+                    clip,
+                    count: laps,
+                });
+            }
+            if finished {
+                self.events
+                    .push(AnimationEvent::Finished { state: index, clip });
+            }
         }
         self.advance_crossfade(dt);
+        self.root_delta = match self.root_motion {
+            Some(root) if root_weight > 0.0 => {
+                let delta = root_delta / root_weight;
+                if root.vertical {
+                    delta
+                } else {
+                    Vec3::new(delta.x, 0.0, delta.z)
+                }
+            }
+            _ => Vec3::ZERO,
+        };
     }
 
     /// 推进交叉淡化：按已过时间线性更新各状态权重，结束后恢复淡出状态的速度。
@@ -418,6 +553,37 @@ impl Animator {
             };
             self.pose.blend_with(&self.scratch, blend);
         }
+
+        // 根运动：位移已经交出去了，姿态里根骨骼钉在各剪辑开头的位置（按同样的权重混），
+        // 只留下抽出来之外的那部分（默认是上下起伏）。
+        if let Some(root) = self.root_motion {
+            let mut anchor = Vec3::ZERO;
+            let mut total = 0.0;
+            for state in &self.states {
+                if state.weight <= 0.0 {
+                    continue;
+                }
+                if let Some(curve) = self
+                    .clips
+                    .get(state.clip)
+                    .and_then(|clip| clip.position_curve(root.target))
+                {
+                    anchor += curve.sample(0.0) * state.weight;
+                    total += state.weight;
+                }
+            }
+            if total > 0.0 {
+                let anchor = anchor / total;
+                let entry = self.pose.entry_mut(root.target);
+                if let Some(position) = entry.position.as_mut() {
+                    position.x = anchor.x;
+                    position.z = anchor.z;
+                    if root.vertical {
+                        position.y = anchor.y;
+                    }
+                }
+            }
+        }
     }
 
     /// 上一次 [`tick`](Self::tick) 混出的姿态。
@@ -464,6 +630,60 @@ mod test {
 
     fn position(animator: &Animator) -> Vec3 {
         animator.pose().entry(0).unwrap().position.unwrap()
+    }
+
+    #[test]
+    fn looping_reports_how_many_laps_a_frame_covered() {
+        let mut animator = animator();
+        animator.play_by_name("A").unwrap();
+        animator.tick(0.5);
+        assert!(animator.events().is_empty());
+        animator.tick(0.7);
+        assert_eq!(
+            animator.events(),
+            &[AnimationEvent::Looped {
+                state: 0,
+                clip: 0,
+                count: 1
+            }]
+        );
+        // 一帧跨两圈多（1 秒的剪辑、2.5 秒的帧间隔）。
+        animator.tick(2.5);
+        assert_eq!(
+            animator.events(),
+            &[AnimationEvent::Looped {
+                state: 0,
+                clip: 0,
+                count: 2
+            }]
+        );
+        // 倒放绕回结尾也算一圈。
+        animator.state_mut(0).unwrap().set_speed(-1.0);
+        animator.tick(1.0);
+        assert_eq!(animator.events().len(), 1, "{:?}", animator.events());
+    }
+
+    #[test]
+    fn a_one_shot_clip_reports_finished_exactly_once() {
+        let mut animator = animator();
+        let state = animator.play_by_name("A").unwrap();
+        animator.state_mut(state).unwrap().set_looping(false);
+        animator.tick(0.6);
+        assert!(animator.events().is_empty());
+        animator.tick(0.6);
+        assert_eq!(
+            animator.events(),
+            &[AnimationEvent::Finished { state, clip: 0 }]
+        );
+        animator.tick(0.6);
+        assert!(animator.events().is_empty(), "停在终点之后不再重复报告");
+        // 倒放回到起点同样报一次。
+        animator.state_mut(state).unwrap().set_speed(-1.0);
+        animator.tick(2.0);
+        assert_eq!(
+            animator.events(),
+            &[AnimationEvent::Finished { state, clip: 0 }]
+        );
     }
 
     #[test]
@@ -835,5 +1055,108 @@ mod test {
         // 暂停态下普通的 tick 不再推进。
         animator.tick(1.0);
         assert!((animator.states()[state].time() - 0.5).abs() < 1e-6);
+    }
+
+    // ── 根运动 ──
+
+    /// 一段 1 秒的「走路」：根骨骼（序号 0）从 (0,0,0) 走到 (0,0,2)，中途上下起伏 0.1。
+    fn walk_clip(name: &str, distance: f32) -> AnimationClip {
+        AnimationClip::new(
+            name,
+            vec![Track {
+                target: 0,
+                channel: Channel::Position(
+                    Curve::new(
+                        vec![0.0, 0.5, 1.0],
+                        vec![
+                            Vec3::ZERO,
+                            Vec3::new(0.0, 0.1, distance * 0.5),
+                            Vec3::new(0.0, 0.0, distance),
+                        ],
+                        Interpolation::Linear,
+                    )
+                    .unwrap(),
+                ),
+            }],
+        )
+    }
+
+    fn root_animator(clips: Vec<AnimationClip>) -> Animator {
+        let mut animator = Animator::new(Arc::new(clips));
+        animator.set_root_motion(Some(RootMotion {
+            target: 0,
+            vertical: false,
+        }));
+        animator
+    }
+
+    #[test]
+    fn root_motion_hands_out_the_walk_and_keeps_the_pose_in_place() {
+        let mut animator = root_animator(vec![walk_clip("walk", 2.0)]);
+        animator.play(0);
+        let mut travelled = Vec3::ZERO;
+        for _ in 0..30 {
+            animator.tick(1.0 / 60.0);
+            travelled += animator.root_motion_delta();
+            // 姿态里根骨骼的水平位置钉在开头。
+            let position = animator.pose().entry(0).unwrap().position.unwrap();
+            assert!(
+                position.x.abs() < 1e-5 && position.z.abs() < 1e-5,
+                "根骨骼没留在原地：{position}"
+            );
+        }
+        assert!(
+            (travelled.z - 1.0).abs() < 1e-3,
+            "半秒应该走 1 米，走了 {travelled}"
+        );
+        assert_eq!(travelled.y, 0.0, "默认不抽竖直方向");
+        // 起伏还在动画里。
+        assert!(animator.pose().entry(0).unwrap().position.unwrap().y > 0.05);
+    }
+
+    #[test]
+    fn root_motion_is_continuous_across_the_loop() {
+        let mut animator = root_animator(vec![walk_clip("walk", 2.0)]);
+        animator.play(0);
+        let mut travelled = Vec3::ZERO;
+        // 2.5 秒、帧长故意不整除剪辑：中间绕回开头两次。
+        for _ in 0..(2.5 / 0.07) as usize {
+            animator.tick(0.07);
+            let step = animator.root_motion_delta();
+            assert!(step.z > 0.0, "绕回开头那一帧不该倒退：{step}");
+            travelled += step;
+        }
+        let time = (2.5 / 0.07f32).floor() * 0.07;
+        assert!(
+            (travelled.z - time * 2.0).abs() < 1e-3,
+            "{time} 秒应该走 {} 米，走了 {}",
+            time * 2.0,
+            travelled.z
+        );
+    }
+
+    #[test]
+    fn root_motion_blends_with_the_weights() {
+        let mut animator = root_animator(vec![walk_clip("walk", 2.0), walk_clip("run", 6.0)]);
+        let walk = animator.add_state(0).unwrap();
+        let run = animator.add_state(1).unwrap();
+        animator.state_mut(walk).unwrap().set_weight(0.5);
+        animator.state_mut(run).unwrap().set_weight(0.5);
+        animator.tick(0.1);
+        // 走 2 米/秒、跑 6 米/秒，各一半：4 米/秒 × 0.1 秒。
+        assert!(
+            (animator.root_motion_delta().z - 0.4).abs() < 1e-4,
+            "{}",
+            animator.root_motion_delta()
+        );
+    }
+
+    #[test]
+    fn without_root_motion_the_root_moves_as_animated() {
+        let mut animator = Animator::new(Arc::new(vec![walk_clip("walk", 2.0)]));
+        animator.play(0);
+        animator.tick(0.5);
+        assert_eq!(animator.root_motion_delta(), Vec3::ZERO);
+        assert!((animator.pose().entry(0).unwrap().position.unwrap().z - 1.0).abs() < 1e-4);
     }
 }

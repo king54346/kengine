@@ -1086,6 +1086,49 @@ mod scene_test {
     }
 
     #[test]
+    fn a_character_node_walks_and_falls_under_the_scene_sync() {
+        // 场景每帧拿节点变换驱动运动学刚体。直接调物理世界的
+        // `move_character` 会被这个同步盖掉，角色悬在出生点一动不动。
+        let mut scene = Scene::new();
+        add_ground(&mut scene);
+        let player = scene.add_node(
+            Node::new("player")
+                .with_position(Vec3::new(0.0, 2.0, 0.0))
+                .with_rigid_body(RigidBody::kinematic())
+                .with_collider(Collider::capsule_y(0.5, 0.3)),
+        );
+        let controller = kphysics::CharacterController::default();
+        // 第一帧先步进一次，让刚体在物理世界里建出来。
+        scene.step_physics(1.0 / 60.0);
+        scene.update();
+
+        let dt = 1.0 / 60.0;
+        let mut vertical = 0.0f32;
+        let mut grounded = false;
+        for _ in 0..120 {
+            vertical -= 9.81 * dt;
+            if grounded {
+                vertical = vertical.max(-1.0);
+            }
+            let desired = Vec3::new(2.0 * dt, vertical * dt, 0.0);
+            let movement = scene
+                .move_character(player, &controller, desired, dt)
+                .expect("角色的刚体该已经建好了");
+            grounded = movement.grounded;
+            if grounded {
+                vertical = 0.0;
+            }
+            scene.step_physics(dt);
+            scene.update();
+        }
+
+        let position = scene.try_get(player).unwrap().transform.position;
+        assert!(grounded, "走了两秒还没落地，停在 {position:?}");
+        assert!(position.x > 3.0, "两秒只往前走到 x = {}", position.x);
+        assert!(position.y < 1.5, "没掉下来，还在 y = {}", position.y);
+    }
+
+    #[test]
     fn a_body_under_a_moving_parent_still_lands_correctly() {
         // 刚体的位姿是世界空间的，写回节点时要换算成相对父节点的。
         // 少换算这一步，父节点带偏移时物体会跑到别处去。

@@ -27,7 +27,7 @@
 //! 3DS 的法线由平滑组（`0x4150`）决定，这里不读平滑组，按位置焊接后
 //! 算平滑法线——硬边会被抹圆，这是已知的简化。
 
-use crate::{bad, flat_model, limits, load_texture, loader, base_dir};
+use crate::{bad, base_dir, flat_model, limits, load_texture, loader};
 use kasset::{LoadError, ResourceIo};
 use kgltf::{MODEL_TYPE_UUID, Model};
 use kmaterial::Material;
@@ -46,7 +46,10 @@ struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     fn u16(&self, at: usize) -> Result<u16, LoadError> {
-        self.data.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]])).ok_or_else(|| bad("3DS 被截断"))
+        self.data
+            .get(at..at + 2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .ok_or_else(|| bad("3DS 被截断"))
     }
     fn u32(&self, at: usize) -> Result<u32, LoadError> {
         self.data
@@ -69,7 +72,9 @@ impl<'a> Reader<'a> {
         let mut at = start;
         let end = end.min(self.data.len());
         while at + 6 <= end {
-            let (Ok(id), Ok(length)) = (self.u16(at), self.u32(at + 2)) else { break };
+            let (Ok(id), Ok(length)) = (self.u16(at), self.u32(at + 2)) else {
+                break;
+            };
             let length = length as usize;
             if length < 6 || at + length > end {
                 break;
@@ -107,7 +112,11 @@ fn color(reader: &Reader, start: usize, end: usize) -> Option<Vec3> {
     for (id, at, _) in reader.chunks(start, end) {
         match id {
             0x0010 | 0x0013 => {
-                return Some(Vec3::new(reader.f32(at).ok()?, reader.f32(at + 4).ok()?, reader.f32(at + 8).ok()?));
+                return Some(Vec3::new(
+                    reader.f32(at).ok()?,
+                    reader.f32(at + 4).ok()?,
+                    reader.f32(at + 8).ok()?,
+                ));
             }
             0x0011 | 0x0012 => {
                 let b = reader.data.get(at..at + 3)?;
@@ -155,7 +164,9 @@ fn read_material(reader: &Reader, start: usize, end: usize) -> TdsMaterial {
         match id {
             0xA000 => material.name = reader.cstr(at).0,
             0xA020 => material.diffuse = color(reader, at, chunk_end).unwrap_or(material.diffuse),
-            0xA030 => material.specular = color(reader, at, chunk_end).map_or(0.0, |c| c.max_element()),
+            0xA030 => {
+                material.specular = color(reader, at, chunk_end).map_or(0.0, |c| c.max_element())
+            }
             0xA040 => material.shininess = percent(reader, at, chunk_end).unwrap_or(0.0),
             0xA050 => material.transparency = percent(reader, at, chunk_end).unwrap_or(0.0),
             0xA081 => material.two_sided = true,
@@ -183,7 +194,11 @@ fn read_mesh(reader: &Reader, name: String, start: usize, end: usize) -> Result<
                 object.positions = (0..count)
                     .map(|i| {
                         let p = at + 2 + i * 12;
-                        Ok(Vec3::new(reader.f32(p)?, reader.f32(p + 4)?, reader.f32(p + 8)?))
+                        Ok(Vec3::new(
+                            reader.f32(p)?,
+                            reader.f32(p + 4)?,
+                            reader.f32(p + 8)?,
+                        ))
                     })
                     .collect::<Result<_, LoadError>>()?;
             }
@@ -224,7 +239,11 @@ fn read_mesh(reader: &Reader, name: String, start: usize, end: usize) -> Result<
 }
 
 /// 解析 3DS。
-pub async fn parse(bytes: Vec<u8>, path: PathBuf, io: Arc<dyn ResourceIo>) -> Result<Model, LoadError> {
+pub async fn parse(
+    bytes: Vec<u8>,
+    path: PathBuf,
+    io: Arc<dyn ResourceIo>,
+) -> Result<Model, LoadError> {
     let reader = Reader { data: &bytes };
     if reader.u16(0)? != 0x4D4D {
         return Err(bad("不是 3DS 文件（缺少 0x4D4D 主块）"));
@@ -288,7 +307,9 @@ pub async fn parse(bytes: Vec<u8>, path: PathBuf, io: Arc<dyn ResourceIo>) -> Re
         if let Some((name, [su, sv, ou, ov])) = &source.diffuse_map
             && let Some(t) = texture(name, false).await
         {
-            material = material.with_base_color_texture(t).with_base_color(Vec4::new(1.0, 1.0, 1.0, 1.0 - source.transparency));
+            material = material
+                .with_base_color_texture(t)
+                .with_base_color(Vec4::new(1.0, 1.0, 1.0, 1.0 - source.transparency));
             if (*su, *sv, *ou, *ov) != (1.0, 1.0, 0.0, 0.0) {
                 material.set(kpbr::standard::UV_SCALE, kmath::Vec2::new(*su, *sv));
                 material.set(kpbr::standard::UV_OFFSET, kmath::Vec2::new(*ou, *ov));
@@ -303,8 +324,16 @@ pub async fn parse(bytes: Vec<u8>, path: PathBuf, io: Arc<dyn ResourceIo>) -> Re
         engine_materials.push(material);
     }
     let fallback = engine_materials.len();
-    engine_materials.push(Material::standard().with_base_color(Vec4::new(0.8, 0.8, 0.8, 1.0)).with_roughness(0.6));
-    let index_of: HashMap<&str, usize> = materials.iter().enumerate().map(|(i, m)| (m.name.as_str(), i)).collect();
+    engine_materials.push(
+        Material::standard()
+            .with_base_color(Vec4::new(0.8, 0.8, 0.8, 1.0))
+            .with_roughness(0.6),
+    );
+    let index_of: HashMap<&str, usize> = materials
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (m.name.as_str(), i))
+        .collect();
 
     let mut parts = Vec::new();
     for object in &objects {
@@ -336,7 +365,11 @@ pub async fn parse(bytes: Vec<u8>, path: PathBuf, io: Arc<dyn ResourceIo>) -> Re
                     let index = *remap.entry(corner).or_insert_with(|| {
                         vertices.push(Vertex {
                             position: position.to_array(),
-                            uv: object.uvs.get(corner as usize).copied().unwrap_or([0.0, 0.0]),
+                            uv: object
+                                .uvs
+                                .get(corner as usize)
+                                .copied()
+                                .unwrap_or([0.0, 0.0]),
                             ..Default::default()
                         });
                         vertices.len() as u32 - 1
@@ -353,7 +386,10 @@ pub async fn parse(bytes: Vec<u8>, path: PathBuf, io: Arc<dyn ResourceIo>) -> Re
             parts.push((object.name.clone(), mesh, Some(material)));
         }
     }
-    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "3DS".into());
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "3DS".into());
     Ok(flat_model(&name, parts, engine_materials))
 }
 
@@ -388,13 +424,20 @@ mod tests {
         let mesh = [chunk(0x4110, &vertices), chunk(0x4120, &faces)].concat();
         let mut object = b"Tri\0".to_vec();
         object.extend(chunk(0x4100, &mesh));
-        let material = [chunk(0xA000, b"Red\0"), chunk(0xA020, &chunk(0x0011, &[255, 0, 0]))].concat();
+        let material = [
+            chunk(0xA000, b"Red\0"),
+            chunk(0xA020, &chunk(0x0011, &[255, 0, 0])),
+        ]
+        .concat();
         let editor = [chunk(0xAFFF, &material), chunk(0x4000, &object)].concat();
         let file = chunk(0x4D4D, &chunk(0x3D3D, &editor));
 
         let io: Arc<dyn ResourceIo> = Arc::new(MemoryResourceIo::new());
         let model = ktask::block_on(parse(file, PathBuf::from("t.3ds"), io)).unwrap();
         assert_eq!(model.triangle_count(), 1);
-        assert_eq!(model.materials()[0].base_color(), Vec4::new(1.0, 0.0, 0.0, 1.0));
+        assert_eq!(
+            model.materials()[0].base_color(),
+            Vec4::new(1.0, 0.0, 0.0, 1.0)
+        );
     }
 }

@@ -10,6 +10,7 @@ use kmath::{Aabb, Vec3};
 fn batch_of(first: u32, count: u32) -> Batch {
     Batch {
         double_sided: false,
+        depth_write: false,
         mesh_id: Uuid::from_u128(1),
         shader_id: Uuid::nil(),
         texture_key: [Uuid::from_u128(1); TEXTURE_KEY_SLOTS],
@@ -18,6 +19,11 @@ fn batch_of(first: u32, count: u32) -> Batch {
         count,
         index_range: (0, 36),
     }
+}
+
+/// 一个对象一个槽（没有实例化）：现有这些测试的前提。
+fn plain_slots(count: usize) -> Vec<InstanceSlot> {
+    (0..count as u32).map(|i| [i, NO_INSTANCE]).collect()
 }
 
 fn box_at(x: f32) -> Aabb {
@@ -33,7 +39,14 @@ fn matrix() -> Mat4 {
 #[test]
 fn everything_visible_keeps_one_batch() {
     let bounds = vec![box_at(0.0), box_at(1.0), box_at(2.0)];
-    let out = cascade_batches(&[batch_of(0, 3)], &bounds, matrix(), 1024, 0.0);
+    let out = cascade_batches(
+        &[batch_of(0, 3)],
+        &plain_slots(bounds.len()),
+        &bounds,
+        matrix(),
+        1024,
+        0.0,
+    );
 
     assert_eq!(out.len(), 1, "全可见却被切开了");
     assert_eq!((out[0].first, out[0].count), (0, 3));
@@ -42,7 +55,14 @@ fn everything_visible_keeps_one_batch() {
 #[test]
 fn everything_culled_yields_nothing() {
     let bounds = vec![box_at(500.0), box_at(600.0)];
-    let out = cascade_batches(&[batch_of(0, 2)], &bounds, matrix(), 1024, 0.0);
+    let out = cascade_batches(
+        &[batch_of(0, 2)],
+        &plain_slots(bounds.len()),
+        &bounds,
+        matrix(),
+        1024,
+        0.0,
+    );
     assert!(out.is_empty());
 }
 
@@ -51,7 +71,14 @@ fn a_hole_in_the_middle_splits_the_batch() {
     // 中间那个被剔掉，两边各成一段。合成一段的话中间那个会被画上，
     // 剔除等于白做。
     let bounds = vec![box_at(0.0), box_at(500.0), box_at(2.0)];
-    let out = cascade_batches(&[batch_of(0, 3)], &bounds, matrix(), 1024, 0.0);
+    let out = cascade_batches(
+        &[batch_of(0, 3)],
+        &plain_slots(bounds.len()),
+        &bounds,
+        matrix(),
+        1024,
+        0.0,
+    );
 
     assert_eq!(out.len(), 2);
     assert_eq!((out[0].first, out[0].count), (0, 1));
@@ -63,7 +90,14 @@ fn instance_indices_are_preserved_not_compacted() {
     // 这是整个设计的核心约束。压缩下标的话，阴影会用错的模型矩阵——
     // 影子出现在别的物体的位置上。
     let bounds = vec![box_at(500.0), box_at(500.0), box_at(0.0)];
-    let out = cascade_batches(&[batch_of(0, 3)], &bounds, matrix(), 1024, 0.0);
+    let out = cascade_batches(
+        &[batch_of(0, 3)],
+        &plain_slots(bounds.len()),
+        &bounds,
+        matrix(),
+        1024,
+        0.0,
+    );
 
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].first, 2, "下标被压缩了，该是 2 不是 0");
@@ -79,7 +113,14 @@ fn a_batch_that_does_not_start_at_zero_is_handled() {
         box_at(500.0),
         box_at(1.0),
     ];
-    let out = cascade_batches(&[batch_of(2, 3)], &bounds, matrix(), 1024, 0.0);
+    let out = cascade_batches(
+        &[batch_of(2, 3)],
+        &plain_slots(bounds.len()),
+        &bounds,
+        matrix(),
+        1024,
+        0.0,
+    );
 
     assert_eq!(out.len(), 2);
     assert_eq!((out[0].first, out[0].count), (2, 1));
@@ -94,7 +135,14 @@ fn batch_metadata_is_carried_over() {
     source.mesh_id = Uuid::from_u128(42);
     let bounds = vec![box_at(0.0), box_at(1.0)];
 
-    let out = cascade_batches(&[source], &bounds, matrix(), 1024, 0.0);
+    let out = cascade_batches(
+        &[source],
+        &plain_slots(bounds.len()),
+        &bounds,
+        matrix(),
+        1024,
+        0.0,
+    );
     assert_eq!(out[0].mesh_id, Uuid::from_u128(42));
     assert!(out[0].skinned);
 }
@@ -104,6 +152,7 @@ fn several_batches_are_processed_independently() {
     let bounds = vec![box_at(0.0), box_at(500.0), box_at(1.0), box_at(2.0)];
     let out = cascade_batches(
         &[batch_of(0, 2), batch_of(2, 2)],
+        &plain_slots(bounds.len()),
         &bounds,
         matrix(),
         1024,
@@ -119,7 +168,14 @@ fn several_batches_are_processed_independently() {
 fn a_batch_running_past_the_bounds_array_does_not_panic() {
     // 下标对不上是个 bug，但崩掉整帧比少画一个影子糟得多。
     let bounds = vec![box_at(0.0)];
-    let out = cascade_batches(&[batch_of(0, 10)], &bounds, matrix(), 1024, 0.0);
+    let out = cascade_batches(
+        &[batch_of(0, 10)],
+        &plain_slots(bounds.len()),
+        &bounds,
+        matrix(),
+        1024,
+        0.0,
+    );
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].count, 1);
 }
@@ -129,10 +185,24 @@ fn size_culling_removes_small_objects() {
     let tiny = Aabb::from_center_half_extents(Vec3::ZERO, Vec3::splat(0.001));
     let bounds = vec![tiny, box_at(0.0)];
 
-    let without = cascade_batches(&[batch_of(0, 2)], &bounds, matrix(), 1024, 0.0);
+    let without = cascade_batches(
+        &[batch_of(0, 2)],
+        &plain_slots(bounds.len()),
+        &bounds,
+        matrix(),
+        1024,
+        0.0,
+    );
     assert_eq!(without[0].count, 2, "关掉尺寸剔除时两个都该画");
 
-    let with = cascade_batches(&[batch_of(0, 2)], &bounds, matrix(), 1024, 2.0);
+    let with = cascade_batches(
+        &[batch_of(0, 2)],
+        &plain_slots(bounds.len()),
+        &bounds,
+        matrix(),
+        1024,
+        2.0,
+    );
     assert_eq!(with.len(), 1);
     assert_eq!((with[0].first, with[0].count), (1, 1), "小物件没被剔掉");
 }
@@ -144,7 +214,14 @@ fn culling_cuts_the_work_on_a_spread_out_scene() {
     let bounds: Vec<Aabb> = (0..200).map(|i| box_at(i as f32 * 2.0 - 200.0)).collect();
     let full = batch_of(0, bounds.len() as u32);
 
-    let out = cascade_batches(&[full], &bounds, matrix(), 1024, 0.0);
+    let out = cascade_batches(
+        &[full],
+        &plain_slots(bounds.len()),
+        &bounds,
+        matrix(),
+        1024,
+        0.0,
+    );
     let kept: u32 = out.iter().map(|b| b.count).sum();
 
     assert!(
@@ -153,4 +230,15 @@ fn culling_cuts_the_work_on_a_spread_out_scene() {
         bounds.len()
     );
     assert!(kept > 0, "一个都没留下，把该画的也剔了");
+}
+
+#[test]
+fn an_instanced_object_is_kept_or_culled_as_a_whole() {
+    // 第 0 个对象是实例化的（5 个槽），第 1 个在光的范围外。实例化对象的槽共用一个包围盒，
+    // 一起留下；不能每个槽判一次（十万个实例就是十万次）。
+    let slots: Vec<InstanceSlot> = (0..5).map(|i| [0, i]).chain([[1, NO_INSTANCE]]).collect();
+    let bounds = vec![box_at(0.0), box_at(500.0)];
+    let out = cascade_batches(&[batch_of(0, 6)], &slots, &bounds, matrix(), 1024, 0.0);
+    assert_eq!(out.len(), 1);
+    assert_eq!((out[0].first, out[0].count), (0, 5));
 }

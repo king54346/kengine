@@ -24,6 +24,12 @@ use kmath::{Vec2, Vec4};
 use kui::{AlignCross, Direction, Edges, Id, Justify, LayoutNode, Length, Style};
 use kui::{Rect, Response, Ui};
 
+/// 行首标签占行宽的比例。
+pub(crate) const ROW_LABEL_FRACTION: f32 = 0.38;
+
+/// 一行字的高度和字号之比。中文字形本身就接近一个字号高，再留出上下的呼吸。
+pub(crate) const LINE_HEIGHT: f32 = 1.4;
+
 /// 文字样式。各控件量尺寸、出几何都用它，省得每处重写一遍。
 pub(crate) fn text_style(size: f32) -> TextStyle {
     TextStyle {
@@ -64,25 +70,53 @@ pub struct Theme {
     pub font_size: f32,
     /// 控件的最小高度。
     pub row_height: f32,
+    /// 面板比它包住的控件往外多出多少。
+    pub panel_margin: f32,
+}
+
+/// 一个 sRGB 十六进制色（设计稿、取色器给的那种）换成 UI 用的线性色。
+///
+/// UI 管线和标记语言（`style_attr`）一样按**线性**颜色混合、再由 sRGB 交换链
+/// 编码。主题以前直接写了一组 0..1 的数当颜色，那些数是照 sRGB 的观感挑的，
+/// 却被当成线性值用——面板的「0.10 深灰」上屏成了 #595B66 的中灰，
+/// 浅色场景上整块面板糊成一片，次要文字也跟着发白，对比度全没了。
+pub fn srgb(hex: u32, alpha: f32) -> Vec4 {
+    let channel = |shift: u32| {
+        let c = ((hex >> shift) & 0xff) as f32 / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    Vec4::new(channel(16), channel(8), channel(0), alpha)
 }
 
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            panel: Vec4::new(0.10, 0.11, 0.14, 0.94),
-            surface: Vec4::new(0.18, 0.19, 0.24, 1.0),
-            hovered: Vec4::new(0.24, 0.26, 0.32, 1.0),
-            active: Vec4::new(0.14, 0.15, 0.19, 1.0),
-            accent: Vec4::new(0.25, 0.55, 1.00, 1.0),
-            text: Vec4::new(0.92, 0.93, 0.96, 1.0),
-            dim: Vec4::new(0.55, 0.58, 0.66, 1.0),
-            outline: Vec4::new(1.0, 1.0, 1.0, 0.14),
-            focus: Vec4::new(0.45, 0.70, 1.00, 0.9),
+            // 深色、略透：压得住亮场景，又能隐约看见后面。
+            //
+            // 不透明度给得高：混合发生在**线性**空间，亮场景透过来的那一点点
+            // 光占的分量比看上去大得多——0.86 在浅色场景上整块是中灰。
+            panel: srgb(0x15171c, 0.95),
+            surface: srgb(0x2b2e37, 1.0),
+            hovered: srgb(0x383c48, 1.0),
+            active: srgb(0x1f2128, 1.0),
+            accent: srgb(0x3d8bff, 1.0),
+            text: srgb(0xeceef3, 1.0),
+            // 次要文字在面板上的对比度约 7:1（WCAG AAA），以前约 2:1。
+            dim: srgb(0xa3aabb, 1.0),
+            outline: Vec4::new(1.0, 1.0, 1.0, 0.10),
+            focus: srgb(0x6aa8ff, 0.9),
             modal: Vec4::new(0.0, 0.0, 0.0, 0.55),
             radius: 6.0,
             padding: Edges::axes(12.0, 6.0),
             font_size: 15.0,
-            row_height: 30.0,
+            // 28 + 根容器的 4 像素间隔 = 每行 32：和 lil-gui 的密度相当。
+            // 以前是 30 + 8，一列复选框看着像隔行排的。
+            row_height: 28.0,
+            panel_margin: 10.0,
         }
     }
 }
@@ -419,7 +453,7 @@ impl Default for WidgetUi {
                 direction: Direction::Column,
                 align: AlignCross::Start,
                 padding: Edges::all(16.0),
-                gap: 8.0,
+                gap: 4.0,
                 ..Default::default()
             },
             interaction: Default::default(),
@@ -649,6 +683,9 @@ impl WidgetUi {
         // 菜单摆位要排在滚动之后：一个从滚动区里的按钮弹出来的菜单，
         // 该跟着那个按钮一起滚，而不是留在它原来的位置上。
         self.apply_menu_placement();
+        // 面板最后撑：它要包住的控件这时才都到了最终位置。
+        // 排在交互之前，于是「指针在面板上」也按撑开之后的矩形算。
+        self.fit_panels();
 
         // 交互按前序的矩形判定；后面的画在上面，命中时从后往前找。
         //
@@ -801,6 +838,57 @@ impl WidgetUi {
         }
     }
 
+    /// 把每块面板撑成「它后面那些控件」的外框，再往外放一圈边距。
+    ///
+    /// 面板管到下一块面板为止（没有就到最后）。菜单浮层和遮罩不算——
+    /// 它们浮在别的东西上面，面板跟着撑过去的话会盖住半个屏幕。
+    fn fit_panels(&mut self) {
+        let margin = self.theme.panel_margin;
+        let panels: Vec<usize> = self
+            .declared
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| matches!(d.widget, Widget::Panel { .. }))
+            .map(|(i, _)| i)
+            .collect();
+        for (k, &index) in panels.iter().enumerate() {
+            let end = panels.get(k + 1).copied().unwrap_or(self.declared.len());
+            let mut bounds: Option<Rect> = None;
+            for i in index + 1..end {
+                if matches!(self.declared[i].widget, Widget::Modal { .. }) || self.in_menu_frame(i)
+                {
+                    continue;
+                }
+                let rect = self.rects[i];
+                if rect.size().x <= 0.0 && rect.size().y <= 0.0 {
+                    continue;
+                }
+                bounds = Some(match bounds {
+                    Some(b) => Rect {
+                        min: b.min.min(rect.min),
+                        max: b.max.max(rect.max),
+                    },
+                    None => rect,
+                });
+            }
+            self.rects[index] = match bounds {
+                Some(b) => Rect {
+                    min: b.min - Vec2::splat(margin),
+                    max: b.max + Vec2::splat(margin),
+                },
+                // 面板后面什么都没有：不画，也不挡指针。
+                None => Rect::default(),
+            };
+        }
+    }
+
+    /// 某个声明是不是在菜单浮层里。
+    fn in_menu_frame(&self, index: usize) -> bool {
+        self.menu_frames
+            .iter()
+            .any(|f| index >= f.first && index < f.last.min(self.declared.len()))
+    }
+
     /// 处理滚轮、夹取偏移，并把滚动区里的矩形整体上移。
     fn apply_scroll(&mut self, input: &kui::UiInput) {
         let Some(frame) = self.scroll_frame else {
@@ -916,12 +1004,22 @@ impl WidgetUi {
             },
             min_size: Vec2::new(
                 0.0,
-                if vertical_slider {
-                    0.0
-                } else {
-                    theme.row_height
+                match declared.widget {
+                    // 竖滑条自己定高度，见上面。
+                    _ if vertical_slider => 0.0,
+                    // 文字和面板不吃控件的最小行高：一行字给 30 像素高、
+                    // 再加上行间隔，说明文字之间空得像隔了一行，读起来很散。
+                    // 它们的高度就是内容的高度。
+                    // 但不低于一行字：没装字体（或者字体还在加载）时量出来是 0，
+                    // 整列标签会叠成一条线。
+                    Widget::Label { size, .. } => (size * LINE_HEIGHT).ceil(),
+                    Widget::Panel { .. } => 0.0,
+                    _ => theme.row_height,
                 },
             ),
+            // 面板不占位置：它画在后面那些控件的底下，矩形在求解之后才撑出来，
+            // 见 `fit_panels`。占位置的话它就成了第一行上一个孤零零的小方块。
+            absolute: matches!(declared.widget, Widget::Panel { .. }),
             padding: match declared.widget {
                 // 文字不加内边距——加了之后一行文字看着像个按钮。
                 Widget::Label { .. } => Edges::default(),
@@ -936,7 +1034,22 @@ impl WidgetUi {
         };
 
         // 行内的第一个控件把剩余空间吃掉，把后面的挤到右边。
-        if declared.grow {
+        //
+        // 例外是**行首的标签**：它占固定的一列（行宽的 38%），后面的滑条、
+        // 下拉框于是从同一条竖线开始。按各自文字宽度分的话，「音量」和
+        // 「灵敏度」两行的滑条起点差出一截，一列控件看着参差不齐。
+        // 文字比这一列还宽时照常撑开（最小宽度是内容宽），不会截断。
+        if declared.grow && matches!(declared.widget, Widget::Label { .. }) {
+            style.width = Length::Percent(ROW_LABEL_FRACTION);
+            style.shrink = 0.0;
+        } else if declared.grow {
+            style.grow = 1.0;
+        } else if !matches!(declared.widget, Widget::Label { .. })
+            && self.row_starts_with_label(declared.row)
+        {
+            // 标签那一列之后的控件（按钮、下拉框……）把值那一列铺满，和 lil-gui 一样：
+            // 一列控件右边缘对齐，而不是各自按文字宽度长短不一。
+            // 行尾的数值标签（`名字 [滑条] 0.42`）不在此列，它保持自己的宽度。
             style.grow = 1.0;
         }
         // 行里的滑条 / 文本框也分一份，而且分得比标签多——
@@ -958,6 +1071,15 @@ impl WidgetUi {
             .x
             .max(content.x + theme.padding.left + theme.padding.right);
         LayoutNode::leaf(declared.id, style, content)
+    }
+
+    /// 这一行是不是以一个标签开头（`名字 [控件]` 那种行）。
+    fn row_starts_with_label(&self, row: Option<usize>) -> bool {
+        let Some(row) = row else { return false };
+        self.declared
+            .iter()
+            .find(|d| d.row == Some(row))
+            .is_some_and(|d| matches!(d.widget, Widget::Label { .. }))
     }
 
     /// 把声明变成布局树。
@@ -1358,11 +1480,7 @@ mod tests {
             w.begin();
             declare(&mut w);
             w.finish(&mut ui, &tab);
-            assert_eq!(
-                w.response(Id::new(name)).focused,
-                true,
-                "Tab 该停在 {name} 上"
-            );
+            assert!(w.response(Id::new(name)).focused, "Tab 该停在 {name} 上");
         }
     }
 
@@ -1500,8 +1618,8 @@ mod tests {
 
     #[test]
     fn the_first_widget_in_a_row_takes_the_slack() {
-        // 第一个控件吃掉剩余空间，把后面的挤到右边——这是「右对齐」
-        // 的实现方式。不这么做的话标签和控件会挤在左边。
+        // 行首标签占固定一列，后面的控件铺满剩下的那一列（右边缘贴着容器）。
+        // 不这么做的话标签和控件会挤在左边。
         let mut w = WidgetUi::default();
         w.root_style(Style {
             width: Length::Px(400.0),
@@ -1520,7 +1638,7 @@ mod tests {
         let control_rect = w.response(control).rect;
         assert!(
             control_rect.max.x > 300.0,
-            "控件没被挤到右边，右边缘在 x={}",
+            "控件没铺到右边，右边缘在 x={}",
             control_rect.max.x
         );
     }

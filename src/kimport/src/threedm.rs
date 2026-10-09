@@ -132,7 +132,11 @@ impl Archive<'_> {
                 i32::from_le_bytes(self.data[at + 4..at + 8].try_into().expect("4")) as i64
             };
             if code & TCODE_SHORT != 0 {
-                out.push(Chunk { code, start: at + header, end: at + header });
+                out.push(Chunk {
+                    code,
+                    start: at + header,
+                    end: at + header,
+                });
                 at += header;
                 continue;
             }
@@ -141,7 +145,11 @@ impl Archive<'_> {
             }
             let body_end = at + header + value as usize;
             let crc = if code & TCODE_CRC != 0 { 4 } else { 0 };
-            out.push(Chunk { code, start: at + header, end: body_end.saturating_sub(crc).max(at + header) });
+            out.push(Chunk {
+                code,
+                start: at + header,
+                end: body_end.saturating_sub(crc).max(at + header),
+            });
             at = body_end;
         }
         out
@@ -150,9 +158,17 @@ impl Archive<'_> {
     /// 一个 `TCODE_OPENNURBS_CLASS` 块 → `(类 UUID, 数据块范围)`。
     fn class(&self, chunk: Chunk) -> Option<([u8; 16], usize, usize)> {
         let inner = self.chunks(chunk.start, chunk.end + 4);
-        let id = inner.iter().find(|c| c.code == TCODE_OPENNURBS_CLASS_UUID)?;
-        let data = inner.iter().find(|c| c.code == TCODE_OPENNURBS_CLASS_DATA)?;
-        Some((self.data.get(id.start..id.start + 16)?.try_into().ok()?, data.start, data.end))
+        let id = inner
+            .iter()
+            .find(|c| c.code == TCODE_OPENNURBS_CLASS_UUID)?;
+        let data = inner
+            .iter()
+            .find(|c| c.code == TCODE_OPENNURBS_CLASS_DATA)?;
+        Some((
+            self.data.get(id.start..id.start + 16)?.try_into().ok()?,
+            data.start,
+            data.end,
+        ))
     }
 }
 
@@ -195,7 +211,11 @@ impl<'a> Cursor<'a> {
     /// 跳过一个嵌套的大块（网格参数、曲率统计）。
     fn skip_chunk(&mut self) -> Result<(), LoadError> {
         self.skip(4)?;
-        let length = if self.wide { i64::from_le_bytes(self.take(8)?.try_into().expect("8")) } else { self.i32()? as i64 };
+        let length = if self.wide {
+            i64::from_le_bytes(self.take(8)?.try_into().expect("8"))
+        } else {
+            self.i32()? as i64
+        };
         if length < 0 {
             return Err(bad("3DM 块长度为负"));
         }
@@ -205,14 +225,23 @@ impl<'a> Cursor<'a> {
     fn string(&mut self) -> Result<String, LoadError> {
         let n = self.count(1 << 20)?;
         let raw = self.take(n * 2)?;
-        let units: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&u| u != 0).collect();
+        let units: Vec<u16> = raw
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .take_while(|&u| u != 0)
+            .collect();
         Ok(String::from_utf16_lossy(&units))
     }
     /// `ON_Color`：`R | G<<8 | B<<16 | A<<24`，A 是**透明度**。
     fn color(&mut self) -> Result<Vec4, LoadError> {
         let b = self.take(4)?;
         let s = crate::amf::srgb_to_linear;
-        Ok(Vec4::new(s(b[0] as f32 / 255.0), s(b[1] as f32 / 255.0), s(b[2] as f32 / 255.0), 1.0 - b[3] as f32 / 255.0))
+        Ok(Vec4::new(
+            s(b[0] as f32 / 255.0),
+            s(b[1] as f32 / 255.0),
+            s(b[2] as f32 / 255.0),
+            1.0 - b[3] as f32 / 255.0,
+        ))
     }
     /// `ReadCompressedBuffer`：CRC、方式（0 原样 / 1 zlib 块）、数据。
     fn compressed(&mut self, size: usize) -> Result<Vec<u8>, LoadError> {
@@ -227,11 +256,20 @@ impl<'a> Cursor<'a> {
             0 => Ok(self.take(size)?.to_vec()),
             1 => {
                 self.skip(4)?;
-                let length = if self.wide { i64::from_le_bytes(self.take(8)?.try_into().expect("8")) } else { self.i32()? as i64 };
+                let length = if self.wide {
+                    i64::from_le_bytes(self.take(8)?.try_into().expect("8"))
+                } else {
+                    self.i32()? as i64
+                };
                 let body = self.take(length.max(0) as usize)?;
                 let stream = &body[..body.len().saturating_sub(4)];
                 let mut out = Vec::with_capacity(size);
-                if flate2::read::ZlibDecoder::new(stream).take(size as u64).read_to_end(&mut out).is_err() || out.len() < size {
+                if flate2::read::ZlibDecoder::new(stream)
+                    .take(size as u64)
+                    .read_to_end(&mut out)
+                    .is_err()
+                    || out.len() < size
+                {
                     out.clear();
                     flate2::read::DeflateDecoder::new(stream)
                         .take(size as u64)
@@ -253,7 +291,9 @@ fn read_mesh(c: &mut Cursor) -> Result<Mesh, LoadError> {
     let version = c.u8()?;
     let major = version >> 4;
     if major != 3 {
-        return Err(bad(format!("3DM 网格版本 {major}.x 不支持（只读压缩格式 3.x）")));
+        return Err(bad(format!(
+            "3DM 网格版本 {major}.x 不支持（只读压缩格式 3.x）"
+        )));
     }
     let vcount = c.count(limits::VERTICES)?;
     let fcount = c.count(limits::VERTICES)?;
@@ -282,7 +322,11 @@ fn read_mesh(c: &mut Cursor) -> Result<Mesh, LoadError> {
     let mut buffer = |element: usize| -> Result<Vec<u8>, LoadError> {
         let size = c.i32()?.max(0) as usize;
         let data = c.compressed(size)?;
-        Ok(if data.len() == vcount * element { data } else { Vec::new() })
+        Ok(if data.len() == vcount * element {
+            data
+        } else {
+            Vec::new()
+        })
     };
     let positions = buffer(12)?;
     let normals = buffer(12)?;
@@ -295,15 +339,35 @@ fn read_mesh(c: &mut Cursor) -> Result<Mesh, LoadError> {
     let f = |b: &[u8], i: usize| f32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().expect("4"));
     let vertices = (0..vcount)
         .map(|i| Vertex {
-            position: [f(&positions, i * 3), f(&positions, i * 3 + 1), f(&positions, i * 3 + 2)],
-            normal: if normals.is_empty() { [0.0, 0.0, 1.0] } else { [f(&normals, i * 3), f(&normals, i * 3 + 1), f(&normals, i * 3 + 2)] },
+            position: [
+                f(&positions, i * 3),
+                f(&positions, i * 3 + 1),
+                f(&positions, i * 3 + 2),
+            ],
+            normal: if normals.is_empty() {
+                [0.0, 0.0, 1.0]
+            } else {
+                [
+                    f(&normals, i * 3),
+                    f(&normals, i * 3 + 1),
+                    f(&normals, i * 3 + 2),
+                ]
+            },
             // Rhino 的 V 朝上。
-            uv: if uvs.is_empty() { [0.0, 0.0] } else { [f(&uvs, i * 2), 1.0 - f(&uvs, i * 2 + 1)] },
+            uv: if uvs.is_empty() {
+                [0.0, 0.0]
+            } else {
+                [f(&uvs, i * 2), 1.0 - f(&uvs, i * 2 + 1)]
+            },
             color: if colors.is_empty() {
                 [1.0; 3]
             } else {
                 let s = crate::amf::srgb_to_linear;
-                [s(colors[i * 4] as f32 / 255.0), s(colors[i * 4 + 1] as f32 / 255.0), s(colors[i * 4 + 2] as f32 / 255.0)]
+                [
+                    s(colors[i * 4] as f32 / 255.0),
+                    s(colors[i * 4 + 1] as f32 / 255.0),
+                    s(colors[i * 4 + 2] as f32 / 255.0),
+                ]
             },
             ..Default::default()
         })
@@ -358,7 +422,11 @@ fn read_nurbs_curve(c: &mut Cursor) -> Result<Vec<Vec3>, LoadError> {
     knots.push(*knots.last().expect("非空"));
     let degree = order - 1;
     let (u0, u1) = (knots[degree], knots[knots.len() - 1 - degree]);
-    let samples = if degree == 1 { cv_count - 1 } else { (cv_count * 12).min(4096) };
+    let samples = if degree == 1 {
+        cv_count - 1
+    } else {
+        (cv_count * 12).min(4096)
+    };
     Ok((0..=samples)
         .map(|k| {
             let u = u0 + (u1 - u0) * k as f64 / samples.max(1) as f64;
@@ -420,7 +488,11 @@ fn read_layer(c: &mut Cursor) -> Result<Layer, LoadError> {
     if version & 0x0f >= 1 {
         visible &= c.u8()? != 0;
     }
-    Ok(Layer { name, color: Vec4::new(color.x, color.y, color.z, 1.0), visible })
+    Ok(Layer {
+        name,
+        color: Vec4::new(color.x, color.y, color.z, 1.0),
+        visible,
+    })
 }
 
 /// 在一段字节里找嵌套的 `ON_Mesh` 类块（Brep / SubD 的缓存显示网格）。
@@ -433,14 +505,29 @@ fn find_cached_mesh(archive: &Archive, start: usize, end: usize) -> Option<Mesh>
         let at = start + from + offset;
         from += offset + 16;
         // UUID 块头在它前面 `header` 字节，类块头再往前 `header` 字节。
-        let (Some(uuid_header), Some(class_header)) = (at.checked_sub(header), at.checked_sub(2 * header)) else { continue };
+        let (Some(uuid_header), Some(class_header)) =
+            (at.checked_sub(header), at.checked_sub(2 * header))
+        else {
+            continue;
+        };
         let code = |p: usize| u32::from_le_bytes(archive.data[p..p + 4].try_into().expect("4"));
-        if code(uuid_header) != TCODE_OPENNURBS_CLASS_UUID || code(class_header) != TCODE_OPENNURBS_CLASS {
+        if code(uuid_header) != TCODE_OPENNURBS_CLASS_UUID
+            || code(class_header) != TCODE_OPENNURBS_CLASS
+        {
             continue;
         }
-        let Some(chunk) = archive.chunks(class_header, end).first().copied() else { continue };
-        let Some((_, data_start, data_end)) = archive.class(chunk) else { continue };
-        let mut cursor = Cursor { data: archive.data, at: data_start, end: data_end, wide: archive.wide };
+        let Some(chunk) = archive.chunks(class_header, end).first().copied() else {
+            continue;
+        };
+        let Some((_, data_start, data_end)) = archive.class(chunk) else {
+            continue;
+        };
+        let mut cursor = Cursor {
+            data: archive.data,
+            at: data_start,
+            end: data_end,
+            wide: archive.wide,
+        };
         if let Ok(mesh) = read_mesh(&mut cursor) {
             return Some(mesh);
         }
@@ -449,13 +536,24 @@ fn find_cached_mesh(archive: &Archive, start: usize, end: usize) -> Option<Mesh>
 }
 
 /// 解析成 [`Model`]。
-pub async fn parse(bytes: Vec<u8>, path: PathBuf, io: Arc<dyn ResourceIo>) -> Result<Model, LoadError> {
+pub async fn parse(
+    bytes: Vec<u8>,
+    path: PathBuf,
+    io: Arc<dyn ResourceIo>,
+) -> Result<Model, LoadError> {
     Ok(parse_scene(bytes, path, io).await?.model)
 }
 
 /// 解析成 [`Rhino3dm`]。
-pub async fn parse_scene(bytes: Vec<u8>, path: PathBuf, _io: Arc<dyn ResourceIo>) -> Result<Rhino3dm, LoadError> {
-    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Rhino".into());
+pub async fn parse_scene(
+    bytes: Vec<u8>,
+    path: PathBuf,
+    _io: Arc<dyn ResourceIo>,
+) -> Result<Rhino3dm, LoadError> {
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Rhino".into());
     parse_bytes(&bytes, &name)
 }
 
@@ -464,16 +562,35 @@ pub fn parse_bytes(bytes: &[u8], name: &str) -> Result<Rhino3dm, LoadError> {
     if bytes.len() < 32 || !bytes.starts_with(b"3D Geometry File Format ") {
         return Err(bad("不是 3DM 文件"));
     }
-    let version: u32 = std::str::from_utf8(&bytes[24..32]).ok().and_then(|s| s.trim().parse().ok()).ok_or_else(|| bad("3DM 版本号读不出来"))?;
-    let archive = Archive { data: bytes, wide: version >= 50 };
+    let version: u32 = std::str::from_utf8(&bytes[24..32])
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .ok_or_else(|| bad("3DM 版本号读不出来"))?;
+    let archive = Archive {
+        data: bytes,
+        wide: version >= 50,
+    };
     let top = archive.chunks(32, bytes.len());
 
     let mut layers = Vec::new();
     for table in top.iter().filter(|c| c.code == TCODE_LAYER_TABLE) {
-        for record in archive.chunks(table.start, table.end + 4).into_iter().filter(|c| c.code == TCODE_LAYER_RECORD) {
-            for chunk in archive.chunks(record.start, record.end).into_iter().filter(|c| c.code == TCODE_OPENNURBS_CLASS) {
+        for record in archive
+            .chunks(table.start, table.end + 4)
+            .into_iter()
+            .filter(|c| c.code == TCODE_LAYER_RECORD)
+        {
+            for chunk in archive
+                .chunks(record.start, record.end)
+                .into_iter()
+                .filter(|c| c.code == TCODE_OPENNURBS_CLASS)
+            {
                 if let Some((_, start, end)) = archive.class(chunk) {
-                    let mut cursor = Cursor { data: bytes, at: start, end, wide: archive.wide };
+                    let mut cursor = Cursor {
+                        data: bytes,
+                        at: start,
+                        end,
+                        wide: archive.wide,
+                    };
                     match read_layer(&mut cursor) {
                         Ok(layer) => layers.push(layer),
                         Err(error) => klog::warn!("3DM 图层读不出来：{error}"),
@@ -483,11 +600,19 @@ pub fn parse_bytes(bytes: &[u8], name: &str) -> Result<Rhino3dm, LoadError> {
         }
     }
     if layers.is_empty() {
-        layers.push(Layer { name: "Default".into(), color: Vec4::ONE, visible: true });
+        layers.push(Layer {
+            name: "Default".into(),
+            color: Vec4::ONE,
+            visible: true,
+        });
     }
 
     let mesh_class = class("4ED7D4E4-E947-11d3-BFE5-0010830122F0");
-    let nurbs_curves = [class("4ED7D4DD-E947-11d3-BFE5-0010830122F0"), class("5EAF1119-0B51-11d4-BFFE-0010830122F0"), class("76A709D5-1550-11d4-8000-0010830122F0")];
+    let nurbs_curves = [
+        class("4ED7D4DD-E947-11d3-BFE5-0010830122F0"),
+        class("5EAF1119-0B51-11d4-BFFE-0010830122F0"),
+        class("76A709D5-1550-11d4-8000-0010830122F0"),
+    ];
     let line_curve = class("4ED7D4DB-E947-11d3-BFE5-0010830122F0");
     let polyline_curve = class("4ED7D4E6-E947-11d3-BFE5-0010830122F0");
     let poly_curve = class("4ED7D4E0-E947-11d3-BFE5-0010830122F0");
@@ -498,12 +623,18 @@ pub fn parse_bytes(bytes: &[u8], name: &str) -> Result<Rhino3dm, LoadError> {
     let mut materials = Vec::new();
     let mut nodes = vec![ModelNode {
         name: name.to_string(),
-        transform: NodeTransform { rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2), ..Default::default() },
+        transform: NodeTransform {
+            rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            ..Default::default()
+        },
         children: (1..=layers.len()).collect(),
         ..Default::default()
     }];
     for layer in &layers {
-        nodes.push(ModelNode { name: layer.name.clone(), ..Default::default() });
+        nodes.push(ModelNode {
+            name: layer.name.clone(),
+            ..Default::default()
+        });
     }
     let mut curves = Vec::new();
     let mut points = Vec::new();
@@ -511,68 +642,138 @@ pub fn parse_bytes(bytes: &[u8], name: &str) -> Result<Rhino3dm, LoadError> {
     let mut vertex_total = 0usize;
 
     for table in top.iter().filter(|c| c.code == TCODE_OBJECT_TABLE) {
-        for record in archive.chunks(table.start, table.end + 4).into_iter().filter(|c| c.code == TCODE_OBJECT_RECORD) {
+        for record in archive
+            .chunks(table.start, table.end + 4)
+            .into_iter()
+            .filter(|c| c.code == TCODE_OBJECT_RECORD)
+        {
             let inner = archive.chunks(record.start, record.end);
             let (layer, object_name, object_color, source, visible) = inner
                 .iter()
                 .find(|c| c.code == TCODE_OBJECT_RECORD_ATTRIBUTES)
-                .and_then(|c| read_attributes(&mut Cursor { data: bytes, at: c.start, end: c.end, wide: archive.wide }).ok())
+                .and_then(|c| {
+                    read_attributes(&mut Cursor {
+                        data: bytes,
+                        at: c.start,
+                        end: c.end,
+                        wide: archive.wide,
+                    })
+                    .ok()
+                })
                 .unwrap_or((0, String::new(), None, 0, true));
             if !visible {
                 continue;
             }
             let layer = layer.min(layers.len() - 1);
-            let color = if source == 1 { object_color.unwrap_or(layers[layer].color) } else { layers[layer].color };
-            let Some(chunk) = inner.iter().find(|c| c.code == TCODE_OPENNURBS_CLASS) else { continue };
-            let Some((id, start, end)) = archive.class(*chunk) else { continue };
-            let mut cursor = Cursor { data: bytes, at: start, end, wide: archive.wide };
+            let color = if source == 1 {
+                object_color.unwrap_or(layers[layer].color)
+            } else {
+                layers[layer].color
+            };
+            let Some(chunk) = inner.iter().find(|c| c.code == TCODE_OPENNURBS_CLASS) else {
+                continue;
+            };
+            let Some((id, start, end)) = archive.class(*chunk) else {
+                continue;
+            };
+            let mut cursor = Cursor {
+                data: bytes,
+                at: start,
+                end,
+                wide: archive.wide,
+            };
 
             let mesh = if id == mesh_class {
                 read_mesh(&mut cursor).ok()
-            } else if nurbs_curves.contains(&id) || id == line_curve || id == polyline_curve || id == poly_curve {
+            } else if nurbs_curves.contains(&id)
+                || id == line_curve
+                || id == polyline_curve
+                || id == poly_curve
+            {
                 let polyline = if nurbs_curves.contains(&id) {
                     read_nurbs_curve(&mut cursor).unwrap_or_default()
                 } else if id == line_curve {
                     (|| -> Result<Vec<Vec3>, LoadError> {
                         cursor.u8()?;
                         let v: Vec<f64> = (0..6).map(|_| cursor.f64()).collect::<Result<_, _>>()?;
-                        Ok(vec![Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32), Vec3::new(v[3] as f32, v[4] as f32, v[5] as f32)])
+                        Ok(vec![
+                            Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32),
+                            Vec3::new(v[3] as f32, v[4] as f32, v[5] as f32),
+                        ])
                     })()
                     .unwrap_or_default()
                 } else if id == polyline_curve {
                     (|| -> Result<Vec<Vec3>, LoadError> {
                         cursor.u8()?;
                         let n = cursor.count(1 << 22)?;
-                        (0..n).map(|_| Ok(Vec3::new(cursor.f64()? as f32, cursor.f64()? as f32, cursor.f64()? as f32))).collect()
+                        (0..n)
+                            .map(|_| {
+                                Ok(Vec3::new(
+                                    cursor.f64()? as f32,
+                                    cursor.f64()? as f32,
+                                    cursor.f64()? as f32,
+                                ))
+                            })
+                            .collect()
                     })()
                     .unwrap_or_default()
                 } else {
                     // ON_PolyCurve：段是嵌套的曲线对象，逐个找出 NURBS 段拼起来。
                     let mut all = Vec::new();
-                    for segment in archive.chunks(start, end).into_iter().filter(|c| c.code == TCODE_OPENNURBS_CLASS) {
+                    for segment in archive
+                        .chunks(start, end)
+                        .into_iter()
+                        .filter(|c| c.code == TCODE_OPENNURBS_CLASS)
+                    {
                         if let Some((sid, s0, s1)) = archive.class(segment)
                             && nurbs_curves.contains(&sid)
                         {
-                            all.extend(read_nurbs_curve(&mut Cursor { data: bytes, at: s0, end: s1, wide: archive.wide }).unwrap_or_default());
+                            all.extend(
+                                read_nurbs_curve(&mut Cursor {
+                                    data: bytes,
+                                    at: s0,
+                                    end: s1,
+                                    wide: archive.wide,
+                                })
+                                .unwrap_or_default(),
+                            );
                         }
                     }
                     all
                 };
                 if polyline.len() > 1 {
-                    curves.push(Curve { layer, color, points: polyline });
+                    curves.push(Curve {
+                        layer,
+                        color,
+                        points: polyline,
+                    });
                 }
                 continue;
             } else if id == point_cloud {
                 let read = (|| -> Result<Vec<(Vec3, Vec4)>, LoadError> {
                     cursor.u8()?;
                     let n = cursor.count(limits::VERTICES)?;
-                    let positions: Vec<Vec3> = (0..n).map(|_| Ok(Vec3::new(cursor.f64()? as f32, cursor.f64()? as f32, cursor.f64()? as f32))).collect::<Result<_, LoadError>>()?;
+                    let positions: Vec<Vec3> = (0..n)
+                        .map(|_| {
+                            Ok(Vec3::new(
+                                cursor.f64()? as f32,
+                                cursor.f64()? as f32,
+                                cursor.f64()? as f32,
+                            ))
+                        })
+                        .collect::<Result<_, LoadError>>()?;
                     cursor.skip(16 * 8 + 48 + 4)?; // 平面、包围盒、标志
                     let normals = cursor.count(limits::VERTICES)?;
                     cursor.skip(normals * 24)?;
                     let colors = cursor.count(limits::VERTICES)?;
-                    let colors: Vec<Vec4> = (0..colors).map(|_| cursor.color()).collect::<Result<_, _>>()?;
-                    Ok(positions.into_iter().enumerate().map(|(i, p)| (p, colors.get(i).copied().unwrap_or(color))).collect())
+                    let colors: Vec<Vec4> = (0..colors)
+                        .map(|_| cursor.color())
+                        .collect::<Result<_, _>>()?;
+                    Ok(positions
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, p)| (p, colors.get(i).copied().unwrap_or(color)))
+                        .collect())
                 })();
                 for (p, c) in read.unwrap_or_default() {
                     points.push((layer, p, Vec4::new(c.x, c.y, c.z, 1.0)));
@@ -580,11 +781,13 @@ pub fn parse_bytes(bytes: &[u8], name: &str) -> Result<Rhino3dm, LoadError> {
                 continue;
             } else if id == subd_class {
                 // SubD：先找缓存网格，没有就自己从控制网格细分。
-                let found = find_cached_mesh(&archive, start, end).or_else(|| match read_subd(&mut cursor, version) {
-                    Ok(net) => subd_mesh(net, 3),
-                    Err(error) => {
-                        klog::warn!("3DM SubD 读不出来：{error}");
-                        None
+                let found = find_cached_mesh(&archive, start, end).or_else(|| {
+                    match read_subd(&mut cursor, version) {
+                        Ok(net) => subd_mesh(net, 3),
+                        Err(error) => {
+                            klog::warn!("3DM SubD 读不出来：{error}");
+                            None
+                        }
                     }
                 });
                 if found.is_none() {
@@ -615,8 +818,15 @@ pub fn parse_bytes(bytes: &[u8], name: &str) -> Result<Rhino3dm, LoadError> {
             }
             let node = nodes.len();
             nodes.push(ModelNode {
-                name: if object_name.is_empty() { format!("Object{node}") } else { object_name },
-                parts: vec![MeshPart { mesh: meshes.len(), material: Some(materials.len()) }],
+                name: if object_name.is_empty() {
+                    format!("Object{node}")
+                } else {
+                    object_name
+                },
+                parts: vec![MeshPart {
+                    mesh: meshes.len(),
+                    material: Some(materials.len()),
+                }],
                 ..Default::default()
             });
             nodes[1 + layer].children.push(node);
@@ -630,7 +840,12 @@ pub fn parse_bytes(bytes: &[u8], name: &str) -> Result<Rhino3dm, LoadError> {
     if meshes.is_empty() && curves.is_empty() && points.is_empty() {
         return Err(bad("3DM 里没有能画的东西"));
     }
-    Ok(Rhino3dm { model: Model::new(meshes, materials, nodes, vec![0]), layers, curves, points })
+    Ok(Rhino3dm {
+        model: Model::new(meshes, materials, nodes, vec![0]),
+        layers,
+        curves,
+        points,
+    })
 }
 
 // ───────────────────────────── SubD ─────────────────────────────
@@ -656,7 +871,11 @@ impl Cursor<'_> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("4")))
     }
     fn vec3(&mut self) -> Result<Vec3, LoadError> {
-        Ok(Vec3::new(self.f64()? as f32, self.f64()? as f32, self.f64()? as f32))
+        Ok(Vec3::new(
+            self.f64()? as f32,
+            self.f64()? as f32,
+            self.f64()? as f32,
+        ))
     }
     /// 带版本号的块头：`typecode + 长度 + major(i32) + minor(i32)`。
     fn versioned_chunk(&mut self) -> Result<(i32, i32), LoadError> {
@@ -768,7 +987,10 @@ fn read_subd(c: &mut Cursor, version: u32) -> Result<ControlNet, LoadError> {
             c.finish_additions()?;
         }
         let index = |p: &(u32, u8)| p.0.saturating_sub(partition[0]) as usize;
-        let (a, b) = (v.first().map(index).unwrap_or(0), v.get(1).map(index).unwrap_or(0));
+        let (a, b) = (
+            v.first().map(index).unwrap_or(0),
+            v.get(1).map(index).unwrap_or(0),
+        );
         if tag == 2 {
             net.creases.insert(edge_key(a, b));
         }
@@ -853,7 +1075,8 @@ fn catmull_clark(net: &ControlNet) -> ControlNet {
             if crease(e) {
                 (net.positions[a] + net.positions[b]) * 0.5
             } else {
-                (net.positions[a] + net.positions[b] + face_points[e.1[0]] + face_points[e.1[1]]) * 0.25
+                (net.positions[a] + net.positions[b] + face_points[e.1[0]] + face_points[e.1[1]])
+                    * 0.25
             }
         })
         .collect();
@@ -866,8 +1089,8 @@ fn catmull_clark(net: &ControlNet) -> ControlNet {
     }
     let mut vertex_edges = vec![Vec::new(); n];
     for (e, edge) in edges.iter().enumerate() {
-        vertex_edges[edge.0 .0].push(e);
-        vertex_edges[edge.0 .1].push(e);
+        vertex_edges[edge.0.0].push(e);
+        vertex_edges[edge.0.1].push(e);
     }
     let mut positions: Vec<Vec3> = (0..n)
         .map(|v| {
@@ -875,23 +1098,38 @@ fn catmull_clark(net: &ControlNet) -> ControlNet {
             if net.corners.contains(&v) || vertex_edges[v].is_empty() {
                 return p;
             }
-            let sharp: Vec<usize> = vertex_edges[v].iter().copied().filter(|&e| crease(&edges[e])).collect();
+            let sharp: Vec<usize> = vertex_edges[v]
+                .iter()
+                .copied()
+                .filter(|&e| crease(&edges[e]))
+                .collect();
             match sharp.len() {
                 // 光滑点与 dart（只有一条折边）：标准规则。
                 0 | 1 => {
                     let k = vertex_edges[v].len() as f32;
-                    let f = vertex_faces[v].iter().map(|&f| face_points[f]).sum::<Vec3>() / vertex_faces[v].len().max(1) as f32;
+                    let f = vertex_faces[v]
+                        .iter()
+                        .map(|&f| face_points[f])
+                        .sum::<Vec3>()
+                        / vertex_faces[v].len().max(1) as f32;
                     let r = vertex_edges[v]
                         .iter()
-                        .map(|&e| (net.positions[edges[e].0 .0] + net.positions[edges[e].0 .1]) * 0.5)
+                        .map(|&e| (net.positions[edges[e].0.0] + net.positions[edges[e].0.1]) * 0.5)
                         .sum::<Vec3>()
                         / k;
                     (f + r * 2.0 + p * (k - 3.0)) / k
                 }
                 // 折边上的点：沿折线做 1-6-1 的三次 B 样条细分。
                 2 => {
-                    let other = |e: usize| if edges[e].0 .0 == v { edges[e].0 .1 } else { edges[e].0 .0 };
-                    (p * 6.0 + net.positions[other(sharp[0])] + net.positions[other(sharp[1])]) / 8.0
+                    let other = |e: usize| {
+                        if edges[e].0.0 == v {
+                            edges[e].0.1
+                        } else {
+                            edges[e].0.0
+                        }
+                    };
+                    (p * 6.0 + net.positions[other(sharp[0])] + net.positions[other(sharp[1])])
+                        / 8.0
                 }
                 // 三条以上折边汇聚：当角点。
                 _ => p,
@@ -910,8 +1148,8 @@ fn catmull_clark(net: &ControlNet) -> ControlNet {
     };
     for (e, edge) in edges.iter().enumerate() {
         if crease(edge) {
-            out.creases.insert(edge_key(edge.0 .0, edge_base + e));
-            out.creases.insert(edge_key(edge_base + e, edge.0 .1));
+            out.creases.insert(edge_key(edge.0.0, edge_base + e));
+            out.creases.insert(edge_key(edge_base + e, edge.0.1));
         }
     }
     for (f, face) in net.faces.iter().enumerate() {
@@ -919,7 +1157,12 @@ fn catmull_clark(net: &ControlNet) -> ControlNet {
         for k in 0..m {
             let prev = edge_index[&edge_key(face[(k + m - 1) % m], face[k])];
             let next = edge_index[&edge_key(face[k], face[(k + 1) % m])];
-            out.faces.push(vec![face[k], edge_base + next, face_base + f, edge_base + prev]);
+            out.faces.push(vec![
+                face[k],
+                edge_base + next,
+                face_base + f,
+                edge_base + prev,
+            ]);
         }
     }
     out
@@ -933,7 +1176,14 @@ fn subd_mesh(mut net: ControlNet, levels: usize) -> Option<Mesh> {
         }
         net = catmull_clark(&net);
     }
-    let vertices = net.positions.iter().map(|p| Vertex { position: p.to_array(), ..Default::default() }).collect();
+    let vertices = net
+        .positions
+        .iter()
+        .map(|p| Vertex {
+            position: p.to_array(),
+            ..Default::default()
+        })
+        .collect();
     let mut indices = Vec::new();
     for face in &net.faces {
         for k in 1..face.len() - 1 {
@@ -956,15 +1206,28 @@ mod tests {
     fn subdividing_a_cube_keeps_it_closed_and_rounds_it() {
         let mut net = ControlNet::default();
         for i in 0..8 {
-            net.positions.push(Vec3::new((i & 1) as f32, ((i >> 1) & 1) as f32, ((i >> 2) & 1) as f32) * 2.0 - Vec3::ONE);
+            net.positions.push(
+                Vec3::new((i & 1) as f32, ((i >> 1) & 1) as f32, ((i >> 2) & 1) as f32) * 2.0
+                    - Vec3::ONE,
+            );
         }
-        net.faces = vec![vec![0, 2, 3, 1], vec![4, 5, 7, 6], vec![0, 1, 5, 4], vec![2, 6, 7, 3], vec![0, 4, 6, 2], vec![1, 3, 7, 5]];
+        net.faces = vec![
+            vec![0, 2, 3, 1],
+            vec![4, 5, 7, 6],
+            vec![0, 1, 5, 4],
+            vec![2, 6, 7, 3],
+            vec![0, 4, 6, 2],
+            vec![1, 3, 7, 5],
+        ];
         let once = catmull_clark(&net);
         assert_eq!(once.faces.len(), 24);
         assert_eq!(once.positions.len(), 8 + 6 + 12);
         // 光滑细分会把角往里收：原来的角点 (1,1,1) 移到了 5/9。
         let corner = once.positions[7];
-        assert!((corner - Vec3::splat(5.0 / 9.0)).length() < 1e-5, "{corner:?}");
+        assert!(
+            (corner - Vec3::splat(5.0 / 9.0)).length() < 1e-5,
+            "{corner:?}"
+        );
         // 标成角点就不动。
         net.corners.insert(7);
         assert_eq!(catmull_clark(&net).positions[7], Vec3::ONE);

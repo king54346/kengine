@@ -192,14 +192,24 @@ impl Header {
             };
             match keyword {
                 "FIELDS" => fields_names = rest.split_whitespace().map(str::to_string).collect(),
-                "SIZE" => sizes = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect(),
+                "SIZE" => {
+                    sizes = rest
+                        .split_whitespace()
+                        .filter_map(|t| t.parse().ok())
+                        .collect()
+                }
                 "TYPE" => {
                     kinds = rest
                         .split_whitespace()
                         .map(|t| t.bytes().next().unwrap_or(b'F'))
                         .collect()
                 }
-                "COUNT" => counts = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect(),
+                "COUNT" => {
+                    counts = rest
+                        .split_whitespace()
+                        .filter_map(|t| t.parse().ok())
+                        .collect()
+                }
                 "WIDTH" => width = rest.trim().parse().unwrap_or(0),
                 "HEIGHT" => height = rest.trim().parse().unwrap_or(1),
                 "POINTS" => points = rest.trim().parse().unwrap_or(0),
@@ -398,11 +408,11 @@ pub fn lzf_decompress(input: &[u8], expected: usize) -> Result<Vec<u8>, LoadErro
             if distance > output.len() {
                 return Err(bad("LZF 的回看距离越过了输出起点"));
             }
-            let mut source = output.len() - distance;
-            for _ in 0..length + 2 {
-                let byte = output[source];
+            // 回看区可以和正在写的部分重叠（距离小于长度时是重复填充），只能逐字节拷。
+            let source = output.len() - distance;
+            for offset in 0..length + 2 {
+                let byte = output[source + offset];
                 output.push(byte);
-                source += 1;
             }
         }
         if output.len() > expected {
@@ -470,7 +480,7 @@ mod tests {
     #[test]
     fn lzf_repeats_overlapping_runs() {
         // 原样写 "ab"，再回看 2 个字节重复 4 个 —— 重叠拷贝要得到 "ababab"。
-        let input = [1u8, b'a', b'b', 0x40 | 0x00, 1];
+        let input = [1u8, b'a', b'b', 0x40, 1];
         assert_eq!(lzf_decompress(&input, 6).unwrap(), b"ababab");
     }
 

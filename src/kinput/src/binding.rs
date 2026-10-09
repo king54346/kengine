@@ -1,5 +1,6 @@
 //! 动作与轴映射：把具体按键抽象成语义化的名字。
 
+use crate::gamepad::{GamepadAxis, GamepadButton};
 use fxhash::FxHashMap;
 use winit::{event::MouseButton, keyboard::KeyCode};
 
@@ -10,6 +11,14 @@ pub enum Binding {
     Key(KeyCode),
     /// 鼠标按键。
     Mouse(MouseButton),
+    /// 任意一个手柄的这个键。
+    Gamepad(GamepadButton),
+}
+
+impl From<GamepadButton> for Binding {
+    fn from(value: GamepadButton) -> Self {
+        Self::Gamepad(value)
+    }
 }
 
 impl From<KeyCode> for Binding {
@@ -31,6 +40,8 @@ pub struct AxisBinding {
     pub positive: Vec<Binding>,
     /// 使读数为负的输入。
     pub negative: Vec<Binding>,
+    /// 模拟量（摇杆、扳机）。数字键没按时取这里推得最多的那个。
+    pub analog: Vec<GamepadAxis>,
 }
 
 /// 动作与轴的映射表。
@@ -82,6 +93,21 @@ impl Bindings {
         negative: impl Into<Binding>,
     ) -> Self {
         self.bind_axis(axis, positive, negative);
+        self
+    }
+
+    /// 给轴加一个模拟量来源（摇杆 / 扳机）：键盘的 A / D 和左摇杆可以绑到同一个「horizontal」。
+    pub fn bind_axis_analog(&mut self, axis: impl Into<String>, analog: GamepadAxis) {
+        self.axes
+            .entry(axis.into())
+            .or_default()
+            .analog
+            .push(analog);
+    }
+
+    /// 链式版的 [`bind_axis_analog`](Self::bind_axis_analog)。
+    pub fn with_axis_analog(mut self, axis: impl Into<String>, analog: GamepadAxis) -> Self {
+        self.bind_axis_analog(axis, analog);
         self
     }
 

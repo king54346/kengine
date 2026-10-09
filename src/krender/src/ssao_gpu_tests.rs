@@ -143,7 +143,8 @@ fn run(
 
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: (SIZE * SIZE * 4) as u64,
+        // 遮蔽图是 Rg32Float（r = SSAO，g = 接触阴影），一个纹素 8 字节。
+        size: (SIZE * SIZE * 8) as u64,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -158,7 +159,7 @@ fn run(
             buffer: &staging,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(SIZE * 4),
+                bytes_per_row: Some(SIZE * 8),
                 rows_per_image: Some(SIZE),
             },
         },
@@ -176,8 +177,9 @@ fn run(
     staging.unmap();
 
     Some(
+        // 只取红通道（SSAO）。
         bytes
-            .chunks_exact(4)
+            .chunks_exact(8)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect(),
     )

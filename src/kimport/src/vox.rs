@@ -96,7 +96,8 @@ fn read_chunks(bytes: &[u8]) -> Result<Vec<VoxelModel>, LoadError> {
 
     while cursor + 12 <= bytes.len() {
         let id = &bytes[cursor..cursor + 4];
-        let content = u32::from_le_bytes(bytes[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
+        let content =
+            u32::from_le_bytes(bytes[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
         let children =
             u32::from_le_bytes(bytes[cursor + 8..cursor + 12].try_into().unwrap()) as usize;
         let start = cursor + 12;
@@ -129,7 +130,11 @@ fn read_chunks(bytes: &[u8]) -> Result<Vec<VoxelModel>, LoadError> {
             b"RGBA" if body.len() >= 1024 => {
                 // 调色板里第 i 个条目对应体素里的下标 i+1，前面补一个空位。
                 let mut colors = vec![[0u8; 4]];
-                colors.extend(body[..1024].chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]));
+                colors.extend(
+                    body[..1024]
+                        .chunks_exact(4)
+                        .map(|c| [c[0], c[1], c[2], c[3]]),
+                );
                 palette = Some(colors);
             }
             _ => {}
@@ -246,7 +251,11 @@ pub fn build_mesh(model: &VoxelModel) -> Mesh {
                     let mut along_v = [0usize; 3];
                     along_v[v] = height;
                     let offset = |a: [usize; 3], b: [usize; 3]| {
-                        [origin[0] + a[0] + b[0], origin[1] + a[1] + b[1], origin[2] + a[2] + b[2]]
+                        [
+                            origin[0] + a[0] + b[0],
+                            origin[1] + a[1] + b[1],
+                            origin[2] + a[2] + b[2],
+                        ]
                     };
                     let corners = [
                         to_engine(origin),
@@ -277,7 +286,14 @@ pub fn build_mesh(model: &VoxelModel) -> Mesh {
                             ..Default::default()
                         });
                     }
-                    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                    indices.extend_from_slice(&[
+                        base,
+                        base + 1,
+                        base + 2,
+                        base,
+                        base + 2,
+                        base + 3,
+                    ]);
 
                     // 并进来的格子要清掉，否则会被重复输出。
                     for dv in 0..height {

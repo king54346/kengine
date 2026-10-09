@@ -34,11 +34,7 @@ use kmaterial::{BlendMode, Material};
 use kmath::{Vec3, Vec4};
 use kmesh::{Mesh, Vertex};
 use ktexture::{Texture, TextureFormat};
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 loader! {
     /// 读 `.obj`，连带同目录的 `.mtl` 与其中引用的贴图。
@@ -255,7 +251,9 @@ fn index(token: Option<&str>, count: usize) -> Result<Option<usize>, LoadError> 
     let Some(token) = token.map(str::trim).filter(|t| !t.is_empty()) else {
         return Ok(None);
     };
-    let value: i64 = token.parse().map_err(|_| bad(format!("非法索引 {token}")))?;
+    let value: i64 = token
+        .parse()
+        .map_err(|_| bad(format!("非法索引 {token}")))?;
     let resolved = if value > 0 {
         value - 1
     } else if value < 0 {
@@ -320,7 +318,10 @@ async fn parse_mtl(
         match keyword {
             "newmtl" => {
                 if has_current {
-                    result.insert(std::mem::take(&mut name), std::mem::replace(&mut material, Material::standard()));
+                    result.insert(
+                        std::mem::take(&mut name),
+                        std::mem::replace(&mut material, Material::standard()),
+                    );
                 }
                 name = rest.trim().to_string();
                 material = fallback_material(&name);
@@ -341,7 +342,8 @@ async fn parse_mtl(
             }
             "Ns" => {
                 if let Some(&exponent) = floats(rest).first() {
-                    material.set_roughness((2.0 / (exponent.max(0.0) + 2.0)).sqrt().clamp(0.03, 1.0));
+                    material
+                        .set_roughness((2.0 / (exponent.max(0.0) + 2.0)).sqrt().clamp(0.03, 1.0));
                 }
             }
             "d" | "Tr" => {

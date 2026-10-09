@@ -141,7 +141,9 @@ impl StepReader<'_> {
             return Err(bad("IFC 参数嵌套过深"));
         }
         self.skip_space();
-        let Some(&c) = self.text.get(self.at) else { return Err(bad("IFC 被截断")) };
+        let Some(&c) = self.text.get(self.at) else {
+            return Err(bad("IFC 被截断"));
+        };
         match c {
             b'$' | b'*' => {
                 self.at += 1;
@@ -153,7 +155,10 @@ impl StepReader<'_> {
                 while self.at < self.text.len() && self.text[self.at].is_ascii_digit() {
                     self.at += 1;
                 }
-                let n = std::str::from_utf8(&self.text[start..self.at]).ok().and_then(|s| s.parse().ok()).ok_or_else(|| bad("IFC 引用写坏了"))?;
+                let n = std::str::from_utf8(&self.text[start..self.at])
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .ok_or_else(|| bad("IFC 引用写坏了"))?;
                 Ok(Value::Ref(n))
             }
             b'\'' => {
@@ -212,7 +217,9 @@ impl StepReader<'_> {
             }
             c if c.is_ascii_alphabetic() => {
                 let start = self.at;
-                while self.at < self.text.len() && (self.text[self.at].is_ascii_alphanumeric() || self.text[self.at] == b'_') {
+                while self.at < self.text.len()
+                    && (self.text[self.at].is_ascii_alphanumeric() || self.text[self.at] == b'_')
+                {
                     self.at += 1;
                 }
                 let name = String::from_utf8_lossy(&self.text[start..self.at]).to_ascii_uppercase();
@@ -227,7 +234,12 @@ impl StepReader<'_> {
             }
             _ => {
                 let start = self.at;
-                while self.at < self.text.len() && matches!(self.text[self.at], b'0'..=b'9' | b'-' | b'+' | b'.' | b'E' | b'e') {
+                while self.at < self.text.len()
+                    && matches!(
+                        self.text[self.at],
+                        b'0'..=b'9' | b'-' | b'+' | b'.' | b'E' | b'e'
+                    )
+                {
                     self.at += 1;
                 }
                 let token = std::str::from_utf8(&self.text[start..self.at]).unwrap_or("");
@@ -237,7 +249,11 @@ impl StepReader<'_> {
                 if let Ok(i) = token.parse::<i64>() {
                     Ok(Value::Int(i))
                 } else {
-                    Ok(Value::Real(token.parse::<f64>().map_err(|_| bad(format!("IFC 数写坏了：{token}")))?))
+                    Ok(Value::Real(
+                        token
+                            .parse::<f64>()
+                            .map_err(|_| bad(format!("IFC 数写坏了：{token}")))?,
+                    ))
                 }
             }
         }
@@ -246,7 +262,10 @@ impl StepReader<'_> {
 
 /// 解析 `DATA;` 段，返回 `实例号 → 实体`。
 pub fn parse_step(text: &[u8]) -> Result<HashMap<u32, Entity>, LoadError> {
-    let data = text.windows(5).position(|w| w == b"DATA;").ok_or_else(|| bad("不是 STEP 文件（找不到 DATA 段）"))?;
+    let data = text
+        .windows(5)
+        .position(|w| w == b"DATA;")
+        .ok_or_else(|| bad("不是 STEP 文件（找不到 DATA 段）"))?;
     let mut reader = StepReader { text, at: data + 5 };
     let mut entities = HashMap::new();
     loop {
@@ -262,7 +281,9 @@ pub fn parse_step(text: &[u8]) -> Result<HashMap<u32, Entity>, LoadError> {
             reader.at += 1;
             continue;
         }
-        let Value::Ref(id) = reader.value(0)? else { return Err(bad("IFC 实例号写坏了")) };
+        let Value::Ref(id) = reader.value(0)? else {
+            return Err(bad("IFC 实例号写坏了"));
+        };
         reader.skip_space();
         if text.get(reader.at) != Some(&b'=') {
             return Err(bad(format!("IFC #{id} 后面缺少 =")));
@@ -273,11 +294,15 @@ pub fn parse_step(text: &[u8]) -> Result<HashMap<u32, Entity>, LoadError> {
         // `IFCCARTESIANPOINT((0.,0.,0.))` 的唯一参数本身就是列表，拆了就错了。
         reader.skip_space();
         let start = reader.at;
-        while reader.at < text.len() && (text[reader.at].is_ascii_alphanumeric() || text[reader.at] == b'_') {
+        while reader.at < text.len()
+            && (text[reader.at].is_ascii_alphanumeric() || text[reader.at] == b'_')
+        {
             reader.at += 1;
         }
         let kind = String::from_utf8_lossy(&text[start..reader.at]).to_ascii_uppercase();
-        let Value::List(args) = reader.value(0)? else { return Err(bad(format!("IFC #{id} 没有参数表"))) };
+        let Value::List(args) = reader.value(0)? else {
+            return Err(bad(format!("IFC #{id} 没有参数表")));
+        };
         entities.insert(id, Entity { kind, args });
         if entities.len() > limits::VERTICES {
             return Err(bad("IFC 实体数超过上限"));
@@ -335,7 +360,9 @@ impl<'a> Ifc<'a> {
     }
 
     fn point3(&self, value: &Value) -> Vec3 {
-        let Some(e) = value.as_ref().and_then(|r| self.get(r)) else { return Vec3::ZERO };
+        let Some(e) = value.as_ref().and_then(|r| self.get(r)) else {
+            return Vec3::ZERO;
+        };
         let c = e.arg(0).list();
         let get = |i: usize| c.get(i).and_then(Value::as_f64).unwrap_or(0.0) as f32;
         Vec3::new(get(0), get(1), get(2))
@@ -346,29 +373,47 @@ impl<'a> Ifc<'a> {
     }
 
     fn direction(&self, value: &Value, default: Vec3) -> Vec3 {
-        let Some(e) = value.as_ref().and_then(|r| self.get(r)) else { return default };
+        let Some(e) = value.as_ref().and_then(|r| self.get(r)) else {
+            return default;
+        };
         let c = e.arg(0).list();
         let get = |i: usize| c.get(i).and_then(Value::as_f64).unwrap_or(0.0) as f32;
-        Vec3::new(get(0), get(1), get(2)).try_normalize().unwrap_or(default)
+        Vec3::new(get(0), get(1), get(2))
+            .try_normalize()
+            .unwrap_or(default)
     }
 
     /// `IfcAxis2Placement3D` / `2D` → 矩阵。
     fn axis_placement(&self, value: &Value) -> Mat4 {
-        let Some(e) = value.as_ref().and_then(|r| self.get(r)) else { return Mat4::IDENTITY };
+        let Some(e) = value.as_ref().and_then(|r| self.get(r)) else {
+            return Mat4::IDENTITY;
+        };
         let origin = self.point3(e.arg(0));
         match e.kind.as_str() {
             "IFCAXIS2PLACEMENT2D" => {
                 let x = self.direction(e.arg(1), Vec3::X);
                 let x = Vec3::new(x.x, x.y, 0.0).try_normalize().unwrap_or(Vec3::X);
                 let y = Vec3::Z.cross(x);
-                Mat4::from_cols(x.extend(0.0), y.extend(0.0), Vec3::Z.extend(0.0), origin.extend(1.0))
+                Mat4::from_cols(
+                    x.extend(0.0),
+                    y.extend(0.0),
+                    Vec3::Z.extend(0.0),
+                    origin.extend(1.0),
+                )
             }
             _ => {
                 let z = self.direction(e.arg(1), Vec3::Z);
                 let reference = self.direction(e.arg(2), Vec3::X);
-                let x = (reference - z * reference.dot(z)).try_normalize().unwrap_or_else(|| z.any_orthonormal_vector());
+                let x = (reference - z * reference.dot(z))
+                    .try_normalize()
+                    .unwrap_or_else(|| z.any_orthonormal_vector());
                 let y = z.cross(x);
-                Mat4::from_cols(x.extend(0.0), y.extend(0.0), z.extend(0.0), origin.extend(1.0))
+                Mat4::from_cols(
+                    x.extend(0.0),
+                    y.extend(0.0),
+                    z.extend(0.0),
+                    origin.extend(1.0),
+                )
             }
         }
     }
@@ -378,11 +423,16 @@ impl<'a> Ifc<'a> {
         if let Some(m) = self.placements.borrow().get(&id) {
             return *m;
         }
-        let Some(e) = self.get(id) else { return Mat4::IDENTITY };
+        let Some(e) = self.get(id) else {
+            return Mat4::IDENTITY;
+        };
         if e.kind != "IFCLOCALPLACEMENT" || depth > 64 {
             return Mat4::IDENTITY;
         }
-        let parent = e.arg(0).as_ref().map_or(Mat4::IDENTITY, |p| self.placement(p, depth + 1));
+        let parent = e
+            .arg(0)
+            .as_ref()
+            .map_or(Mat4::IDENTITY, |p| self.placement(p, depth + 1));
         let m = parent * self.axis_placement(e.arg(1));
         self.placements.borrow_mut().insert(id, m);
         m
@@ -390,7 +440,9 @@ impl<'a> Ifc<'a> {
 
     /// `IfcCartesianTransformationOperator3D`（含非均匀的 `...3DnonUniform`）。
     fn transform_operator(&self, value: &Value) -> Mat4 {
-        let Some(e) = value.as_ref().and_then(|r| self.get(r)) else { return Mat4::IDENTITY };
+        let Some(e) = value.as_ref().and_then(|r| self.get(r)) else {
+            return Mat4::IDENTITY;
+        };
         let x = self.direction(e.arg(0), Vec3::X);
         let y0 = self.direction(e.arg(1), Vec3::Y);
         let origin = self.point3(e.arg(2));
@@ -399,17 +451,27 @@ impl<'a> Ifc<'a> {
         let z = z0;
         let y = z.cross(x).try_normalize().unwrap_or(Vec3::Y);
         let (sy, sz) = if e.kind.contains("NONUNIFORM") {
-            (e.arg(5).as_f64().unwrap_or(scale as f64) as f32, e.arg(6).as_f64().unwrap_or(scale as f64) as f32)
+            (
+                e.arg(5).as_f64().unwrap_or(scale as f64) as f32,
+                e.arg(6).as_f64().unwrap_or(scale as f64) as f32,
+            )
         } else {
             (scale, scale)
         };
-        Mat4::from_cols((x * scale).extend(0.0), (y * sy).extend(0.0), (z * sz).extend(0.0), origin.extend(1.0))
+        Mat4::from_cols(
+            (x * scale).extend(0.0),
+            (y * sy).extend(0.0),
+            (z * sz).extend(0.0),
+            origin.extend(1.0),
+        )
     }
 
     // ── 二维曲线与轮廓 ──
 
     fn curve(&self, value: &Value, depth: usize) -> Vec<Vec2> {
-        let Some(e) = value.as_ref().and_then(|r| self.get(r)) else { return Vec::new() };
+        let Some(e) = value.as_ref().and_then(|r| self.get(r)) else {
+            return Vec::new();
+        };
         if depth > 32 {
             return Vec::new();
         }
@@ -418,7 +480,9 @@ impl<'a> Ifc<'a> {
             "IFCCOMPOSITECURVE" => {
                 let mut out: Vec<Vec2> = Vec::new();
                 for segment in e.arg(0).list() {
-                    let Some(s) = segment.as_ref().and_then(|r| self.get(r)) else { continue };
+                    let Some(s) = segment.as_ref().and_then(|r| self.get(r)) else {
+                        continue;
+                    };
                     let same_sense = s.arg(1).as_enum() != Some("F");
                     let mut points = self.curve(s.arg(2), depth + 1);
                     if !same_sense {
@@ -438,20 +502,28 @@ impl<'a> Ifc<'a> {
             "IFCCIRCLE" => {
                 let m = self.axis_placement(e.arg(0));
                 let r = e.arg(1).as_f64().unwrap_or(1.0) as f32;
-                (0..=48).map(|k| {
-                    let a = k as f32 / 48.0 * std::f32::consts::TAU;
-                    m.transform_point3(Vec3::new(r * a.cos(), r * a.sin(), 0.0)).truncate()
-                }).collect()
+                (0..=48)
+                    .map(|k| {
+                        let a = k as f32 / 48.0 * std::f32::consts::TAU;
+                        m.transform_point3(Vec3::new(r * a.cos(), r * a.sin(), 0.0))
+                            .truncate()
+                    })
+                    .collect()
             }
             "IFCINDEXEDPOLYCURVE" => {
-                let Some(points) = e.arg(0).as_ref().and_then(|r| self.get(r)) else { return Vec::new() };
+                let Some(points) = e.arg(0).as_ref().and_then(|r| self.get(r)) else {
+                    return Vec::new();
+                };
                 points
                     .arg(0)
                     .list()
                     .iter()
                     .map(|p| {
                         let c = p.list();
-                        Vec2::new(c.first().and_then(Value::as_f64).unwrap_or(0.0) as f32, c.get(1).and_then(Value::as_f64).unwrap_or(0.0) as f32)
+                        Vec2::new(
+                            c.first().and_then(Value::as_f64).unwrap_or(0.0) as f32,
+                            c.get(1).and_then(Value::as_f64).unwrap_or(0.0) as f32,
+                        )
                     })
                     .collect()
             }
@@ -463,10 +535,17 @@ impl<'a> Ifc<'a> {
     }
 
     fn trimmed(&self, e: &Entity, depth: usize) -> Vec<Vec2> {
-        let Some(basis) = e.arg(0).as_ref().and_then(|r| self.get(r)) else { return Vec::new() };
+        let Some(basis) = e.arg(0).as_ref().and_then(|r| self.get(r)) else {
+            return Vec::new();
+        };
         if basis.kind != "IFCCIRCLE" && basis.kind != "IFCELLIPSE" {
             // 直线等其它基曲线：用裁剪点连线。
-            let pick = |v: &Value| v.list().iter().find(|t| matches!(t, Value::Ref(_))).map(|t| self.point2(t));
+            let pick = |v: &Value| {
+                v.list()
+                    .iter()
+                    .find(|t| matches!(t, Value::Ref(_)))
+                    .map(|t| self.point2(t))
+            };
             return match (pick(e.arg(1)), pick(e.arg(2))) {
                 (Some(a), Some(b)) => vec![a, b],
                 _ => self.curve(e.arg(0), depth + 1),
@@ -474,7 +553,10 @@ impl<'a> Ifc<'a> {
         }
         let m = self.axis_placement(basis.arg(0));
         let (rx, ry) = if basis.kind == "IFCELLIPSE" {
-            (basis.arg(1).as_f64().unwrap_or(1.0) as f32, basis.arg(2).as_f64().unwrap_or(1.0) as f32)
+            (
+                basis.arg(1).as_f64().unwrap_or(1.0) as f32,
+                basis.arg(2).as_f64().unwrap_or(1.0) as f32,
+            )
         } else {
             let r = basis.arg(1).as_f64().unwrap_or(1.0) as f32;
             (r, r)
@@ -492,16 +574,23 @@ impl<'a> Ifc<'a> {
             None
         };
         let point_angle = |v: &Value| -> Option<f32> {
-            v.list().iter().find(|t| matches!(t, Value::Ref(_))).map(|t| {
-                let local = inverse.transform_point3(self.point3(t).truncate().extend(0.0));
-                (local.y / ry).atan2(local.x / rx)
-            })
+            v.list()
+                .iter()
+                .find(|t| matches!(t, Value::Ref(_)))
+                .map(|t| {
+                    let local = inverse.transform_point3(self.point3(t).truncate().extend(0.0));
+                    (local.y / ry).atan2(local.x / rx)
+                })
         };
         let (mut a0, mut a1) = match (angle(e.arg(1)), angle(e.arg(2))) {
             (Some(a), Some(b)) => {
                 // 参数按度写的（Revit 的 IFC2x3 不管单位声明一律写度）：
                 // 有一端超过 2π 就当度。
-                if a.abs() > 6.3 || b.abs() > 6.3 { (a.to_radians(), b.to_radians()) } else { (a, b) }
+                if a.abs() > 6.3 || b.abs() > 6.3 {
+                    (a.to_radians(), b.to_radians())
+                } else {
+                    (a, b)
+                }
             }
             _ => match (point_angle(e.arg(1)), point_angle(e.arg(2))) {
                 (Some(a), Some(b)) => (a, b),
@@ -519,7 +608,8 @@ impl<'a> Ifc<'a> {
         let mut points: Vec<Vec2> = (0..=steps)
             .map(|k| {
                 let a = a0 + (a1 - a0) * k as f32 / steps as f32;
-                m.transform_point3(Vec3::new(rx * a.cos(), ry * a.sin(), 0.0)).truncate()
+                m.transform_point3(Vec3::new(rx * a.cos(), ry * a.sin(), 0.0))
+                    .truncate()
             })
             .collect();
         if !sense {
@@ -531,28 +621,58 @@ impl<'a> Ifc<'a> {
     /// 轮廓 → (外轮廓, 洞)，都已经过轮廓自己的 `Position`。
     fn profile(&self, value: &Value) -> Option<(Vec<Vec2>, Vec<Vec<Vec2>>)> {
         let e = value.as_ref().and_then(|r| self.get(r))?;
-        let place = |m: Mat4, points: Vec<Vec2>| -> Vec<Vec2> { points.into_iter().map(|p| m.transform_point3(p.extend(0.0)).truncate()).collect() };
+        let place = |m: Mat4, points: Vec<Vec2>| -> Vec<Vec2> {
+            points
+                .into_iter()
+                .map(|p| m.transform_point3(p.extend(0.0)).truncate())
+                .collect()
+        };
         match e.kind.as_str() {
-            "IFCRECTANGLEPROFILEDEF" | "IFCRECTANGLEHOLLOWPROFILEDEF" | "IFCROUNDEDRECTANGLEPROFILEDEF" => {
+            "IFCRECTANGLEPROFILEDEF"
+            | "IFCRECTANGLEHOLLOWPROFILEDEF"
+            | "IFCROUNDEDRECTANGLEPROFILEDEF" => {
                 let m = self.axis_placement(e.arg(2));
-                let (hx, hy) = (e.arg(3).as_f64()? as f32 / 2.0, e.arg(4).as_f64()? as f32 / 2.0);
-                let outer = place(m, vec![Vec2::new(-hx, -hy), Vec2::new(hx, -hy), Vec2::new(hx, hy), Vec2::new(-hx, hy)]);
+                let (hx, hy) = (
+                    e.arg(3).as_f64()? as f32 / 2.0,
+                    e.arg(4).as_f64()? as f32 / 2.0,
+                );
+                let outer = place(
+                    m,
+                    vec![
+                        Vec2::new(-hx, -hy),
+                        Vec2::new(hx, -hy),
+                        Vec2::new(hx, hy),
+                        Vec2::new(-hx, hy),
+                    ],
+                );
                 let mut holes = Vec::new();
                 if e.kind == "IFCRECTANGLEHOLLOWPROFILEDEF"
                     && let Some(t) = e.arg(5).as_f64()
                 {
                     let t = t as f32;
-                    holes.push(place(m, vec![Vec2::new(-hx + t, -hy + t), Vec2::new(-hx + t, hy - t), Vec2::new(hx - t, hy - t), Vec2::new(hx - t, -hy + t)]));
+                    holes.push(place(
+                        m,
+                        vec![
+                            Vec2::new(-hx + t, -hy + t),
+                            Vec2::new(-hx + t, hy - t),
+                            Vec2::new(hx - t, hy - t),
+                            Vec2::new(hx - t, -hy + t),
+                        ],
+                    ));
                 }
                 Some((outer, holes))
             }
             "IFCCIRCLEPROFILEDEF" | "IFCCIRCLEHOLLOWPROFILEDEF" => {
                 let m = self.axis_placement(e.arg(2));
                 let r = e.arg(3).as_f64()? as f32;
-                let ring = |r: f32| (0..48).map(|k| {
-                    let a = k as f32 / 48.0 * std::f32::consts::TAU;
-                    Vec2::new(r * a.cos(), r * a.sin())
-                }).collect::<Vec<_>>();
+                let ring = |r: f32| {
+                    (0..48)
+                        .map(|k| {
+                            let a = k as f32 / 48.0 * std::f32::consts::TAU;
+                            Vec2::new(r * a.cos(), r * a.sin())
+                        })
+                        .collect::<Vec<_>>()
+                };
                 let mut holes = Vec::new();
                 if e.kind == "IFCCIRCLEHOLLOWPROFILEDEF"
                     && let Some(t) = e.arg(4).as_f64()
@@ -563,13 +683,22 @@ impl<'a> Ifc<'a> {
             }
             "IFCARBITRARYCLOSEDPROFILEDEF" => Some((self.curve(e.arg(2), 0), Vec::new())),
             "IFCARBITRARYPROFILEDEFWITHVOIDS" => {
-                let holes = e.arg(3).list().iter().map(|c| self.curve(c, 0)).filter(|c| c.len() >= 3).collect();
+                let holes = e
+                    .arg(3)
+                    .list()
+                    .iter()
+                    .map(|c| self.curve(c, 0))
+                    .filter(|c| c.len() >= 3)
+                    .collect();
                 Some((self.curve(e.arg(2), 0), holes))
             }
             "IFCDERIVEDPROFILEDEF" => {
                 let (outer, holes) = self.profile(e.arg(2))?;
                 let m = self.transform_operator_2d(e.arg(3));
-                Some((place(m, outer), holes.into_iter().map(|h| place(m, h)).collect()))
+                Some((
+                    place(m, outer),
+                    holes.into_iter().map(|h| place(m, h)).collect(),
+                ))
             }
             other => {
                 self.warn(format!("不支持的截面 {other}"));
@@ -579,12 +708,19 @@ impl<'a> Ifc<'a> {
     }
 
     fn transform_operator_2d(&self, value: &Value) -> Mat4 {
-        let Some(e) = value.as_ref().and_then(|r| self.get(r)) else { return Mat4::IDENTITY };
+        let Some(e) = value.as_ref().and_then(|r| self.get(r)) else {
+            return Mat4::IDENTITY;
+        };
         let x = self.direction(e.arg(0), Vec3::X);
         let origin = self.point3(e.arg(2));
         let scale = e.arg(3).as_f64().unwrap_or(1.0) as f32;
         let y = Vec3::Z.cross(x);
-        Mat4::from_cols((x * scale).extend(0.0), (y * scale).extend(0.0), Vec3::Z.extend(0.0), origin.extend(1.0))
+        Mat4::from_cols(
+            (x * scale).extend(0.0),
+            (y * scale).extend(0.0),
+            Vec3::Z.extend(0.0),
+            origin.extend(1.0),
+        )
     }
 
     // ── 三维几何项 ──
@@ -608,11 +744,20 @@ impl<'a> Ifc<'a> {
                 }
             }
             "IFCMAPPEDITEM" => {
-                let Some(map) = e.arg(0).as_ref().and_then(|r| self.get(r)) else { return };
+                let Some(map) = e.arg(0).as_ref().and_then(|r| self.get(r)) else {
+                    return;
+                };
                 let origin = self.axis_placement(map.arg(0));
                 let target = self.transform_operator(e.arg(1));
-                let Some(representation) = map.arg(1).as_ref().and_then(|r| self.get(r)) else { return };
-                let items: Vec<u32> = representation.arg(3).list().iter().filter_map(Value::as_ref).collect();
+                let Some(representation) = map.arg(1).as_ref().and_then(|r| self.get(r)) else {
+                    return;
+                };
+                let items: Vec<u32> = representation
+                    .arg(3)
+                    .list()
+                    .iter()
+                    .filter_map(Value::as_ref)
+                    .collect();
                 for item in items {
                     self.item(item, transform * target * origin, color, depth + 1);
                 }
@@ -631,12 +776,16 @@ impl<'a> Ifc<'a> {
     fn emit(&mut self, transform: Mat4, color: Vec4, corners: [Vec3; 3]) {
         let world = corners.map(|p| transform.transform_point3(p));
         let normal = (world[1] - world[0]).cross(world[2] - world[0]);
-        let Some(normal) = normal.try_normalize() else { return };
+        let Some(normal) = normal.try_normalize() else {
+            return;
+        };
         self.batches.push_triangle(color, world, normal);
     }
 
     fn extrusion(&mut self, e: &Entity, transform: Mat4, color: Vec4) {
-        let Some((outer, holes)) = self.profile(e.arg(0)) else { return };
+        let Some((outer, holes)) = self.profile(e.arg(0)) else {
+            return;
+        };
         let position = self.axis_placement(e.arg(1));
         let direction = self.direction(e.arg(2), Vec3::Z);
         let depth = e.arg(3).as_f64().unwrap_or(0.0) as f32;
@@ -644,7 +793,13 @@ impl<'a> Ifc<'a> {
             return;
         }
         // 外轮廓逆时针、洞顺时针。
-        let area = |c: &[Vec2]| path::Contour { points: c.to_vec(), closed: true }.signed_area();
+        let area = |c: &[Vec2]| {
+            path::Contour {
+                points: c.to_vec(),
+                closed: true,
+            }
+            .signed_area()
+        };
         let mut outer = outer;
         if area(&outer) < 0.0 {
             outer.reverse();
@@ -658,8 +813,14 @@ impl<'a> Ifc<'a> {
                 h
             })
             .collect();
-        let mut contours = vec![path::Contour { points: outer.clone(), closed: true }];
-        contours.extend(holes.iter().map(|h| path::Contour { points: h.clone(), closed: true }));
+        let mut contours = vec![path::Contour {
+            points: outer.clone(),
+            closed: true,
+        }];
+        contours.extend(holes.iter().map(|h| path::Contour {
+            points: h.clone(),
+            closed: true,
+        }));
         let fill = path::fill(&contours, path::FillRule::EvenOdd);
         let offset = direction * depth;
         let m = transform * position;
@@ -696,18 +857,35 @@ impl<'a> Ifc<'a> {
 
     fn shell(&mut self, id: u32, transform: Mat4, color: Vec4) {
         let Some(shell) = self.get(id) else { return };
-        let faces: Vec<u32> = shell.arg(0).list().iter().filter_map(Value::as_ref).collect();
+        let faces: Vec<u32> = shell
+            .arg(0)
+            .list()
+            .iter()
+            .filter_map(Value::as_ref)
+            .collect();
         for face in faces {
             let Some(face) = self.get(face) else { continue };
-            let color = self.styled.get(&face.args.first().and_then(Value::as_ref).unwrap_or(0)).copied().unwrap_or(color);
+            let color = self
+                .styled
+                .get(&face.args.first().and_then(Value::as_ref).unwrap_or(0))
+                .copied()
+                .unwrap_or(color);
             let mut outer: Option<Vec<Vec3>> = None;
             let mut holes: Vec<Vec<Vec3>> = Vec::new();
-            for bound in face.arg(0).list().iter().filter_map(|b| b.as_ref().and_then(|r| self.get(r))) {
-                let Some(lp) = bound.arg(0).as_ref().and_then(|r| self.get(r)) else { continue };
+            for bound in face
+                .arg(0)
+                .list()
+                .iter()
+                .filter_map(|b| b.as_ref().and_then(|r| self.get(r)))
+            {
+                let Some(lp) = bound.arg(0).as_ref().and_then(|r| self.get(r)) else {
+                    continue;
+                };
                 if lp.kind != "IFCPOLYLOOP" {
                     continue;
                 }
-                let mut points: Vec<Vec3> = lp.arg(0).list().iter().map(|p| self.point3(p)).collect();
+                let mut points: Vec<Vec3> =
+                    lp.arg(0).list().iter().map(|p| self.point3(p)).collect();
                 if bound.arg(1).as_enum() == Some("F") {
                     points.reverse();
                 }
@@ -741,26 +919,44 @@ impl<'a> Ifc<'a> {
         let mut normal = Vec3::ZERO;
         for k in 0..outer.len() {
             let (a, b) = (outer[k], outer[(k + 1) % outer.len()]);
-            normal += Vec3::new((a.y - b.y) * (a.z + b.z), (a.z - b.z) * (a.x + b.x), (a.x - b.x) * (a.y + b.y));
+            normal += Vec3::new(
+                (a.y - b.y) * (a.z + b.z),
+                (a.z - b.z) * (a.x + b.x),
+                (a.x - b.x) * (a.y + b.y),
+            );
         }
-        let Some(normal) = normal.try_normalize() else { return };
+        let Some(normal) = normal.try_normalize() else {
+            return;
+        };
         let u = normal.any_orthonormal_vector();
         let v = normal.cross(u);
         let origin = outer[0];
         let flat = |p: &Vec3| Vec2::new((*p - origin).dot(u), (*p - origin).dot(v));
-        let mut contours = vec![path::Contour { points: outer.iter().map(flat).collect(), closed: true }];
-        contours.extend(holes.iter().map(|h| path::Contour { points: h.iter().map(flat).collect(), closed: true }));
+        let mut contours = vec![path::Contour {
+            points: outer.iter().map(flat).collect(),
+            closed: true,
+        }];
+        contours.extend(holes.iter().map(|h| path::Contour {
+            points: h.iter().map(flat).collect(),
+            closed: true,
+        }));
         let fill = path::fill(&contours, path::FillRule::EvenOdd);
         let lift = |p: Vec2| origin + u * p.x + v * p.y;
         for t in fill.indices.chunks_exact(3) {
-            let corners = [lift(fill.points[t[0] as usize]), lift(fill.points[t[1] as usize]), lift(fill.points[t[2] as usize])];
+            let corners = [
+                lift(fill.points[t[0] as usize]),
+                lift(fill.points[t[1] as usize]),
+                lift(fill.points[t[2] as usize]),
+            ];
             // 耳切输出逆时针（按 u × v = normal），和原多边形同向。
             self.emit(transform, color, corners);
         }
     }
 
     fn face_set(&mut self, e: &Entity, transform: Mat4, color: Vec4) {
-        let Some(points) = e.arg(0).as_ref().and_then(|r| self.get(r)) else { return };
+        let Some(points) = e.arg(0).as_ref().and_then(|r| self.get(r)) else {
+            return;
+        };
         let coordinates: Vec<Vec3> = points
             .arg(0)
             .list()
@@ -771,7 +967,11 @@ impl<'a> Ifc<'a> {
                 Vec3::new(g(0), g(1), g(2))
             })
             .collect();
-        let index = |v: &Value| v.as_f64().map(|i| i as usize).and_then(|i| coordinates.get(i.wrapping_sub(1)).copied());
+        let index = |v: &Value| {
+            v.as_f64()
+                .map(|i| i as usize)
+                .and_then(|i| coordinates.get(i.wrapping_sub(1)).copied())
+        };
         if e.kind == "IFCTRIANGULATEDFACESET" {
             for triangle in e.arg(3).list() {
                 let c: Vec<Vec3> = triangle.list().iter().filter_map(index).collect();
@@ -780,10 +980,20 @@ impl<'a> Ifc<'a> {
                 }
             }
         } else {
-            let faces: Vec<&Entity> = e.arg(2).list().iter().filter_map(|f| f.as_ref().and_then(|r| self.get(r))).collect();
+            let faces: Vec<&Entity> = e
+                .arg(2)
+                .list()
+                .iter()
+                .filter_map(|f| f.as_ref().and_then(|r| self.get(r)))
+                .collect();
             for face in faces {
                 let outer: Vec<Vec3> = face.arg(0).list().iter().filter_map(index).collect();
-                let holes: Vec<Vec<Vec3>> = face.arg(1).list().iter().map(|h| h.list().iter().filter_map(index).collect()).collect();
+                let holes: Vec<Vec<Vec3>> = face
+                    .arg(1)
+                    .list()
+                    .iter()
+                    .map(|h| h.list().iter().filter_map(index).collect())
+                    .collect();
                 self.polygon(&outer, &holes, transform, color);
             }
         }
@@ -791,21 +1001,42 @@ impl<'a> Ifc<'a> {
 }
 
 /// `IfcSurfaceStyle` → 颜色。
-fn surface_style_color(entities: &HashMap<u32, Entity>, value: &Value, depth: usize) -> Option<Vec4> {
+fn surface_style_color(
+    entities: &HashMap<u32, Entity>,
+    value: &Value,
+    depth: usize,
+) -> Option<Vec4> {
     let e = entities.get(&value.as_ref()?)?;
     if depth > 8 {
         return None;
     }
     match e.kind.as_str() {
-        "IFCPRESENTATIONSTYLEASSIGNMENT" => e.arg(0).list().iter().find_map(|s| surface_style_color(entities, s, depth + 1)),
-        "IFCSURFACESTYLE" => e.arg(2).list().iter().find_map(|s| surface_style_color(entities, s, depth + 1)),
+        "IFCPRESENTATIONSTYLEASSIGNMENT" => e
+            .arg(0)
+            .list()
+            .iter()
+            .find_map(|s| surface_style_color(entities, s, depth + 1)),
+        "IFCSURFACESTYLE" => e
+            .arg(2)
+            .list()
+            .iter()
+            .find_map(|s| surface_style_color(entities, s, depth + 1)),
         "IFCSURFACESTYLERENDERING" | "IFCSURFACESTYLESHADING" => {
             let c = entities.get(&e.arg(0).as_ref()?)?;
             let g = |i: usize| c.arg(i).as_f64().unwrap_or(0.8) as f32;
-            let transparency = if e.kind == "IFCSURFACESTYLERENDERING" { e.arg(1).as_f64().unwrap_or(0.0) as f32 } else { 0.0 };
+            let transparency = if e.kind == "IFCSURFACESTYLERENDERING" {
+                e.arg(1).as_f64().unwrap_or(0.0) as f32
+            } else {
+                0.0
+            };
             // IFC 的颜色是 sRGB 分量。
             let s = crate::amf::srgb_to_linear;
-            Some(Vec4::new(s(g(1)), s(g(2)), s(g(3)), 1.0 - transparency.clamp(0.0, 0.95)))
+            Some(Vec4::new(
+                s(g(1)),
+                s(g(2)),
+                s(g(3)),
+                1.0 - transparency.clamp(0.0, 0.95),
+            ))
         }
         _ => None,
     }
@@ -827,8 +1058,15 @@ fn default_color(kind: &str) -> Vec4 {
 }
 
 /// 解析 IFC。
-pub async fn parse(bytes: Vec<u8>, path: PathBuf, _io: Arc<dyn ResourceIo>) -> Result<Model, LoadError> {
-    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "IFC".into());
+pub async fn parse(
+    bytes: Vec<u8>,
+    path: PathBuf,
+    _io: Arc<dyn ResourceIo>,
+) -> Result<Model, LoadError> {
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "IFC".into());
     let entities = parse_step(&bytes)?;
     build(&entities, &name)
 }
@@ -838,7 +1076,12 @@ pub fn build(entities: &HashMap<u32, Entity>, name: &str) -> Result<Model, LoadE
     // 长度单位：IfcUnitAssignment 里的 LENGTHUNIT。
     let mut unit = 1.0f32;
     if let Some(assignment) = entities.values().find(|e| e.kind == "IFCUNITASSIGNMENT") {
-        for u in assignment.arg(0).list().iter().filter_map(|v| v.as_ref().and_then(|r| entities.get(&r))) {
+        for u in assignment
+            .arg(0)
+            .list()
+            .iter()
+            .filter_map(|v| v.as_ref().and_then(|r| entities.get(&r)))
+        {
             if u.kind == "IFCSIUNIT" && u.arg(1).as_enum() == Some("LENGTHUNIT") {
                 unit = match u.arg(2).as_enum() {
                     Some("MILLI") => 0.001,
@@ -847,7 +1090,8 @@ pub fn build(entities: &HashMap<u32, Entity>, name: &str) -> Result<Model, LoadE
                     Some("KILO") => 1000.0,
                     _ => 1.0,
                 };
-            } else if u.kind == "IFCCONVERSIONBASEDUNIT" && u.arg(1).as_enum() == Some("LENGTHUNIT")
+            } else if u.kind == "IFCCONVERSIONBASEDUNIT"
+                && u.arg(1).as_enum() == Some("LENGTHUNIT")
                 && let Some(measure) = u.arg(3).as_ref().and_then(|r| entities.get(&r))
             {
                 unit = measure.arg(0).as_f64().unwrap_or(1.0) as f32;
@@ -861,7 +1105,11 @@ pub fn build(entities: &HashMap<u32, Entity>, name: &str) -> Result<Model, LoadE
     let mut styled_representation_colors: HashMap<u32, Vec4> = HashMap::new();
     for (&id, e) in entities {
         if e.kind == "IFCSTYLEDITEM"
-            && let Some(color) = e.arg(1).list().iter().find_map(|s| surface_style_color(entities, s, 0))
+            && let Some(color) = e
+                .arg(1)
+                .list()
+                .iter()
+                .find_map(|s| surface_style_color(entities, s, 0))
         {
             match e.arg(0).as_ref() {
                 Some(item) => {
@@ -873,10 +1121,26 @@ pub fn build(entities: &HashMap<u32, Entity>, name: &str) -> Result<Model, LoadE
             }
         }
     }
-    for e in entities.values().filter(|e| e.kind == "IFCMATERIALDEFINITIONREPRESENTATION") {
-        let Some(material) = e.arg(3).as_ref() else { continue };
-        for representation in e.arg(2).list().iter().filter_map(|r| r.as_ref().and_then(|r| entities.get(&r))) {
-            if let Some(color) = representation.arg(3).list().iter().filter_map(Value::as_ref).find_map(|i| styled_representation_colors.get(&i)) {
+    for e in entities
+        .values()
+        .filter(|e| e.kind == "IFCMATERIALDEFINITIONREPRESENTATION")
+    {
+        let Some(material) = e.arg(3).as_ref() else {
+            continue;
+        };
+        for representation in e
+            .arg(2)
+            .list()
+            .iter()
+            .filter_map(|r| r.as_ref().and_then(|r| entities.get(&r)))
+        {
+            if let Some(color) = representation
+                .arg(3)
+                .list()
+                .iter()
+                .filter_map(Value::as_ref)
+                .find_map(|i| styled_representation_colors.get(&i))
+            {
                 material_colors.insert(material, *color);
             }
         }
@@ -897,7 +1161,9 @@ pub fn build(entities: &HashMap<u32, Entity>, name: &str) -> Result<Model, LoadE
             match e.kind.as_str() {
                 "IFCMATERIALLIST" => stack.extend(e.arg(0).list().iter().filter_map(Value::as_ref)),
                 "IFCMATERIALLAYERSETUSAGE" => stack.extend(e.arg(0).as_ref()),
-                "IFCMATERIALLAYERSET" => stack.extend(e.arg(0).list().iter().filter_map(Value::as_ref)),
+                "IFCMATERIALLAYERSET" => {
+                    stack.extend(e.arg(0).list().iter().filter_map(Value::as_ref))
+                }
                 "IFCMATERIALLAYER" => stack.extend(e.arg(0).as_ref()),
                 _ => {}
             }
@@ -905,8 +1171,13 @@ pub fn build(entities: &HashMap<u32, Entity>, name: &str) -> Result<Model, LoadE
         None
     };
     let mut element_colors: HashMap<u32, Vec4> = HashMap::new();
-    for e in entities.values().filter(|e| e.kind == "IFCRELASSOCIATESMATERIAL") {
-        let Some(color) = e.arg(5).as_ref().and_then(material_color) else { continue };
+    for e in entities
+        .values()
+        .filter(|e| e.kind == "IFCRELASSOCIATESMATERIAL")
+    {
+        let Some(color) = e.arg(5).as_ref().and_then(material_color) else {
+            continue;
+        };
         for object in e.arg(4).list().iter().filter_map(Value::as_ref) {
             element_colors.insert(object, color);
         }
@@ -925,21 +1196,44 @@ pub fn build(entities: &HashMap<u32, Entity>, name: &str) -> Result<Model, LoadE
     let mut products = 0usize;
     for id in ids {
         let e = &entities[&id];
-        if matches!(e.kind.as_str(), "IFCOPENINGELEMENT" | "IFCSPACE" | "IFCANNOTATION" | "IFCGRID") {
+        if matches!(
+            e.kind.as_str(),
+            "IFCOPENINGELEMENT" | "IFCSPACE" | "IFCANNOTATION" | "IFCGRID"
+        ) {
             continue;
         }
-        let (Some(placement), Some(shape)) = (e.arg(5).as_ref(), e.arg(6).as_ref()) else { continue };
-        let Some(shape) = entities.get(&shape).filter(|s| s.kind == "IFCPRODUCTDEFINITIONSHAPE") else { continue };
-        if entities.get(&placement).is_none_or(|p| p.kind != "IFCLOCALPLACEMENT") {
+        let (Some(placement), Some(shape)) = (e.arg(5).as_ref(), e.arg(6).as_ref()) else {
+            continue;
+        };
+        let Some(shape) = entities
+            .get(&shape)
+            .filter(|s| s.kind == "IFCPRODUCTDEFINITIONSHAPE")
+        else {
+            continue;
+        };
+        if entities
+            .get(&placement)
+            .is_none_or(|p| p.kind != "IFCLOCALPLACEMENT")
+        {
             continue;
         }
         let transform = ifc.placement(placement, 0);
-        let color = element_colors.get(&id).copied().unwrap_or_else(|| default_color(&e.kind));
+        let color = element_colors
+            .get(&id)
+            .copied()
+            .unwrap_or_else(|| default_color(&e.kind));
         // 只画 `Body`（没有标识符时也画），跳过 Axis / Box / FootPrint 这些辅助表示。
-        let representations: Vec<u32> = shape.arg(2).list().iter().filter_map(Value::as_ref).collect();
+        let representations: Vec<u32> = shape
+            .arg(2)
+            .list()
+            .iter()
+            .filter_map(Value::as_ref)
+            .collect();
         let mut drew = false;
         for representation in &representations {
-            let Some(r) = entities.get(representation) else { continue };
+            let Some(r) = entities.get(representation) else {
+                continue;
+            };
             let identifier = match r.arg(1) {
                 Value::Str(s) => s.as_str(),
                 _ => "",
@@ -970,7 +1264,10 @@ pub fn build(entities: &HashMap<u32, Entity>, name: &str) -> Result<Model, LoadE
     batches.sort_by_key(|(k, _)| *k);
     for (key, (vertices, indices)) in batches {
         let color = Vec4::from_array(key.map(f32::from_bits));
-        let mut material = Material::standard().with_base_color(color).with_roughness(0.8).with_metallic(0.0);
+        let mut material = Material::standard()
+            .with_base_color(color)
+            .with_roughness(0.8)
+            .with_metallic(0.0);
         if color.w < 0.999 {
             material.set_blend_mode(kmaterial::BlendMode::Alpha);
         }
@@ -980,11 +1277,18 @@ pub fn build(entities: &HashMap<u32, Entity>, name: &str) -> Result<Model, LoadE
         if !mesh.is_valid() {
             continue;
         }
-        parts.push((format!("Color{}", materials.len()), mesh, Some(materials.len())));
+        parts.push((
+            format!("Color{}", materials.len()),
+            mesh,
+            Some(materials.len()),
+        ));
         materials.push(material);
     }
     let mut model = flat_model(name, parts, materials);
-    klog::debug!("IFC：{products} 个构件，{} 个三角形", model.triangle_count());
+    klog::debug!(
+        "IFC：{products} 个构件，{} 个三角形",
+        model.triangle_count()
+    );
     // IFC 是 Z 朝上；单位换成米。
     if let Some(root) = model_root_transform(&mut model) {
         root.rotation = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
@@ -1031,7 +1335,13 @@ END-ISO-10303-21;
         let entities = parse_step(SAMPLE.as_bytes()).unwrap();
         assert_eq!(entities[&8].kind, "IFCRECTANGLEPROFILEDEF");
         assert_eq!(entities[&8].args[3], Value::Real(2000.0));
-        assert_eq!(entities[&14].args[1], Value::List(vec![Value::Typed("IFCPARAMETERVALUE".into(), Box::new(Value::Real(0.0)))]));
+        assert_eq!(
+            entities[&14].args[1],
+            Value::List(vec![Value::Typed(
+                "IFCPARAMETERVALUE".into(),
+                Box::new(Value::Real(0.0))
+            )])
+        );
     }
 
     #[test]

@@ -66,7 +66,13 @@ pub enum Filter {
 ///
 /// `count` 是元素个数，`stride` 是每个元素的字节数，
 /// 返回值长度恰好是 `count * stride`。
-pub fn decode(source: &[u8], count: usize, stride: usize, mode: Mode, filter: Filter) -> Result<Vec<u8>> {
+pub fn decode(
+    source: &[u8],
+    count: usize,
+    stride: usize,
+    mode: Mode,
+    filter: Filter,
+) -> Result<Vec<u8>> {
     let size = count.checked_mul(stride).ok_or(MeshoptError("尺寸溢出"))?;
     if size > 1 << 30 {
         return Err(MeshoptError("解码后超过 1 GiB"));
@@ -169,7 +175,9 @@ fn decode_bytes(reader: &mut Reader<'_>, out: &mut [u8], bits: &[u32]) -> Result
             return Err(MeshoptError("数据被截断"));
         }
         let selector = (header[group / 4] >> ((group % 4) * 2)) & 3;
-        let width = *bits.get(selector as usize).ok_or(MeshoptError("非法的位宽选择"))?;
+        let width = *bits
+            .get(selector as usize)
+            .ok_or(MeshoptError("非法的位宽选择"))?;
         decode_bytes_group(reader, chunk, width)?;
     }
     Ok(())
@@ -209,7 +217,11 @@ fn decode_vertex_block(
                 _ => {
                     // 解码按 16 对齐写，可能越过本通道写进下一通道的开头；
                     // 下一通道随后会被自己的数据覆盖，和 C++ 的行为一致。
-                    let bits: &[u32] = if version == 0 { &BITS_V0 } else { &BITS_V1[ctrl as usize..] };
+                    let bits: &[u32] = if version == 0 {
+                        &BITS_V0
+                    } else {
+                        &BITS_V1[ctrl as usize..]
+                    };
                     let mut scratch = [0u8; VERTEX_BLOCK_MAX_SIZE];
                     decode_bytes(reader, &mut scratch[..aligned], bits)?;
                     lane[..vertex_count].copy_from_slice(&scratch[..vertex_count]);
@@ -235,9 +247,11 @@ fn decode_vertex_block(
                     let mut p = u16::from_le_bytes([last[half * 2], last[half * 2 + 1]]);
                     let base = half * 2 * vertex_count;
                     for i in 0..vertex_count {
-                        let raw = u16::from_le_bytes([buffer[base + i], buffer[base + vertex_count + i]]);
+                        let raw =
+                            u16::from_le_bytes([buffer[base + i], buffer[base + vertex_count + i]]);
                         let v = unzigzag16(raw).wrapping_add(p);
-                        vertex_data[i * vertex_size + k + half * 2..][..2].copy_from_slice(&v.to_le_bytes());
+                        vertex_data[i * vertex_size + k + half * 2..][..2]
+                            .copy_from_slice(&v.to_le_bytes());
                         p = v;
                     }
                 }
@@ -261,14 +275,20 @@ fn decode_vertex_block(
         }
     }
 
-    last_vertex[..vertex_size]
-        .copy_from_slice(&vertex_data[vertex_size * (vertex_count - 1)..vertex_size * vertex_count]);
+    last_vertex[..vertex_size].copy_from_slice(
+        &vertex_data[vertex_size * (vertex_count - 1)..vertex_size * vertex_count],
+    );
     Ok(())
 }
 
 /// `meshopt_decodeVertexBuffer`。
-pub fn decode_vertex_buffer(out: &mut [u8], vertex_count: usize, vertex_size: usize, buffer: &[u8]) -> Result<()> {
-    if vertex_size == 0 || vertex_size > 256 || vertex_size % 4 != 0 {
+pub fn decode_vertex_buffer(
+    out: &mut [u8],
+    vertex_count: usize,
+    vertex_size: usize,
+    buffer: &[u8],
+) -> Result<()> {
+    if vertex_size == 0 || vertex_size > 256 || !vertex_size.is_multiple_of(4) {
         return Err(MeshoptError("顶点步长必须是 4 的倍数且不超过 256"));
     }
     let header = *buffer.first().ok_or(MeshoptError("数据为空"))?;
@@ -280,7 +300,11 @@ pub fn decode_vertex_buffer(out: &mut [u8], vertex_count: usize, vertex_size: us
         return Err(MeshoptError("不支持的顶点编码版本"));
     }
     let tail_size = vertex_size + if version == 0 { 0 } else { vertex_size / 4 };
-    let tail_min = if version == 0 { TAIL_MIN_SIZE_V0 } else { TAIL_MIN_SIZE_V1 };
+    let tail_min = if version == 0 {
+        TAIL_MIN_SIZE_V0
+    } else {
+        TAIL_MIN_SIZE_V1
+    };
     let tail_pad = tail_size.max(tail_min);
     if buffer.len() - 1 < tail_pad {
         return Err(MeshoptError("数据被截断"));
@@ -291,7 +315,11 @@ pub fn decode_vertex_buffer(out: &mut [u8], vertex_count: usize, vertex_size: us
     let channels = (version != 0).then(|| &tail[vertex_size..]);
 
     let block = vertex_block_size(vertex_size);
-    let mut reader = Reader { data: buffer, at: 1, end: buffer.len() };
+    let mut reader = Reader {
+        data: buffer,
+        at: 1,
+        end: buffer.len(),
+    };
     let mut offset = 0;
     while offset < vertex_count {
         let size = block.min(vertex_count - offset);
@@ -350,9 +378,16 @@ fn write_index(out: &mut [u8], index_size: usize, at: usize, value: u32) {
 }
 
 /// `meshopt_decodeIndexBuffer`。
-pub fn decode_index_buffer(out: &mut [u8], index_count: usize, index_size: usize, buffer: &[u8]) -> Result<()> {
-    if index_count % 3 != 0 || !(index_size == 2 || index_size == 4) {
-        return Err(MeshoptError("三角形索引数必须是 3 的倍数，宽度 2 或 4 字节"));
+pub fn decode_index_buffer(
+    out: &mut [u8],
+    index_count: usize,
+    index_size: usize,
+    buffer: &[u8],
+) -> Result<()> {
+    if !index_count.is_multiple_of(3) || !(index_size == 2 || index_size == 4) {
+        return Err(MeshoptError(
+            "三角形索引数必须是 3 的倍数，宽度 2 或 4 字节",
+        ));
     }
     if buffer.len() < 1 + index_count / 3 + 16 {
         return Err(MeshoptError("数据被截断"));
@@ -374,7 +409,11 @@ pub fn decode_index_buffer(out: &mut [u8], index_count: usize, index_size: usize
     let codes = &buffer[1..1 + index_count / 3];
     let safe_end = buffer.len() - 16;
     let aux_table = &buffer[safe_end..];
-    let mut data = Reader { data: buffer, at: 1 + index_count / 3, end: safe_end };
+    let mut data = Reader {
+        data: buffer,
+        at: 1 + index_count / 3,
+        end: safe_end,
+    };
 
     let push_vertex = |fifo: &mut [u32; 16], at: &mut usize, v: u32, cond: bool| {
         fifo[*at] = v;
@@ -486,7 +525,12 @@ pub fn decode_index_buffer(out: &mut [u8], index_count: usize, index_size: usize
 }
 
 /// `meshopt_decodeIndexSequence`。
-pub fn decode_index_sequence(out: &mut [u8], index_count: usize, index_size: usize, buffer: &[u8]) -> Result<()> {
+pub fn decode_index_sequence(
+    out: &mut [u8],
+    index_count: usize,
+    index_size: usize,
+    buffer: &[u8],
+) -> Result<()> {
     if !(index_size == 2 || index_size == 4) {
         return Err(MeshoptError("索引宽度必须是 2 或 4 字节"));
     }
@@ -500,7 +544,11 @@ pub fn decode_index_sequence(out: &mut [u8], index_count: usize, index_size: usi
         return Err(MeshoptError("不支持的索引序列版本"));
     }
     let safe_end = buffer.len() - 4;
-    let mut data = Reader { data: buffer, at: 1, end: safe_end };
+    let mut data = Reader {
+        data: buffer,
+        at: 1,
+        end: safe_end,
+    };
     let mut last = [0u32; 2];
     for i in 0..index_count {
         let mut v = decode_vbyte(&mut data)?;
@@ -590,7 +638,7 @@ fn filter_quat(data: &mut [u8], count: usize, stride: usize) -> Result<()> {
 }
 
 fn filter_exp(data: &mut [u8], stride: usize) -> Result<()> {
-    if stride % 4 != 0 {
+    if !stride.is_multiple_of(4) {
         return Err(MeshoptError("指数滤波的步长必须是 4 的倍数"));
     }
     for word in data.chunks_exact_mut(4) {
@@ -621,7 +669,13 @@ fn filter_color(data: &mut [u8], count: usize, stride: usize) -> Result<()> {
         4 => {
             for i in 0..count {
                 let e = &mut data[i * 4..i * 4 + 4];
-                let out = unpack(e[0] as i32, e[1] as i8 as i32, e[2] as i8 as i32, e[3] as i32, 255.0);
+                let out = unpack(
+                    e[0] as i32,
+                    e[1] as i8 as i32,
+                    e[2] as i8 as i32,
+                    e[3] as i32,
+                    255.0,
+                );
                 for k in 0..4 {
                     e[k] = out[k] as u8;
                 }
@@ -631,7 +685,13 @@ fn filter_color(data: &mut [u8], count: usize, stride: usize) -> Result<()> {
             for i in 0..count {
                 let e = &mut data[i * 8..i * 8 + 8];
                 let get = |k: usize| u16::from_le_bytes([e[k * 2], e[k * 2 + 1]]);
-                let out = unpack(get(0) as i32, get(1) as i16 as i32, get(2) as i16 as i32, get(3) as i32, 65535.0);
+                let out = unpack(
+                    get(0) as i32,
+                    get(1) as i16 as i32,
+                    get(2) as i16 as i32,
+                    get(3) as i32,
+                    65535.0,
+                );
                 for k in 0..4 {
                     e[k * 2..k * 2 + 2].copy_from_slice(&(out[k] as u16).to_le_bytes());
                 }
@@ -661,7 +721,10 @@ mod tests {
         encoded.extend_from_slice(&[0; 4]);
         let mut out = vec![0u8; 16];
         decode_index_sequence(&mut out, 4, 4, &encoded).unwrap();
-        let values: Vec<u32> = out.chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+        let values: Vec<u32> = out
+            .chunks(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
         assert_eq!(values, [0, 1, 2, 5]);
     }
 

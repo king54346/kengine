@@ -13,6 +13,19 @@ fn shadow_project(light_view_proj: mat4x4<f32>, world_position: vec3<f32>) -> ve
     return vec3<f32>(uv, ndc.z);
 }
 
+// 点光的立方体阴影：着色点在光源的哪个方向，就查哪一面。
+// 顺序 +X −X +Y −Y +Z −Z，和 `klight::cascade::CUBE_FACES` 一致。
+fn shadow_cube_face(from_light: vec3<f32>) -> i32 {
+    let a = abs(from_light);
+    if (a.x >= a.y && a.x >= a.z) {
+        return select(1, 0, from_light.x > 0.0);
+    }
+    if (a.y >= a.z) {
+        return select(3, 2, from_light.y > 0.0);
+    }
+    return select(5, 4, from_light.z > 0.0);
+}
+
 // 按到相机的距离选级联。
 //
 // `splits` 的 x/y/z 是前三级的远距离，w 是级数。
@@ -26,6 +39,8 @@ fn pick_cascade(view_depth: f32, splits: vec4<f32>) -> i32 {
 }
 
 // 软阴影：从级联数组的某一层采样，返回受光比例（1 = 完全受光）。
+//
+// `penumbra_ratio` **小于 0** 时是固定的模糊半径（纹素，取绝对值）：灯上设的 `shadow_radius`。
 //
 // `penumbra_ratio` 是**光源对着色点张开的半角的正切**（半尺寸 / 到光源
 // 的距离）。给 0 就是固定的 3×3 PCF，也就是这个函数原来的行为——
@@ -86,7 +101,9 @@ fn shadow_factor_cascade(
     //
     // 张角为 0（方向光那些）时半径恒为一个纹素，退化成原来的 3×3 PCF。
     var radius_texels = 1.0;
-    if (penumbra_ratio > 0.0) {
+    if (penumbra_ratio < 0.0) {
+        radius_texels = clamp(-penumbra_ratio, 1.0, 24.0);
+    } else if (penumbra_ratio > 0.0) {
         // 一个世界单位有多少纹素。和上面的深度范围一样，从矩阵里取
         // 而不是再传一个 uniform——这样各级级联天然是对的。
         //

@@ -14,7 +14,7 @@
 //! # 覆盖的是拼装，不是画面
 //!
 //! 编译得过不代表画得对——颜色算错、法线方向反了、参数槽位对错了号，
-//! 这些都编译得过。那些只能靠人看，见 `next.md` 最后一节。
+//! 这些都编译得过。那些只能靠人看，见 `docs/ROADMAP.md` 的「只能靠人看的」。
 
 use kengine::krender::validate_material_hook;
 use kengine::kshader::Shader;

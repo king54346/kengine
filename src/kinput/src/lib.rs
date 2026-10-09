@@ -27,9 +27,11 @@
 
 mod binding;
 mod button;
+mod gamepad;
 
 pub use binding::{AxisBinding, Binding, Bindings};
 pub use button::ButtonState;
+pub use gamepad::{Gamepad, GamepadAxis, GamepadButton, GamepadPoller, Gamepads};
 
 pub use winit::event::MouseButton;
 pub use winit::keyboard::KeyCode;
@@ -42,7 +44,9 @@ use winit::{
 
 /// 常用类型的集中导出。
 pub mod prelude {
-    pub use crate::{Binding, Bindings, ButtonState, Input, KeyCode, MouseButton};
+    pub use crate::{
+        Binding, Bindings, ButtonState, GamepadAxis, GamepadButton, Input, KeyCode, MouseButton,
+    };
 }
 
 /// 输入状态总入口。
@@ -54,6 +58,15 @@ pub struct Input {
     mouse_delta: Vec2,
     scroll_delta: Vec2,
     bindings: Bindings,
+    /// 手柄状态（`GamepadPoller` 每帧喂进来）。
+    gamepads: Gamepads,
+    /// 游戏要求锁定光标（第一人称）。真正锁没锁还要看窗口有没有焦点。
+    cursor_lock: bool,
+    /// 窗口失焦了。存反过来的值是为了 `Default` 出来就是「有焦点」。
+    unfocused: bool,
+    /// 游戏要不要输入法。默认不要：开着的话中文输入法会吃掉按键（按 Shift 切中英文、
+    /// 字母键进了候选框），游戏收不到。
+    ime: bool,
 }
 
 impl Input {
@@ -121,6 +134,45 @@ impl Input {
         self.scroll_delta
     }
 
+    /// 要求锁定（或放开）光标：锁定时光标隐藏、不能移出窗口，视角靠 [`mouse_delta`](Self::mouse_delta) 转。
+    ///
+    /// 这只是记下意图，引擎在帧末交给窗口。窗口失焦时自动放开，切回来自动恢复——
+    /// 游戏不用自己管 Alt+Tab。
+    pub fn set_cursor_locked(&mut self, locked: bool) {
+        self.cursor_lock = locked;
+    }
+
+    /// 要不要打开输入法（中日韩输入）。
+    ///
+    /// 默认关着：输入法开着时 Shift、字母键会先被它截走（按 Shift 切中英文、打字母弹候选框），
+    /// 游戏收不到。有文本框拿到焦点时打开——用 `kui_widgets` 的话每帧
+    /// `input.set_ime_allowed(widgets.wants_keyboard())` 就够了。
+    ///
+    /// 这只是记下意图，引擎在帧末交给窗口；只有变了才真的去改。
+    pub fn set_ime_allowed(&mut self, allowed: bool) {
+        self.ime = allowed;
+    }
+
+    /// 游戏现在要不要输入法。
+    pub fn ime_allowed(&self) -> bool {
+        self.ime
+    }
+
+    /// 游戏是否要求锁定光标（不管窗口此刻有没有焦点）。
+    pub fn cursor_locked(&self) -> bool {
+        self.cursor_lock
+    }
+
+    /// 光标此刻是否真的该锁着：要求锁定，且窗口有焦点。引擎据此改窗口状态。
+    pub fn cursor_lock_active(&self) -> bool {
+        self.cursor_lock && !self.unfocused
+    }
+
+    /// 窗口有没有焦点。
+    pub fn focused(&self) -> bool {
+        !self.unfocused
+    }
+
     // ── 动作与轴 ─────────────────────────────────────────────────────────
 
     /// 映射表的可变引用，用于注册动作与轴。
@@ -150,9 +202,10 @@ impl Input {
         })
     }
 
-    /// 读取一个轴，取值为 `-1.0`、`0.0` 或 `1.0`。
+    /// 读取一个轴，`-1.0..=1.0`。
     ///
-    /// 正负方向同时按下时返回 `0.0`。轴不存在时同样返回 `0.0`。
+    /// 数字键（键盘、手柄按键）按着时是 `-1`、`0` 或 `1`（正负同时按下为 0）；都没按时取绑定的模拟量
+    /// （[`Bindings::bind_axis_analog`]，摇杆过了死区之后的值）。轴不存在时返回 `0.0`。
     pub fn axis(&self, axis: &str) -> f32 {
         let Some(binding) = self.bindings.axis(axis) else {
             return 0.0;
@@ -164,15 +217,58 @@ impl Input {
         match (positive, negative) {
             (true, false) => 1.0,
             (false, true) => -1.0,
-            _ => 0.0,
+            (true, true) => 0.0,
+            (false, false) => binding
+                .analog
+                .iter()
+                .map(|axis| self.gamepads.axis(*axis))
+                .fold(
+                    0.0,
+                    |best: f32, v| if v.abs() > best.abs() { v } else { best },
+                ),
         }
     }
 
+    /// 手柄状态（所有已连接的手柄、死区设置）。
+    pub fn gamepads(&self) -> &Gamepads {
+        &self.gamepads
+    }
+
+    /// 手柄状态的可变引用：改死区，或者测试 / 回放时直接喂按键。
+    pub fn gamepads_mut(&mut self) -> &mut Gamepads {
+        &mut self.gamepads
+    }
+
+    /// 任意一个手柄按着这个键。
+    pub fn gamepad_pressed(&self, button: GamepadButton) -> bool {
+        self.gamepads.pressed(button)
+    }
+
+    /// 任意一个手柄这一帧刚按下这个键。
+    pub fn gamepad_just_pressed(&self, button: GamepadButton) -> bool {
+        self.gamepads.just_pressed(button)
+    }
+
+    /// 一个手柄模拟量，过了死区。摇杆 −1..1（y 向上为正），扳机 0..1。
+    pub fn gamepad_axis(&self, axis: GamepadAxis) -> f32 {
+        self.gamepads.axis(axis)
+    }
+
+    /// 左（`left = true`）或右摇杆，径向死区，长度不超过 1。
+    pub fn gamepad_stick(&self, left: bool) -> Vec2 {
+        self.gamepads.stick(left)
+    }
+
     /// 把两个轴合成一个方向向量，长度不超过 1。
+    ///
+    /// 斜向不比直线快；摇杆推一半就是半速（只在超过 1 时才缩回单位长度，不会把轻推放大成全速）。
     pub fn axis_vector(&self, x_axis: &str, y_axis: &str) -> Vec2 {
         let raw = Vec2::new(self.axis(x_axis), self.axis(y_axis));
-        // 斜向输入不应该比直线更快。
-        raw.normalize_or_zero()
+        if raw.length_squared() > 1.0 {
+            raw.normalize()
+        } else {
+            raw
+        }
     }
 
     /// 某个具体绑定是否被按住。
@@ -180,6 +276,7 @@ impl Input {
         match binding {
             Binding::Key(key) => self.keys.pressed(key),
             Binding::Mouse(button) => self.mouse_buttons.pressed(button),
+            Binding::Gamepad(button) => self.gamepads.pressed(button),
         }
     }
 
@@ -188,6 +285,7 @@ impl Input {
         match binding {
             Binding::Key(key) => self.keys.just_pressed(key),
             Binding::Mouse(button) => self.mouse_buttons.just_pressed(button),
+            Binding::Gamepad(button) => self.gamepads.just_pressed(button),
         }
     }
 
@@ -196,6 +294,7 @@ impl Input {
         match binding {
             Binding::Key(key) => self.keys.just_released(key),
             Binding::Mouse(button) => self.mouse_buttons.just_released(button),
+            Binding::Gamepad(button) => self.gamepads.just_released(button),
         }
     }
 
@@ -235,14 +334,23 @@ impl Input {
                 };
                 self.scroll_delta += Vec2::new(x, y);
             }
-            WindowEvent::Focused(false) => self.reset(),
+            WindowEvent::Focused(focused) => {
+                self.unfocused = !focused;
+                if !focused {
+                    self.reset();
+                }
+            }
             _ => {}
         }
     }
 
     /// 处理设备事件，用于获取鼠标原始移动量。由引擎调用。
     pub fn process_device_event(&mut self, event: &DeviceEvent) {
-        if let DeviceEvent::MouseMotion { delta } = event {
+        // 原始鼠标事件不管窗口有没有焦点都会来：失焦时在别的程序里晃鼠标，
+        // 不该转动游戏里的视角。
+        if let DeviceEvent::MouseMotion { delta } = event
+            && !self.unfocused
+        {
             self.mouse_delta += Vec2::new(delta.0 as f32, delta.1 as f32);
         }
     }
@@ -261,6 +369,7 @@ impl Input {
     pub fn end_frame(&mut self) {
         self.keys.end_frame();
         self.mouse_buttons.end_frame();
+        self.gamepads.end_frame();
         self.mouse_delta = Vec2::ZERO;
         self.scroll_delta = Vec2::ZERO;
     }
@@ -269,6 +378,7 @@ impl Input {
     pub fn reset(&mut self) {
         self.keys.reset();
         self.mouse_buttons.reset();
+        self.gamepads.reset();
         self.mouse_delta = Vec2::ZERO;
         self.scroll_delta = Vec2::ZERO;
     }
@@ -277,6 +387,77 @@ impl Input {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn a_stick_and_the_keyboard_drive_the_same_axis() {
+        let mut input = Input::new();
+        input
+            .bindings_mut()
+            .bind_axis("horizontal", KeyCode::KeyD, KeyCode::KeyA);
+        input
+            .bindings_mut()
+            .bind_axis_analog("horizontal", GamepadAxis::LeftStickX);
+        input
+            .bindings_mut()
+            .bind_action("jump", GamepadButton::South);
+        input.gamepads_mut().connect(0, "pad");
+        input
+            .gamepads_mut()
+            .set_axis(0, GamepadAxis::LeftStickX, -0.575);
+        // 摇杆推一半（过死区之后正好 -0.5）。
+        assert!(
+            (input.axis("horizontal") + 0.5).abs() < 1e-4,
+            "{}",
+            input.axis("horizontal")
+        );
+        // 键盘按着时以键盘为准。
+        input.press_key(KeyCode::KeyD);
+        assert_eq!(input.axis("horizontal"), 1.0);
+        // 半速推不会被 axis_vector 放大成全速。
+        input.release_key(KeyCode::KeyD);
+        input
+            .bindings_mut()
+            .bind_axis("vertical", KeyCode::KeyW, KeyCode::KeyS);
+        assert!((input.axis_vector("horizontal", "vertical").length() - 0.5).abs() < 1e-4);
+        input.gamepads_mut().press(0, GamepadButton::South);
+        assert!(input.action_just_pressed("jump"));
+    }
+
+    #[test]
+    fn cursor_lock_follows_focus() {
+        let mut input = Input::new();
+        assert!(!input.cursor_lock_active());
+        input.set_cursor_locked(true);
+        assert!(input.cursor_lock_active());
+        // Alt+Tab 出去：意图还在，但此刻不该锁。
+        input.process_window_event(&WindowEvent::Focused(false));
+        assert!(input.cursor_locked());
+        assert!(!input.cursor_lock_active());
+        input.process_window_event(&WindowEvent::Focused(true));
+        assert!(input.cursor_lock_active());
+    }
+
+    #[test]
+    fn ime_is_off_until_asked_for() {
+        let mut input = Input::new();
+        // 默认关：不然中文输入法会把 Shift、字母键从游戏手里截走。
+        assert!(!input.ime_allowed());
+        input.set_ime_allowed(true);
+        assert!(input.ime_allowed());
+        input.set_ime_allowed(false);
+        assert!(!input.ime_allowed());
+    }
+
+    #[test]
+    fn mouse_motion_while_unfocused_is_ignored() {
+        let mut input = Input::new();
+        input.process_device_event(&DeviceEvent::MouseMotion { delta: (3.0, 4.0) });
+        assert_eq!(input.mouse_delta(), Vec2::new(3.0, 4.0));
+        input.end_frame();
+        input.process_window_event(&WindowEvent::Focused(false));
+        input.process_device_event(&DeviceEvent::MouseMotion { delta: (3.0, 4.0) });
+        assert_eq!(input.mouse_delta(), Vec2::ZERO);
+    }
 
     fn input_with_bindings() -> Input {
         let mut input = Input::new();

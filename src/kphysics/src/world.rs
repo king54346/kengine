@@ -183,6 +183,13 @@ impl PhysicsWorld {
 
         let start = Instant::now();
         self.inner.step_with_events(&(), &self.event_handler);
+        // rapier 的 `add_force` / `add_torque` 是**持续**的：不清的话每加一次就永久叠上去，
+        // 每步都加浮力的船几秒后就被推上天。`BodyMut::add_force` 承诺的是「只作用这一步」，
+        // 这里兑现它。
+        for (_, body) in self.inner.bodies.iter_mut() {
+            body.reset_forces(false);
+            body.reset_torques(false);
+        }
         self.stats.step_time = start.elapsed();
         self.stats.body_count = self.inner.bodies.len();
         self.stats.collider_count = self.inner.colliders.len();
@@ -590,6 +597,28 @@ mod test {
     use super::*;
     use crate::{ColliderDesc, RigidBodyType};
     use kmath::Quat;
+
+    #[test]
+    fn forces_only_last_one_step() {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(&RigidBodyDesc::dynamic().with_gravity_scale(0.0), 0);
+        world
+            .add_collider(&ColliderDesc::ball(0.5), Some(body), 0)
+            .unwrap();
+        world
+            .body_mut(body)
+            .unwrap()
+            .add_force(Vec3::X * 10.0, true);
+        world.step(1.0 / 60.0);
+        let after_one = world.body(body).unwrap().linvel().x;
+        world.step(1.0 / 60.0);
+        let after_two = world.body(body).unwrap().linvel().x;
+        assert!(after_one > 0.0);
+        assert!(
+            (after_two - after_one).abs() < 1e-5,
+            "力该在一步之后清掉：{after_one} → {after_two}"
+        );
+    }
 
     /// 一个「地面 + 悬空的球」的最小场景，很多测试都从这里起步。
     fn ball_over_ground() -> (PhysicsWorld, BodyHandle) {

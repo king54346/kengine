@@ -49,6 +49,9 @@ pub struct Container {
     pub height: u32,
     /// 立方体贴图为 6，普通纹理为 1。
     pub faces: u32,
+    /// 数组层数（KTX2 的 `layerCount`），普通纹理为 1。
+    /// 每级的 [`Texture`] 共 `layers × faces` 层，按「层在外、面在内」排列。
+    pub layers: u32,
     /// 每一级 mip 一张图（已解成 RGBA8）；立方体贴图时每级是一张 6 层的数组。
     pub levels: Vec<Texture>,
 }
@@ -181,7 +184,8 @@ fn to_rgba(pixels: Vec<u32>) -> Vec<u8> {
 /// 这不是假设性的风险：`texture2ddecoder` 0.1.2 的 BC6H 解码在
 /// `endpoint_bits == 16` 的模式（mode 15）上会算出 `1u16 << 16`，
 /// debug 下直接 panic、release 下掩码变成 0 于是颜色是错的。
-/// 三份 `disturb_dx10_bc6h_*.dds` 样本就会踩到。
+/// `disturb_dx10_bc6h_*.dds` 样本就会踩到。这个已经用 `third_party/texture2ddecoder`
+/// 的补丁副本修掉了（见根目录 `[patch.crates-io]`），但同类问题可能还有。
 fn decode_level(
     layout: &Layout,
     data: &[u8],
@@ -234,6 +238,7 @@ fn assemble(
     height: u32,
     levels: usize,
     faces: u32,
+    layers: u32,
     mut fetch: impl FnMut(usize, u32) -> Result<Vec<u8>, TextureError>,
 ) -> Result<Container, TextureError> {
     if width == 0 || height == 0 || width > 16384 || height > 16384 {
@@ -242,13 +247,14 @@ fn assemble(
     let mut result = Vec::with_capacity(levels);
     for level in 0..levels.max(1) {
         let (w, h) = level_size(width, height, level);
-        let mut face_textures = Vec::with_capacity(faces as usize);
-        for face in 0..faces {
-            let data = fetch(level, face)?;
+        let images = faces * layers;
+        let mut face_textures = Vec::with_capacity(images as usize);
+        for image in 0..images {
+            let data = fetch(level, image)?;
             let rgba = decode_level(&layout, &data, w, h)?;
             face_textures.push(Texture::new(w as u32, h as u32, rgba));
         }
-        let mut texture = if faces > 1 {
+        let mut texture = if images > 1 {
             Texture::from_layers(&face_textures)
         } else {
             face_textures.remove(0)
@@ -267,6 +273,7 @@ fn assemble(
         width,
         height,
         faces,
+        layers,
         levels: result,
     })
 }
@@ -459,7 +466,7 @@ fn dds(bytes: &[u8]) -> Result<Container, TextureError> {
         }
     }
 
-    assemble(layout, width, height, mips, faces, |level, face| {
+    assemble(layout, width, height, mips, faces, 1, |level, face| {
         let mut at = face_offsets[face as usize];
         for skipped in 0..level {
             let (w, h) = level_size(width, height, skipped);
@@ -604,7 +611,7 @@ fn ktx1(bytes: &[u8]) -> Result<Container, TextureError> {
         };
     }
 
-    assemble(layout, width, height, levels, faces, |level, face| {
+    assemble(layout, width, height, levels, faces, 1, |level, face| {
         let (w, h) = level_size(width, height, level);
         let padded = layout.size(w, h).div_ceil(4) * 4;
         let at = level_offsets[level] + padded * face as usize;
@@ -768,6 +775,7 @@ fn ktx2(bytes: &[u8]) -> Result<Container, TextureError> {
     let vk_format = word(12)?;
     let width = word(20)?;
     let height = word(24)?;
+    let layers = word(32)?.max(1);
     let faces = word(36)?.max(1);
     let levels = clamp_levels(word(40)?, width, height);
     let supercompression = word(44)?;
@@ -777,7 +785,7 @@ fn ktx2(bytes: &[u8]) -> Result<Container, TextureError> {
         // 法线图、粗糙度图这类数据贴图靠它和颜色贴图区分开。
         let dfd = word(48)? as usize;
         let srgb = bytes.get(dfd + 14).is_none_or(|&transfer| transfer == 2);
-        return basis(bytes, faces, srgb);
+        return basis(bytes, faces, layers, srgb);
     }
     let layout = vk_layout(vk_format)?;
 
@@ -800,15 +808,24 @@ fn ktx2(bytes: &[u8]) -> Result<Container, TextureError> {
         });
     }
 
-    assemble(layout, width, height, levels, faces, |level, face| {
-        let (w, h) = level_size(width, height, level);
-        let face_size = layout.size(w, h);
-        let at = face_size * face as usize;
-        planes[level]
-            .get(at..)
-            .map(<[u8]>::to_vec)
-            .ok_or_else(|| err("KTX2 的面数据被截断"))
-    })
+    // 每级里是「层在外、面在内」紧密排列的 layers × faces 张图。
+    assemble(
+        layout,
+        width,
+        height,
+        levels,
+        faces,
+        layers,
+        |level, face| {
+            let (w, h) = level_size(width, height, level);
+            let face_size = layout.size(w, h);
+            let at = face_size * face as usize;
+            planes[level]
+                .get(at..)
+                .map(<[u8]>::to_vec)
+                .ok_or_else(|| err("KTX2 的面数据被截断"))
+        },
+    )
 }
 
 /// Basis Universal（ETC1S / UASTC）的 KTX2：转码到 RGBA8。
@@ -816,7 +833,7 @@ fn ktx2(bytes: &[u8]) -> Result<Container, TextureError> {
 /// 转码器是纯 Rust 的 `basisu`（参考 C++ 转码器的逐字节移植）。直接转
 /// `Rgba32` 而不是 BC7 / ASTC——理由和模块文档里说的一样，[`Texture`]
 /// 的约定是 RGBA8。
-fn basis(bytes: &[u8], faces: u32, srgb: bool) -> Result<Container, TextureError> {
+fn basis(bytes: &[u8], faces: u32, layers: u32, srgb: bool) -> Result<Container, TextureError> {
     let transcoder = basisu::Transcoder::new(bytes)
         .map_err(|e| err(format!("Basis 转码器拒绝了这份文件：{e:?}")))?;
     if transcoder.is_video() {
@@ -833,12 +850,13 @@ fn basis(bytes: &[u8], faces: u32, srgb: bool) -> Result<Container, TextureError
         let info = transcoder
             .image_level_info(level)
             .map_err(|e| err(format!("Basis 第 {level} 级：{e:?}")))?;
-        let mut face_textures = Vec::with_capacity(faces as usize);
-        for face in 0..faces {
+        let mut face_textures = Vec::with_capacity((faces * layers) as usize);
+        for (layer, face) in (0..layers).flat_map(|layer| (0..faces).map(move |face| (layer, face)))
+        {
             let rgba = transcoder
                 .transcode_image(
                     level,
-                    0,
+                    layer,
                     face,
                     basisu::TargetFormat::Rgba32,
                     basisu::DecodeFlags::NONE,
@@ -846,7 +864,7 @@ fn basis(bytes: &[u8], faces: u32, srgb: bool) -> Result<Container, TextureError
                 .map_err(|e| err(format!("Basis 第 {level} 级转码失败：{e:?}")))?;
             face_textures.push(Texture::new(info.width, info.height, rgba));
         }
-        let texture = if faces > 1 {
+        let texture = if face_textures.len() > 1 {
             Texture::from_layers(&face_textures)
         } else {
             face_textures.remove(0)
@@ -866,6 +884,7 @@ fn basis(bytes: &[u8], faces: u32, srgb: bool) -> Result<Container, TextureError
         width,
         height,
         faces,
+        layers,
         levels: result,
     })
 }
@@ -1014,7 +1033,7 @@ fn pvr(bytes: &[u8]) -> Result<Container, TextureError> {
         cursor += pvrtc_size(&layout, w, h) * faces as usize;
     }
 
-    assemble(layout, width, height, mips, faces, |level, face| {
+    assemble(layout, width, height, mips, faces, 1, |level, face| {
         let (w, h) = level_size(width, height, level);
         let at = level_offsets[level] + pvrtc_size(&layout, w, h) * face as usize;
         bytes
@@ -1078,6 +1097,42 @@ mod tests {
         assert_eq!(tone(f32::NAN), 0);
         assert!(tone(1000.0) > 250);
         assert!(tone(0.5) > tone(0.25));
+    }
+
+    /// 回归：这几份样本曾让 `texture2ddecoder` 0.1.2 的 BC6H 解码移位溢出。
+    #[test]
+    fn bc6h_samples_decode() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/threejs/textures/compressed");
+        for name in [
+            "disturb_dx10_bc6h_unsigned_mip.dds",
+            "disturb_dx10_bc6h_unsigned_nomip.dds",
+            "disturb_dx10_bc6h_signed_mip.dds",
+            "disturb_dx10_bc6h_signed_nomip.dds",
+        ] {
+            let Ok(bytes) = std::fs::read(dir.join(name)) else {
+                continue; // 样本不在就跳过，别让单测依赖例子资源。
+            };
+            if let Err(error) = decode(&bytes) {
+                panic!("{name}：{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_ktx2_array_keeps_all_its_layers() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/threejs/textures/spiritedaway.ktx2");
+        let Ok(bytes) = std::fs::read(path) else {
+            return; // 样本不在就跳过。
+        };
+        let container = decode(&bytes).unwrap();
+        assert_eq!((container.faces, container.layers), (1, 6));
+        assert_eq!(container.base().layers(), 6);
+        // 每层是不同的画面，不是同一层复制了 6 遍。
+        let data = container.base().data().to_vec();
+        let layer = data.len() / 6;
+        assert_ne!(data[..layer], data[layer..2 * layer]);
     }
 
     #[test]

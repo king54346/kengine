@@ -4,8 +4,12 @@ struct SkyGlobals {
     // 视图投影的逆矩阵，用于从裁剪空间反推世界方向
     inverse_view_proj: mat4x4<f32>,
     camera_position: vec4<f32>,
-    // x = 预滤波环境图的 mip 数（0 表示没有 HDR），其余保留
+    // x = 预滤波环境图的 mip 数（0 表示没有 HDR），
+    // y = HDR 背景的亮度倍数（<0 表示跟着环境强度走），
+    // z = 背景模糊程度 0..1（按粗糙度取预滤波链的那一级），w 保留
     ibl_params: vec4<f32>,
+    // rgb = 纯色背景，a = 用不用（>0.5）。见 `Scene::set_background`。
+    background: vec4<f32>,
     environment: Environment,
 };
 
@@ -13,6 +17,8 @@ struct SkyGlobals {
 // 和主 pass 共用同一张预滤波环境图。背景取第 0 级（最清晰的那级）。
 @group(0) @binding(1) var sky_environment: texture_2d_array<f32>;
 @group(0) @binding(2) var sky_environment_sampler: sampler;
+// 预滤波链（和物体反射同一条）。模糊背景从这里取。
+@group(0) @binding(3) var sky_prefiltered: texture_2d_array<f32>;
 
 struct SkyOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -45,6 +51,10 @@ fn sky_fs(in: SkyOutput) -> @location(0) vec4<f32> {
     // 不接这一步的话，物体的反射来自 HDR、天上却是另一幅渐变天空，
     // 两者不一致时很容易看出来——尤其是水面和金属。
     var color: vec3<f32>;
+    if (sky_globals.background.a > 0.5) {
+        // 纯色背景：不上雾——three.js 的 `scene.background` 也不受雾影响。
+        return vec4<f32>(sky_globals.background.rgb, 1.0);
+    }
     if (sky_globals.ibl_params.x > 0.5) {
         let uv = equirect_uv(direction);
         // 背景要最清晰的那级。用 `textureSampleLevel` 显式取第 0 级：
@@ -52,8 +62,35 @@ fn sky_fs(in: SkyOutput) -> @location(0) vec4<f32> {
         // 天空会糊掉一圈。
         // 背景永远用第 0 层（全局环境）。反射探针是给物体表面用的，
         // 天空本身没有「站在哪儿看」的问题。
-        color = textureSampleLevel(sky_environment, sky_environment_sampler, uv, 0, 0.0).rgb
-            * sky_globals.environment.sun_color.a;
+        var intensity = sky_globals.environment.sun_color.a;
+        if (sky_globals.ibl_params.y >= 0.0) {
+            intensity = sky_globals.ibl_params.y;
+        }
+        color = textureSampleLevel(sky_environment, sky_environment_sampler, uv, 0, 0.0).rgb;
+        // 要模糊时按粗糙度取预滤波链的对应级，和物体反射同一套映射。
+        // 链的第 0 级分辨率低、本身就有点糊，所以模糊很小时和原图混合过渡，
+        // 不会一开滑块就跳一下。
+        let blur = sky_globals.ibl_params.z;
+        if (blur > 0.0) {
+            // 和 three.js 一样把模糊度直接当粗糙度（预滤波链按粗糙度等分）。以前开了平方根，
+            // 0.3 就取到粗糙度 0.55，比 three.js 同样的数值糊得多（webgpu_tonemapping 对照出来的）。
+            //
+            // 轻度模糊不走预滤波链：链的第 1 级只有 128 像素宽，铺满全景 360°，拉到屏幕上糊成一片。
+            // 改成在原图上做一圈盘状采样（半径随模糊度长），模糊度大了再过渡到预滤波链。
+            let radius = blur * 0.05;
+            var disk = color * 2.0;
+            for (var i = 0; i < 16; i = i + 1) {
+                let angle = f32(i) * 2.3999632;
+                let r = sqrt((f32(i) + 0.5) / 16.0) * radius;
+                let offset = vec2<f32>(cos(angle) * r * 0.5, sin(angle) * r);
+                disk += textureSampleLevel(sky_environment, sky_environment_sampler, uv + offset, 0, 0.0).rgb;
+            }
+            disk /= 18.0;
+            let level = blur * max(sky_globals.ibl_params.x - 1.0, 0.0);
+            let blurred = textureSampleLevel(sky_prefiltered, sky_environment_sampler, uv, 0, level).rgb;
+            color = mix(disk, blurred, smoothstep(0.35, 0.8, blur));
+        }
+        color *= intensity;
     } else {
         color = ibl_sky(sky_globals.environment, direction);
     }

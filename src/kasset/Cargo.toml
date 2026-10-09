@@ -9,4 +9,6 @@ klog = { path = "../klog" }
 # 资源加载走 IO 线程池，必须启用真正的多线程实现（默认 feature 是单线程退化版）。
 ktask = { path = "../ktask", features = ["multi_threaded"] }
 fxhash = "0.2.1"
+# 资源包的逐项 deflate 压缩。工作区里 kimport / ktexture 已经在用同一个版本。
+flate2 = "1"
 parking_lot = "0.12.5"

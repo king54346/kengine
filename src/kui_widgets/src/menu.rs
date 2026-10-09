@@ -1861,7 +1861,7 @@ mod widget_tests {
             }
         }
 
-        let mut run = |w: &mut WidgetUi, ui: &mut kui::Ui, input: &UiInput, fired: &mut i32| {
+        let run = |w: &mut WidgetUi, ui: &mut kui::Ui, input: &UiInput, fired: &mut i32| {
             w.begin();
             declare(w, fired);
             w.finish(ui, input);
@@ -1912,7 +1912,7 @@ mod widget_tests {
             }
         }
 
-        let mut run = |w: &mut WidgetUi, ui: &mut kui::Ui, input: &UiInput, fired: &mut i32| {
+        let run = |w: &mut WidgetUi, ui: &mut kui::Ui, input: &UiInput, fired: &mut i32| {
             w.begin();
             declare(w, fired);
             w.finish(ui, input);

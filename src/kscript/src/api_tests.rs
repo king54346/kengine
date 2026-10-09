@@ -321,3 +321,51 @@ fn bursting_uses_the_world_transform() {
         "粒子从原点喷出来了，用的是局部变换"
     );
 }
+
+#[test]
+fn scripts_can_lock_the_cursor() {
+    let manager = resources(
+        "return { _ready() { Input.lockCursor(true); if (Input.cursorLocked()) emit('locked'); } };",
+    );
+    let mut scene = Scene::new();
+    scene.add_node(Node::new("n").with_script("s.js"));
+    let mut runtime = ScriptRuntime::new();
+    let mut input = kinput::Input::new();
+    scene.update();
+    let signals: Vec<String> = runtime
+        .process(&mut scene, &mut input, &manager, 1.0 / 60.0, 0.0)
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    // 意图记在输入状态上，引擎帧末交给窗口。
+    assert!(signals.iter().any(|s| s == "locked"), "{signals:?}");
+    assert!(input.cursor_locked());
+}
+
+// ── 本地化 ──
+
+#[test]
+fn a_script_translates_with_the_global_locale() {
+    // 和 Rust 侧 `klocale::tr` 同一份全局状态：游戏加载表、设语言，脚本直接用。
+    klocale::insert(
+        &klocale::StringTable::parse(
+            "script-test",
+            "greet = 你好，{ $name }！第 { $n } 关
+",
+        )
+        .unwrap(),
+    );
+    klocale::set_language("script-test");
+    // 脚本自己比对结果，对了就停掉粒子——停没停是 Rust 侧看得见的效果。
+    let manager = resources(
+        "return { _ready() { const got = tr('greet', { name: '小明', n: 3 }) + '|' + tr('missing-key') + '|' + language(); if (got === '你好，小明！第 3 关|missing-key|script-test') self.stopParticles(); else console.log(got); } };",
+    );
+    let mut scene = Scene::new();
+    let handle = scene.add_node(particle_node());
+    let mut runtime = ScriptRuntime::new();
+    tick(&mut runtime, &mut scene, &manager);
+    assert!(
+        !scene.try_get(handle).unwrap().particles().unwrap().playing,
+        "脚本里 tr 的结果不对（看上面打印的 got）"
+    );
+}

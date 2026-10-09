@@ -76,7 +76,11 @@ impl GCode {
                 max = max.max(a.max(*b));
             }
         }
-        if min.x > max.x { (Vec3::ZERO, Vec3::ZERO) } else { (min, max) }
+        if min.x > max.x {
+            (Vec3::ZERO, Vec3::ZERO)
+        } else {
+            (min, max)
+        }
     }
 
     /// 前 `layers` 层建成一个常驻线段集（挤出绿、空走红，和 three.js 一样）。
@@ -91,7 +95,11 @@ impl GCode {
             }
             if travel {
                 for [a, b] in &layer.travel {
-                    builder.line(convert(*a), convert(*b), Color::rgb(1.0, 0.0, 0.0).with_alpha(0.35));
+                    builder.line(
+                        convert(*a),
+                        convert(*b),
+                        Color::rgb(1.0, 0.0, 0.0).with_alpha(0.35),
+                    );
                 }
             }
         }
@@ -105,7 +113,11 @@ loader! {
 }
 
 /// 解析 G-code。
-pub async fn parse(bytes: Vec<u8>, _path: PathBuf, _io: Arc<dyn ResourceIo>) -> Result<GCode, LoadError> {
+pub async fn parse(
+    bytes: Vec<u8>,
+    _path: PathBuf,
+    _io: Arc<dyn ResourceIo>,
+) -> Result<GCode, LoadError> {
     parse_text(&String::from_utf8_lossy(&bytes))
 }
 
@@ -139,7 +151,9 @@ pub fn parse_text(text: &str) -> Result<GCode, LoadError> {
         let line = raw.split(';').next().unwrap_or("");
         let line = strip_parenthesized(line);
         let mut tokens = line.split_ascii_whitespace();
-        let Some(command) = tokens.next() else { continue };
+        let Some(command) = tokens.next() else {
+            continue;
+        };
         let command = command.to_ascii_uppercase();
         // N 行号前缀：`N10 G1 X...`。
         let command = if command.starts_with('N') {
@@ -153,7 +167,9 @@ pub fn parse_text(text: &str) -> Result<GCode, LoadError> {
         let mut args = [None::<f32>; 26];
         for token in tokens {
             let mut chars = token.chars();
-            let Some(letter) = chars.next().filter(char::is_ascii_alphabetic) else { continue };
+            let Some(letter) = chars.next().filter(char::is_ascii_alphabetic) else {
+                continue;
+            };
             if let Ok(value) = chars.as_str().parse::<f32>() {
                 args[(letter.to_ascii_uppercase() as u8 - b'A') as usize] = Some(value);
             }
@@ -197,13 +213,25 @@ pub fn parse_text(text: &str) -> Result<GCode, LoadError> {
                     });
                 }
                 let layer = code.layers.last_mut().expect("刚保证过非空");
-                let list = if extruding { &mut layer.extrusion } else { &mut layer.travel };
+                let list = if extruding {
+                    &mut layer.extrusion
+                } else {
+                    &mut layer.travel
+                };
 
                 let before = list.len();
                 let arc = matches!(command.as_str(), "G2" | "G02" | "G3" | "G03");
                 if arc {
                     let clockwise = matches!(command.as_str(), "G2" | "G02");
-                    let points = arc_points(state.position, target, arg('I'), arg('J'), arg('R'), clockwise, state.scale);
+                    let points = arc_points(
+                        state.position,
+                        target,
+                        arg('I'),
+                        arg('J'),
+                        arg('R'),
+                        clockwise,
+                        state.scale,
+                    );
                     let mut previous = state.position;
                     for point in points {
                         list.push([previous, point]);
@@ -232,10 +260,18 @@ pub fn parse_text(text: &str) -> Result<GCode, LoadError> {
             "G20" => state.scale = 25.4,
             "G21" => state.scale = 1.0,
             "G92" => {
-                if let Some(x) = arg('X') { state.position.x = x * state.scale; }
-                if let Some(y) = arg('Y') { state.position.y = y * state.scale; }
-                if let Some(z) = arg('Z') { state.position.z = z * state.scale; }
-                if let Some(e) = arg('E') { state.e = e; }
+                if let Some(x) = arg('X') {
+                    state.position.x = x * state.scale;
+                }
+                if let Some(y) = arg('Y') {
+                    state.position.y = y * state.scale;
+                }
+                if let Some(z) = arg('Z') {
+                    state.position.z = z * state.scale;
+                }
+                if let Some(e) = arg('E') {
+                    state.e = e;
+                }
                 // 什么参数都不带的 G92 把所有轴清零。
                 if args.iter().all(Option::is_none) {
                     state.position = Vec3::ZERO;
@@ -245,7 +281,8 @@ pub fn parse_text(text: &str) -> Result<GCode, LoadError> {
             _ => {}
         }
     }
-    code.layers.retain(|l| !l.extrusion.is_empty() || !l.travel.is_empty());
+    code.layers
+        .retain(|l| !l.extrusion.is_empty() || !l.travel.is_empty());
     Ok(code)
 }
 
@@ -264,11 +301,21 @@ fn strip_parenthesized(line: &str) -> String {
 }
 
 /// 把一段 XY 平面上的圆弧细分成点（不含起点，含终点）。Z 线性插值（螺旋）。
-fn arc_points(from: Vec3, to: Vec3, i: Option<f32>, j: Option<f32>, r: Option<f32>, clockwise: bool, scale: f32) -> Vec<Vec3> {
+fn arc_points(
+    from: Vec3,
+    to: Vec3,
+    i: Option<f32>,
+    j: Option<f32>,
+    r: Option<f32>,
+    clockwise: bool,
+    scale: f32,
+) -> Vec<Vec3> {
     let start = from.truncate();
     let end = to.truncate();
     let center = match (i, j, r) {
-        (i, j, _) if i.is_some() || j.is_some() => start + kmath::Vec2::new(i.unwrap_or(0.0), j.unwrap_or(0.0)) * scale,
+        (i, j, _) if i.is_some() || j.is_some() => {
+            start + kmath::Vec2::new(i.unwrap_or(0.0), j.unwrap_or(0.0)) * scale
+        }
         (_, _, Some(radius)) => {
             // R 形式：两个候选圆心，R 为负取大弧。
             let radius = radius * scale;
@@ -289,7 +336,9 @@ fn arc_points(from: Vec3, to: Vec3, i: Option<f32>, j: Option<f32>, r: Option<f3
     let mut a1 = (end - center).to_angle();
     let radius = (start - center).length();
     if clockwise {
-        if a1 >= a0 - 1e-6 { a1 -= std::f32::consts::TAU; }
+        if a1 >= a0 - 1e-6 {
+            a1 -= std::f32::consts::TAU;
+        }
     } else if a1 <= a0 + 1e-6 {
         a1 += std::f32::consts::TAU;
     }

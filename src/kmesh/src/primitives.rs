@@ -142,6 +142,30 @@ impl Mesh {
         mesh
     }
 
+    /// 细分过的 [`plane`](Self::plane)：XZ 平面上边长 1、法线朝 +Y，`columns × rows` 个格子
+    /// （three.js 的 `PlaneGeometry(1, 1, columns, rows)` 再 `rotateX(-π/2)`）。
+    ///
+    /// 顶点钩子要在上面做位移（水面、地形、旗子）时用它——四个顶点的 `plane` 再怎么挪也只是一块板。
+    /// UV 和 `plane(1.0)` 一致：u 沿 +X，v 沿 +Z。
+    pub fn plane_subdivided(columns: u32, rows: u32) -> Self {
+        let (columns, rows) = (columns.max(1), rows.max(1));
+        let mut vertices = Vec::with_capacity(((columns + 1) * (rows + 1)) as usize);
+        for row in 0..=rows {
+            for column in 0..=columns {
+                let u = column as f32 / columns as f32;
+                let v = row as f32 / rows as f32;
+                vertices.push(Vertex::new(
+                    Vec3::new(u - 0.5, 0.0, v - 0.5),
+                    Vec3::Y,
+                    [u, v],
+                ));
+            }
+        }
+        let mut mesh = Self::new(vertices, grid_indices(rows, columns, true));
+        mesh.recompute_tangents();
+        mesh
+    }
+
     /// UV 球，半径 0.5。
     ///
     /// `rings` 是纬度分段数，`segments` 是经度分段数，各自至少为 3 和 2。
@@ -164,7 +188,10 @@ impl Mesh {
                 let (sin_phi, cos_phi) = phi.sin_cos();
 
                 // 单位球面上的点即为法线，半径 0.5 得到直径 1 的球。
-                let normal = Vec3::new(sin_theta * cos_phi, cos_theta, sin_theta * sin_phi);
+                // 和 three.js 的 SphereGeometry 同一个参数化：u = 0 在 -X，u 增大时转向 +Z。
+                // 从北极往下看是逆时针——等距柱状投影的地图贴上去东西方向是对的。
+                // （以前写成 u = 0 在 +X、转向 +Z，从外面看整张图左右镜像。）
+                let normal = Vec3::new(-sin_theta * cos_phi, cos_theta, sin_theta * sin_phi);
                 vertices.push(Vertex::new(normal * 0.5, normal, [u, v]));
             }
         }
@@ -180,11 +207,11 @@ impl Mesh {
                 // 但法线全背对相机，光照和深度都是错的。
                 //
                 // `a` 同环右邻是 `a + 1`，下一环正下方是 `b`。
-                // 沿 `a → a+1 → b` 走出来的法线朝外（`recompute_tangents`
+                // 沿 `a → b → a+1` 走出来的法线朝外（`recompute_tangents`
                 // 也靠这个方向）。
                 //
                 // 两极处会退化成三角形，多出的那个三角形面积为零，无需特判。
-                indices.extend_from_slice(&[a, a + 1, b, a + 1, b + 1, b]);
+                indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
             }
         }
 
@@ -493,7 +520,11 @@ impl Mesh {
                 let left = a.lerp(b, i as f32 / n as f32);
                 let right = a.lerp(c, i as f32 / n as f32);
                 for j in 0..=i {
-                    let p = if i == 0 { left } else { left.lerp(right, j as f32 / i as f32) };
+                    let p = if i == 0 {
+                        left
+                    } else {
+                        left.lerp(right, j as f32 / i as f32)
+                    };
                     vertices.push(vertex(p));
                 }
             }
@@ -547,7 +578,11 @@ impl Mesh {
             indices.extend_from_slice(&[base, base + 2, base + 1]);
         }
         let center = vertices.len() as u32;
-        vertices.push(Vertex::new(Vec3::NEG_Y * half_height, Vec3::NEG_Y, [0.5, 0.5]));
+        vertices.push(Vertex::new(
+            Vec3::NEG_Y * half_height,
+            Vec3::NEG_Y,
+            [0.5, 0.5],
+        ));
         for segment in 0..=segments {
             let u = segment as f32 / segments as f32;
             let (sin, cos) = (u * std::f32::consts::TAU).sin_cos();
@@ -605,12 +640,405 @@ impl Mesh {
         let indices = (0..vertices.len() as u32).collect();
         Self::new(vertices, indices)
     }
+
+    /// 圆环，环半径 `radius`、管半径 `tube`，中心在原点、躺在 XY 平面
+    /// （和 three.js 的 `TorusGeometry` 同一个朝向）。
+    ///
+    /// `radial` 是管截面的分段数，`tubular` 是沿环的分段数。
+    pub fn torus(radius: f32, tube: f32, radial: u32, tubular: u32) -> Self {
+        let radial = radial.max(3);
+        let tubular = tubular.max(3);
+        let mut vertices = Vec::with_capacity(((radial + 1) * (tubular + 1)) as usize);
+        for j in 0..=radial {
+            let v = j as f32 / radial as f32 * std::f32::consts::TAU;
+            for i in 0..=tubular {
+                let u = i as f32 / tubular as f32 * std::f32::consts::TAU;
+                let center = Vec3::new(radius * u.cos(), radius * u.sin(), 0.0);
+                let position = Vec3::new(
+                    (radius + tube * v.cos()) * u.cos(),
+                    (radius + tube * v.cos()) * u.sin(),
+                    tube * v.sin(),
+                );
+                let normal = (position - center).normalize_or(Vec3::Z);
+                vertices.push(Vertex::new(
+                    position,
+                    normal,
+                    [i as f32 / tubular as f32, j as f32 / radial as f32],
+                ));
+            }
+        }
+        let mut mesh = Self::new(vertices, grid_indices(radial, tubular, false));
+        mesh.recompute_tangents();
+        mesh
+    }
+
+    /// 环面纽结（three.js 的 `TorusKnotGeometry`）。`p`、`q` 是绕的圈数。
+    pub fn torus_knot(radius: f32, tube: f32, tubular: u32, radial: u32, p: u32, q: u32) -> Self {
+        let tubular = tubular.max(3);
+        let radial = radial.max(3);
+        let (p, q) = (p.max(1) as f32, q.max(1) as f32);
+        let curve = |u: f32| {
+            let cu = u.cos();
+            let su = u.sin();
+            let quotient = q / p * u;
+            let cs = quotient.cos();
+            Vec3::new(
+                radius * (2.0 + cs) * 0.5 * cu,
+                radius * (2.0 + cs) * su * 0.5,
+                radius * quotient.sin() * 0.5,
+            )
+        };
+        let mut vertices = Vec::with_capacity(((radial + 1) * (tubular + 1)) as usize);
+        for i in 0..=tubular {
+            let u = i as f32 / tubular as f32 * p * std::f32::consts::TAU;
+            let p1 = curve(u);
+            let p2 = curve(u + 0.01);
+            let t = p2 - p1;
+            let n = p2 + p1;
+            let b = t.cross(n).normalize_or(Vec3::Z);
+            let n = b.cross(t).normalize_or(Vec3::Y);
+            for j in 0..=radial {
+                let v = j as f32 / radial as f32 * std::f32::consts::TAU;
+                let cx = -tube * v.cos();
+                let cy = tube * v.sin();
+                let position = p1 + n * cx + b * cy;
+                let normal = (position - p1).normalize_or(Vec3::Y);
+                vertices.push(Vertex::new(
+                    position,
+                    normal,
+                    [i as f32 / tubular as f32, j as f32 / radial as f32],
+                ));
+            }
+        }
+        let mut mesh = Self::new(vertices, grid_indices(tubular, radial, true));
+        mesh.recompute_tangents();
+        mesh
+    }
+
+    /// 正四面体，外接球半径 1（three.js `TetrahedronGeometry` 的默认）。平面着色。
+    pub fn tetrahedron() -> Self {
+        let corners = [
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(-1.0, -1.0, 1.0),
+            Vec3::new(-1.0, 1.0, -1.0),
+            Vec3::new(1.0, -1.0, -1.0),
+        ]
+        .map(|c| c.normalize());
+        faceted(&corners, &[[2, 1, 0], [0, 3, 2], [1, 3, 0], [2, 3, 1]])
+    }
+
+    /// 正八面体，外接球半径 1。平面着色。
+    pub fn octahedron() -> Self {
+        let corners = [
+            Vec3::X,
+            Vec3::NEG_X,
+            Vec3::Y,
+            Vec3::NEG_Y,
+            Vec3::Z,
+            Vec3::NEG_Z,
+        ];
+        faceted(
+            &corners,
+            &[
+                [0, 2, 4],
+                [0, 4, 3],
+                [0, 3, 5],
+                [0, 5, 2],
+                [1, 2, 5],
+                [1, 5, 3],
+                [1, 3, 4],
+                [1, 4, 2],
+            ],
+        )
+    }
+
+    /// 平面着色的版本：每个三角形独占三个顶点，法线取面法线。
+    ///
+    /// three.js 的 `flatShading: true`。拿低面数的球（比如 4×4 分段）
+    /// 做「多面体宝石」就是这么来的——共享顶点的话法线被平均，
+    /// 看上去还是一个（很丑的）球。
+    pub fn flat_shaded(&self) -> Self {
+        let source = self.vertices();
+        let mut vertices = Vec::with_capacity(self.indices().len());
+        for triangle in self.indices().chunks_exact(3) {
+            let corner = |k: usize| source.get(triangle[k] as usize);
+            let (Some(a), Some(b), Some(c)) = (corner(0), corner(1), corner(2)) else {
+                continue;
+            };
+            let normal = (b.position() - a.position())
+                .cross(c.position() - a.position())
+                .normalize_or(Vec3::Y);
+            for vertex in [a, b, c] {
+                vertices.push(Vertex {
+                    normal: normal.to_array(),
+                    ..*vertex
+                });
+            }
+        }
+        let indices = (0..vertices.len() as u32).collect();
+        let mut mesh = Self::new(vertices, indices);
+        mesh.recompute_tangents();
+        mesh
+    }
+
+    /// 里外翻过来：绕序反转、法线取反，只有从**里面**看得见（three.js 的 `side: BackSide`）。
+    ///
+    /// 房间、天空盒、包住光源的罩子用它：相机在外面时近处那几面被剔掉，直接看见里面。
+    /// 和双面材质不一样——双面从外面看照样挡住视线，而且背面的光照要另算。
+    pub fn inside_out(&self) -> Self {
+        let vertices: Vec<Vertex> = self
+            .vertices()
+            .iter()
+            .map(|vertex| Vertex {
+                normal: (-vertex.normal()).to_array(),
+                ..*vertex
+            })
+            .collect();
+        let indices: Vec<u32> = self
+            .indices()
+            .chunks_exact(3)
+            .flat_map(|t| [t[0], t[2], t[1]])
+            .collect();
+        let mut mesh = Self::new(vertices, indices);
+        mesh.recompute_tangents();
+        mesh
+    }
+}
+
+/// 一片 `(rows+1) × (columns+1)` 的顶点网格的三角形索引（按行优先存）。
+///
+/// `flip` 反转绕序：两种参数化曲面的 u/v 方向不同，正面朝向也就不同。
+fn grid_indices(rows: u32, columns: u32, flip: bool) -> Vec<u32> {
+    let mut indices = Vec::with_capacity((rows * columns * 6) as usize);
+    let stride = columns + 1;
+    for row in 0..rows {
+        for column in 0..columns {
+            let a = row * stride + column;
+            let b = (row + 1) * stride + column;
+            let c = (row + 1) * stride + column + 1;
+            let d = row * stride + column + 1;
+            if flip {
+                indices.extend_from_slice(&[a, b, d, b, c, d]);
+            } else {
+                indices.extend_from_slice(&[a, d, b, b, d, c]);
+            }
+        }
+    }
+    indices
+}
+
+/// 由角点和三角面拼一个平面着色的多面体。UV 按三角形铺一个简单的角。
+fn faceted(corners: &[Vec3], faces: &[[usize; 3]]) -> Mesh {
+    let mut vertices = Vec::with_capacity(faces.len() * 3);
+    for face in faces {
+        let [a, b, c] = face.map(|i| corners[i]);
+        let mut normal = (b - a).cross(c - a).normalize_or(Vec3::Y);
+        let (a, b, c) = if normal.dot(a + b + c) < 0.0 {
+            // 绕序反了（法线朝里），调过来。
+            normal = -normal;
+            (a, c, b)
+        } else {
+            (a, b, c)
+        };
+        vertices.push(Vertex::new(a, normal, [0.0, 0.0]));
+        vertices.push(Vertex::new(b, normal, [1.0, 0.0]));
+        vertices.push(Vertex::new(c, normal, [0.5, 1.0]));
+    }
+    let indices = (0..vertices.len() as u32).collect();
+    let mut mesh = Mesh::new(vertices, indices);
+    mesh.recompute_tangents();
+    mesh
+}
+
+impl Mesh {
+    /// 圆角立方体：边长 `size`、圆角半径 `radius`，每个面每个方向 `segments`
+    /// 段（three.js 的 `RoundedBoxGeometry`）。
+    ///
+    /// 做法和 three.js 一样：先铺一个细分过的立方体，再把每个顶点「吸」到
+    /// 内缩了 `radius` 的盒子上、沿方向推出 `radius`——平的地方不动，
+    /// 棱和角变成圆柱面和球面。UV 每个面各自铺满 0..1，和 `cube()` 一致，
+    /// 贴图在每个面上都是完整的一张。
+    pub fn rounded_box(size: f32, radius: f32, segments: u32) -> Self {
+        Self::rounded_box_sized(Vec3::splat(size), radius, segments)
+    }
+
+    /// 长方体版的 [`rounded_box`](Self::rounded_box)：三边各自给（three.js 的
+    /// `RoundedBoxGeometry(width, height, depth, segments, radius)`）。圆角半径不超过最短边的一半。
+    pub fn rounded_box_sized(size: Vec3, radius: f32, segments: u32) -> Self {
+        let half = size.abs() * 0.5;
+        let radius = radius.clamp(0.0, half.min_element());
+        let inner = half - Vec3::splat(radius);
+        let n = segments.max(2) as usize;
+        // 和 `cube()` 同一套 (法线, 向右, 向上)，保证绕序和 UV 方向一致。
+        let faces: [(Vec3, Vec3, Vec3); 6] = [
+            (Vec3::X, Vec3::NEG_Z, Vec3::Y),
+            (Vec3::NEG_X, Vec3::Z, Vec3::Y),
+            (Vec3::Y, Vec3::X, Vec3::NEG_Z),
+            (Vec3::NEG_Y, Vec3::X, Vec3::Z),
+            (Vec3::Z, Vec3::X, Vec3::Y),
+            (Vec3::NEG_Z, Vec3::NEG_X, Vec3::Y),
+        ];
+        let mut vertices = Vec::with_capacity(6 * (n + 1) * (n + 1));
+        let mut indices = Vec::with_capacity(6 * n * n * 6);
+        for (normal, right, up) in faces {
+            let base = vertices.len() as u32;
+            for j in 0..=n {
+                for i in 0..=n {
+                    let (u, v) = (i as f32 / n as f32, j as f32 / n as f32);
+                    // 点均匀铺在**圆角之后**的表面上：平面部分和圆弧部分按
+                    // 弧长分配细分，否则圆角处只有一两个点，看着是折的。
+                    let along = |t: f32, inner: f32| -> f32 {
+                        // 每个面分到每条棱圆弧的一半（45°）。平面坐标 x 吸附之后
+                        // 落在圆弧角度 φ 上的关系是 x = inner + radius·tan φ。
+                        let quarter = radius * std::f32::consts::FRAC_PI_4;
+                        let flat = 2.0 * inner;
+                        let d = t * (flat + 2.0 * quarter);
+                        if d < quarter {
+                            -inner - radius * ((quarter - d) / radius.max(1e-6)).tan()
+                        } else if d > quarter + flat {
+                            inner + radius * ((d - quarter - flat) / radius.max(1e-6)).tan()
+                        } else {
+                            -inner + (d - quarter)
+                        }
+                    };
+                    // 这个面在法线、向右、向上三个轴上各自的半边长 / 内缩半边长。
+                    let p = normal * normal.abs().dot(half)
+                        + right * along(u, right.abs().dot(inner))
+                        + up * -along(v, up.abs().dot(inner));
+                    let core = p.clamp(-inner, inner);
+                    let offset = p - core;
+                    let n_out = if offset.length_squared() > 1e-12 {
+                        offset.normalize()
+                    } else {
+                        normal
+                    };
+                    let position = core + n_out * radius;
+                    vertices.push(Vertex::new(position, n_out, [u, v]));
+                }
+            }
+            let row = (n + 1) as u32;
+            for j in 0..n as u32 {
+                for i in 0..n as u32 {
+                    let a = base + j * row + i;
+                    let (b, c, d) = (a + row, a + row + 1, a + 1);
+                    // 左上 a、左下 b、右下 c、右上 d：和 `cube()` 同一个绕序。
+                    indices.extend_from_slice(&[a, b, c, a, c, d]);
+                }
+            }
+        }
+        let mut mesh = Self::new(vertices, indices);
+        mesh.recompute_tangents();
+        mesh
+    }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
     use kmath::Vec3;
+
+    #[test]
+    fn a_subdivided_plane_faces_up_like_the_plain_one() {
+        let mesh = Mesh::plane_subdivided(4, 3);
+        assert_eq!(mesh.vertices().len(), 5 * 4);
+        assert_eq!(mesh.triangle_count(), 4 * 3 * 2);
+        for triangle in mesh.indices().chunks_exact(3) {
+            let [a, b, c] =
+                [0, 1, 2].map(|k| Vec3::from_array(mesh.vertices()[triangle[k] as usize].position));
+            assert!((b - a).cross(c - a).y > 0.0, "三角形朝下：{triangle:?}");
+        }
+        let bounds = mesh.aabb();
+        assert_eq!(
+            (bounds.min, bounds.max),
+            (Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 0.0, 0.5))
+        );
+    }
+
+    #[test]
+    fn a_sized_rounded_box_has_the_right_extents() {
+        let mesh = Mesh::rounded_box_sized(Vec3::new(0.125, 0.9, 0.9), 0.02, 6);
+        let size = mesh.aabb().size();
+        assert!(
+            (size - Vec3::new(0.125, 0.9, 0.9)).abs().max_element() < 1e-4,
+            "{size:?}"
+        );
+        for triangle in mesh.indices().chunks_exact(3) {
+            let [a, b, c] =
+                [0, 1, 2].map(|k| Vec3::from_array(mesh.vertices()[triangle[k] as usize].position));
+            let centre = (a + b + c) / 3.0;
+            assert!((b - a).cross(c - a).dot(centre) >= -1e-9, "三角形朝里");
+        }
+    }
+
+    #[test]
+    fn rounded_box_is_the_right_size_faces_outward_and_is_round() {
+        let mesh = Mesh::rounded_box(1.0, 0.1, 8);
+        let aabb = mesh.aabb();
+        assert!(
+            (aabb.size() - Vec3::ONE).abs().max_element() < 1e-4,
+            "{:?}",
+            aabb.size()
+        );
+        for triangle in mesh.indices().chunks_exact(3) {
+            let [a, b, c] = [0, 1, 2].map(|k| mesh.vertices()[triangle[k] as usize]);
+            let face = (b.position() - a.position()).cross(c.position() - a.position());
+            if face.length() < 1e-9 {
+                continue;
+            }
+            assert!(
+                face.dot(a.normal() + b.normal() + c.normal()) > 0.0,
+                "朝里的三角形"
+            );
+        }
+        // 角上的点离中心是「内盒的角 + 半径」，而不是方角的 √3/2。
+        let farthest = mesh
+            .vertices()
+            .iter()
+            .map(|v| v.position().length())
+            .fold(0.0, f32::max);
+        let expected = Vec3::splat(0.4).length() + 0.1;
+        assert!(
+            (farthest - expected).abs() < 1e-3,
+            "{farthest} vs {expected}"
+        );
+    }
+
+    /// 每个三角形的几何法线（按绕序）都和它存的法线同向。绕序反了的面
+    /// 在背面剔除下直接消失，这是最容易漏的错。
+    fn winding_matches_normals(mesh: &Mesh) {
+        let vertices = mesh.vertices();
+        for triangle in mesh.indices().chunks_exact(3) {
+            let [a, b, c] = [0, 1, 2].map(|k| vertices[triangle[k] as usize]);
+            let face = (b.position() - a.position()).cross(c.position() - a.position());
+            if face.length() < 1e-8 {
+                continue;
+            }
+            let stored = a.normal() + b.normal() + c.normal();
+            assert!(face.dot(stored) > 0.0, "有三角形的绕序和法线相反");
+        }
+    }
+
+    #[test]
+    fn new_primitives_face_outward() {
+        winding_matches_normals(&Mesh::torus(1.0, 0.3, 12, 24));
+        winding_matches_normals(&Mesh::torus_knot(1.0, 0.3, 64, 8, 2, 3));
+        winding_matches_normals(&Mesh::tetrahedron());
+        winding_matches_normals(&Mesh::octahedron());
+        winding_matches_normals(&Mesh::sphere(4, 4).flat_shaded());
+    }
+
+    #[test]
+    fn the_torus_lies_in_the_xy_plane() {
+        let aabb = Mesh::torus(1.0, 0.25, 8, 16).aabb();
+        assert!((aabb.max.x - 1.25).abs() < 1e-3);
+        assert!((aabb.max.z - 0.25).abs() < 1e-3);
+    }
+
+    #[test]
+    fn flat_shading_splits_every_triangle() {
+        let mesh = Mesh::sphere(4, 4).flat_shaded();
+        assert_eq!(mesh.vertices().len(), mesh.index_count() as usize);
+    }
 
     #[test]
     fn cube_normals_point_outward() {
@@ -812,6 +1240,22 @@ mod test {
     }
 
     #[test]
+    fn the_sphere_maps_textures_like_three_js() {
+        // three.js：u = 0 在 -X，u = 0.25 在 +Z，赤道（v = 0.5）上。
+        let mesh = Mesh::sphere(8, 16);
+        let at = |u: f32, v: f32| {
+            mesh.vertices()
+                .iter()
+                .find(|vertex| (vertex.uv[0] - u).abs() < 1e-5 && (vertex.uv[1] - v).abs() < 1e-5)
+                .map(|vertex| Vec3::from_array(vertex.position))
+                .unwrap()
+        };
+        assert!((at(0.0, 0.5) - Vec3::new(-0.5, 0.0, 0.0)).length() < 1e-5);
+        assert!((at(0.25, 0.5) - Vec3::new(0.0, 0.0, 0.5)).length() < 1e-5);
+        assert!((at(0.5, 0.5) - Vec3::new(0.5, 0.0, 0.0)).length() < 1e-5);
+    }
+
+    #[test]
     fn the_sphere_is_wound_outwards() {
         // 这一条也曾经挂过，而且更隐蔽：球翻面之后轮廓一模一样，
         // 只是看到的变成了远侧半球的内壁。
@@ -880,7 +1324,9 @@ mod test {
         let simplified = Mesh::sphere(24, 32).simplify(0.05);
         for triangle in simplified.indices().chunks_exact(3) {
             assert!(
-                triangle[0] != triangle[1] && triangle[1] != triangle[2] && triangle[0] != triangle[2],
+                triangle[0] != triangle[1]
+                    && triangle[1] != triangle[2]
+                    && triangle[0] != triangle[2],
                 "留下了退化三角形 {triangle:?}"
             );
         }
@@ -960,7 +1406,10 @@ mod test {
         // three.js：20 · (detail + 1)² 个三角形。
         for detail in [0, 1, 4, 16] {
             let mesh = Mesh::icosphere(detail);
-            assert_eq!(mesh.triangle_count(), 20 * ((detail + 1) * (detail + 1)) as usize);
+            assert_eq!(
+                mesh.triangle_count(),
+                20 * ((detail + 1) * (detail + 1)) as usize
+            );
         }
     }
 

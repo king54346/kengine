@@ -44,7 +44,7 @@ pub mod layout;
 pub mod linebreak;
 
 pub use atlas::{AtlasError, GlyphAtlas, GlyphEntry, GlyphImage, GlyphKey};
-pub use font::{Font, FontError, FontStack, StackMetrics, system_font};
+pub use font::{Font, FontError, FontStack, OutlineCurve, StackMetrics, system_font};
 pub use layout::{Align, LineInfo, Metrics, PositionedGlyph, TextLayout, TextStyle, Wrap, layout};
 pub use linebreak::{
     BreakClass, BreakOpportunity, break_class, break_opportunities, is_ideographic,

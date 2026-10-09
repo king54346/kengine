@@ -1,4 +1,5 @@
 mod once;
+pub mod profile;
 
 /// 在每个调用点只执行一次表达式。
 ///

@@ -94,7 +94,14 @@ impl std::error::Error for ComputeError {}
 pub struct ComputeContext {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// 能被材质采样的存储纹理（见 [`StorageTexture::texture`]）。和渲染器共用一份。
+    pub(crate) shared_views: SharedViews,
 }
+
+/// 存储纹理 id → (二维视图, 数组视图)。渲染器建材质绑定组时查它。
+pub(crate) type SharedViews = std::sync::Arc<
+    std::sync::Mutex<fxhash::FxHashMap<Uuid, (wgpu::TextureView, wgpu::TextureView)>>,
+>;
 
 /// 一段编译好的计算着色器。
 ///
@@ -104,6 +111,10 @@ pub struct ComputePipeline {
     pipeline: wgpu::ComputePipeline,
     /// 从着色器推导出来的 `@group(0)` 布局。
     layout: wgpu::BindGroupLayout,
+    /// 这个入口**实际用到**的 `@group(0)` 绑定号。wgpu 推导布局时会丢掉没用到的绑定，
+    /// [`ComputeContext::dispatch_with`] 按它挑出要绑的那几个——一份绑定列表就能喂同一份源码里的好几个核。
+    /// `None` = 反射失败，按传进来的全绑。
+    used_bindings: Option<Vec<u32>>,
 }
 
 /// GPU 上一块可读写的数据。
@@ -146,6 +157,9 @@ pub enum StorageFormat {
     ///
     /// 注意是**线性**而非 sRGB：sRGB 格式不能当存储纹理写。
     Rgba8Unorm,
+    /// 每像素 4 个半精度浮点。HDR 的颜色场、高度场：能超出 `[0, 1]`，
+    /// 而且（和 `Rgba32Float` 不同）**能被材质线性过滤采样**。
+    Rgba16Float,
 }
 
 impl StorageFormat {
@@ -155,6 +169,7 @@ impl StorageFormat {
             Self::R32Uint => wgpu::TextureFormat::R32Uint,
             Self::Rgba32Float => wgpu::TextureFormat::Rgba32Float,
             Self::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
+            Self::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
         }
     }
 
@@ -164,6 +179,7 @@ impl StorageFormat {
             Self::R32Uint => 4,
             Self::Rgba32Float => 16,
             Self::Rgba8Unorm => 4,
+            Self::Rgba16Float => 8,
         }
     }
 
@@ -175,7 +191,13 @@ impl StorageFormat {
             Self::R32Uint => "r32uint",
             Self::Rgba32Float => "rgba32float",
             Self::Rgba8Unorm => "rgba8unorm",
+            Self::Rgba16Float => "rgba16float",
         }
+    }
+
+    /// 能不能被材质当普通贴图（可过滤的浮点纹理）采样。
+    pub fn sampleable(self) -> bool {
+        matches!(self, Self::Rgba8Unorm | Self::Rgba16Float)
     }
 }
 
@@ -191,9 +213,45 @@ pub struct StorageTexture {
     width: u32,
     height: u32,
     format: StorageFormat,
+    /// 材质里引用它用的 id（[`texture`](Self::texture)）。
+    id: Uuid,
+    /// 登记过的共享视图表；析构时从里面摘掉。
+    shared_views: std::sync::Weak<
+        std::sync::Mutex<fxhash::FxHashMap<Uuid, (wgpu::TextureView, wgpu::TextureView)>>,
+    >,
+}
+
+impl Drop for StorageTexture {
+    fn drop(&mut self) {
+        if let Some(views) = self.shared_views.upgrade() {
+            views
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&self.id);
+        }
+    }
 }
 
 impl StorageTexture {
+    /// 一张「指向这张存储纹理」的贴图：设进材质的任何贴图槽（`with_base_color_texture`、
+    /// `custom_texture0`…），渲染器绑的就是计算着色器写出来的这块显存——不经过内存，也不拷贝。
+    ///
+    /// three.js 里 `storageTexture` 直接当 `texture()` 用的那条路：计算着色器每帧写一张图
+    /// （程序化纹理、模拟出来的高度场、粒子密度），材质照常采样。
+    ///
+    /// - 只有 [`StorageFormat::sampleable`] 的格式（`Rgba8Unorm`、`Rgba16Float`）能这样用，
+    ///   而且这张存储纹理得建在**渲染器那台设备**上（`ctx.compute`）；不满足时材质采到白色。
+    /// - 采样器固定是线性 + 夹边，没有 mip。
+    /// - 存储纹理析构后，替身退化成一张 1×1 白图。
+    pub fn texture(&self) -> ktexture::Texture {
+        ktexture::Texture::external(self.id)
+    }
+
+    /// 材质里引用它用的 id。
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
     /// 宽度（像素）。
     pub fn width(&self) -> u32 {
         self.width
@@ -245,6 +303,7 @@ impl ComputeContext {
         Self {
             device: renderer.device.clone(),
             queue: renderer.queue.clone(),
+            shared_views: renderer.shared_views.clone(),
         }
     }
 
@@ -303,7 +362,11 @@ impl ComputeContext {
             .await
             .ok()?;
 
-        Some(Self { device, queue })
+        Some(Self {
+            device,
+            queue,
+            shared_views: SharedViews::default(),
+        })
     }
 
     /// 这台 wgpu 设备。
@@ -323,12 +386,33 @@ impl ComputeContext {
 
     /// 编译一条计算管线。
     ///
-    /// 入口点从着色器里反射，所以 WGSL 那边叫什么名字都行。
+    /// 入口点从着色器里反射，所以 WGSL 那边叫什么名字都行。有好几个 `@compute` 入口时取第一个——
+    /// 要别的用 [`create_pipeline_entry`](Self::create_pipeline_entry)。
     pub fn create_pipeline(&self, shader: &Shader) -> Result<ComputePipeline, ComputeError> {
         let entry = shader
             .entry_point(ShaderStage::Compute)
             .ok_or(ComputeError::NoComputeEntry)?
             .to_string();
+        self.create_pipeline_entry(shader, &entry)
+    }
+
+    /// 按名字挑一个 `@compute` 入口编管线。
+    ///
+    /// 一份源码里放好几个核（初始化、每帧更新、生成）时用：它们共用结构体、辅助函数和绑定声明，
+    /// 各编一条管线。绑定布局按入口各自推导——某个核没用到的绑定不在它的布局里。
+    pub fn create_pipeline_entry(
+        &self,
+        shader: &Shader,
+        entry: &str,
+    ) -> Result<ComputePipeline, ComputeError> {
+        if !shader
+            .entry_points()
+            .iter()
+            .any(|(name, stage)| name == entry && *stage == ShaderStage::Compute)
+        {
+            return Err(ComputeError::NoComputeEntry);
+        }
+        let entry = entry.to_string();
 
         let module = self
             .device
@@ -359,7 +443,12 @@ impl ComputeContext {
             });
 
         let layout = pipeline.get_bind_group_layout(0);
-        Ok(ComputePipeline { pipeline, layout })
+        let used_bindings = shader.used_bindings(&entry, 0);
+        Ok(ComputePipeline {
+            pipeline,
+            layout,
+            used_bindings,
+        })
     }
 
     /// 用现成的数据建一块 storage buffer。
@@ -446,18 +535,34 @@ impl ComputeContext {
             format: format.to_wgpu(),
             // STORAGE_BINDING 给着色器写，COPY_SRC 给读回，
             // COPY_DST 让它能被清零和被上传。
+            // TEXTURE_BINDING 让材质能直接采它（`StorageTexture::texture`）。
             usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC
                 | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
 
+        let id = Uuid::new_v4();
+        if format.sampleable() {
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let array = texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            });
+            self.shared_views
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(id, (view, array));
+        }
         StorageTexture {
             view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
             texture,
             width,
             height,
             format,
+            id,
+            shared_views: std::sync::Arc::downgrade(&self.shared_views),
         }
     }
 
@@ -588,6 +693,13 @@ impl ComputeContext {
         let entries: Vec<wgpu::BindGroupEntry> = bindings
             .iter()
             .enumerate()
+            // 这个入口没用到的绑定不在推导出的布局里，绑上去 wgpu 会拒。
+            .filter(|(index, _)| {
+                pipeline
+                    .used_bindings
+                    .as_ref()
+                    .is_none_or(|used| used.contains(&(*index as u32)))
+            })
             .map(|(index, binding)| wgpu::BindGroupEntry {
                 binding: index as u32,
                 resource: match binding {

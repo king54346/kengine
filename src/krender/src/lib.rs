@@ -12,13 +12,24 @@ mod capture;
 #[cfg(test)]
 mod cascade_batch_tests;
 mod compute;
+pub mod effects;
+mod frame;
 mod gizmo;
+mod gpu_profile;
+#[cfg(test)]
+mod headless_tests;
+mod mask;
 #[cfg(test)]
 mod material_shader_tests;
+mod overlay;
 mod particle;
 mod post;
+pub mod postfx;
 mod sprite2d;
 mod ssao;
+use frame::{CollectedDraws, FrameLights, PostFrameParams, primary_shadow_faces};
+mod passes;
+mod pipeline_cache;
 mod tonemap;
 mod ui;
 
@@ -28,7 +39,10 @@ pub use compute::{
 };
 pub use particle::GpuParticles;
 pub use post::PostSettings;
-pub use ssao::SsaoSettings;
+pub use postfx::{
+    IntoParam, PassOutput, PostEffect, PostInputs, PostStack, PostStage, PostTexture,
+};
+pub use ssao::{ContactShadows, SsaoSettings};
 pub use tonemap::ToneMapping;
 // 级联参数本身属于 `klight`，但调它的人是冲着「渲染器怎么画阴影」来的，
 // 和 `PostSettings` 一样从这里导出，省得调用方为一个结构体多认一个 crate。
@@ -44,6 +58,7 @@ use kui::Ui;
 use particle::ParticleResources;
 pub use post::AntiAlias;
 use post::PostProcess;
+pub use post::Upscaling;
 use sprite2d::SpriteResources;
 use ui::UiResources;
 
@@ -86,7 +101,7 @@ use bytemuck::{Pod, Zeroable};
 use fxhash::{FxHashMap, FxHashSet};
 use kcore::uuid::Uuid;
 use kmaterial::Material;
-use kmath::{Mat4, Vec3};
+use kmath::{Mat4, Vec2, Vec3};
 use kpbr::GpuEnvironment;
 use kshader::Shader;
 use ktexture::{FilterMode, Texture, TextureFormat, WrapMode};
@@ -109,7 +124,7 @@ struct Globals {
     /// 塞进簇里等于每个簇都有它们，白白占名单。
     light_count: [u32; 4],
     /// 各级级联的光空间矩阵。用不满的级填单位阵。
-    light_view_proj: [[[f32; 4]; 4]; klight::cascade::MAX_CASCADES],
+    light_view_proj: [[[f32; 4]; 4]; klight::cascade::MAX_SHADOW_LAYERS],
     /// x/y/z = 前三级的远距离，w = 实际级数。
     cascade_splits: [f32; 4],
     /// x = 深度偏移，y = 法线偏移，z = 阴影贴图边长，w = 是否启用
@@ -131,6 +146,12 @@ struct Globals {
     /// x = 近平面，y = 远平面，z = `1 / ln(far / near)`（着色器省一次对数），
     /// w 保留。
     cluster_depth: [f32; 4],
+    /// 不带抖动的本帧视图投影。运动向量用它，见 `geometry.wgsl`。
+    clip_view_proj: [[f32; 4]; 4],
+    /// 上一帧不带抖动的视图投影。
+    prev_view_proj: [[f32; 4]; 4],
+    /// xy = 本帧抖动（NDC），zw = 上一帧的。
+    jitter: [f32; 4],
     environment: GpuEnvironment,
 }
 
@@ -342,6 +363,8 @@ impl Clusters {
 struct ShadowGlobals {
     light_view_proj: [[f32; 4]; 4],
     params: [f32; 4],
+    /// x = 秒。带顶点钩子的材质在阴影 pass 里也要按时间位移（`shadow_hooked.wgsl`）。
+    frame: [f32; 4],
 }
 
 /// 阴影深度 pass 的每对象数据。
@@ -362,6 +385,8 @@ struct SkyGlobals {
     camera_position: [f32; 4],
     /// x = 预滤波环境图的 mip 数（0 表示没有 HDR），其余保留
     ibl_params: [f32; 4],
+    /// rgb = 纯色背景，a = 用不用。
+    background: [f32; 4],
     environment: GpuEnvironment,
 }
 
@@ -410,6 +435,76 @@ struct ObjectUniforms {
     /// 各带各的参数仍然合成一次绘制。代价是每个对象固定多占 64 字节，
     /// 不管它用不用得上。
     params: [[f32; 4]; kmaterial::standard::PARAM_SLOTS],
+    /// 上一帧的模型矩阵。运动向量要它，见 `geometry.wgsl`。
+    prev_model: [[f32; 4]; 4],
+}
+
+/// 槽里「没有实例数据」（普通物体）的标记，和 `geometry.wgsl` 的 `NO_INSTANCE` 一致。
+const NO_INSTANCE: u32 = u32::MAX;
+
+/// 每个 GPU 实例一个槽：`[对象下标, 实例数据下标]`，对应 `geometry.wgsl` 的 `instance_slots`。
+///
+/// 普通物体一个对象一个槽（实例数据是 [`NO_INSTANCE`]）；实例化节点一个对象 N 个槽，
+/// 600 字节的对象数据只存一份。批次的 `first` / `count` 数的是槽。
+type InstanceSlot = [u32; 2];
+
+/// 一帧要上传的对象、槽和实例数据。
+#[derive(Default)]
+pub(crate) struct FrameInstances<'a> {
+    /// 每个绘制项一份对象数据。
+    pub objects: Vec<ObjectUniforms>,
+    /// 每个 GPU 实例一个槽，批次的 `first` / `count` 指的是它。
+    pub slots: Vec<InstanceSlot>,
+    /// 和 `objects` 一一对齐的世界包围盒（阴影逐级剔除按槽的对象下标回查；实例化节点是整组的）。
+    pub bounds: Vec<kmath::Aabb>,
+    /// `collect_draws` 收来的实例化节点的实例，[`DrawCall::instances`] 是这里的下标。
+    pub lists: Vec<&'a [kscene::Instance]>,
+    /// 每份实例在实例数据缓冲里的起点。遮罩 pass 复制出来的绘制项和原件共用一份，不重复上传。
+    placed: Vec<Option<u32>>,
+    /// 要上传的 `(起点, 实例)`：场景里的切片直接拷进显存，CPU 上不再转一道。
+    pub uploads: Vec<(u32, &'a [kscene::Instance])>,
+    /// 实例数据一共多少个。
+    pub instance_count: u32,
+}
+
+impl<'a> FrameInstances<'a> {
+    fn new(lists: Vec<&'a [kscene::Instance]>) -> Self {
+        Self {
+            lists,
+            ..Default::default()
+        }
+    }
+
+    /// 推一个绘制项：对象数据一份、槽若干。返回推了几个槽。
+    fn push(&mut self, draw: &DrawCall) -> u32 {
+        let object = self.objects.len() as u32;
+        self.objects.push(draw.uniforms);
+        self.bounds.push(draw.aabb);
+        let Some(list) = draw.instances else {
+            self.slots.push([object, NO_INSTANCE]);
+            return 1;
+        };
+        let (list, instances) = (
+            list as usize,
+            self.lists[draw.instances.unwrap_or(0) as usize],
+        );
+        if self.placed.len() < self.lists.len() {
+            self.placed.resize(self.lists.len(), None);
+        }
+        let count = instances.len() as u32;
+        let base = match self.placed[list] {
+            Some(base) => base,
+            None => {
+                let base = self.instance_count;
+                self.instance_count += count;
+                self.uploads.push((base, instances));
+                self.placed[list] = Some(base);
+                base
+            }
+        };
+        self.slots.extend((0..count).map(|i| [object, base + i]));
+        count
+    }
 }
 
 /// 从材质里取出四个自定义参数槽位。
@@ -449,7 +544,10 @@ const ARRAY_TEXTURE_BINDING: u32 = TEXTURE_SLOTS as u32 + 1;
 ///
 /// 数组不能挤进 `TEXTURE_SLOTS` 里边：那个数组的每一格都会被当成
 /// `texture_2d` 去建绑定，而纹理数组要的是另一种视图。
-const TEXTURE_KEY_SLOTS: usize = TEXTURE_SLOTS + 1;
+const TEXTURE_KEY_SLOTS: usize = TEXTURE_SLOTS + 2;
+
+/// 自定义三维纹理在 group(2) 里的绑定号：接在纹理数组后面。缓存键里是最后一格。
+const VOLUME_TEXTURE_BINDING: u32 = ARRAY_TEXTURE_BINDING + 1;
 
 /// 从材质里取出纹理坐标变换：`[缩放x, 缩放y, 偏移x, 偏移y]`。
 ///
@@ -486,6 +584,8 @@ struct GpuMesh {
     morph_offset: u32,
     /// 形变目标数量，0 表示没有形变。
     morph_count: u32,
+    /// 最后一次被画到是第几帧，回收用。
+    last_used: u64,
 }
 
 /// 本帧一个待绘制对象。
@@ -506,6 +606,8 @@ struct DrawCall {
     /// 参与批次键：剔除模式是**管线状态**，一条绘制调用只能有一个，
     /// 所以单面和双面的对象没法合在一批里。
     double_sided: bool,
+    /// 半透明但写深度：管线状态，参与批次键。
+    depth_write: bool,
     /// 到相机的距离平方，半透明物体按它从远到近排序。
     ///
     /// 存平方而不是距离：只用来比大小，开方是白花的。
@@ -518,6 +620,8 @@ struct DrawCall {
     /// 参与批次键：两个绘制项哪怕网格、材质都一样，索引区间不同就是在画
     /// 不同的几何，合成一批会把其中一段画成另一段的样子。
     index_range: (u32, u32),
+    /// 实例化节点：实例在 [`FrameInstances::lists`] 里的下标；普通物体是 `None`（一个槽，没有实例数据）。
+    instances: Option<u32>,
     uniforms: ObjectUniforms,
 }
 
@@ -535,6 +639,8 @@ struct Batch {
     skinned: bool,
     /// 两面都画。
     double_sided: bool,
+    /// 半透明但写深度。
+    depth_write: bool,
     /// 本批第一个实例在存储缓冲中的下标。
     first: u32,
     /// 实例数量。
@@ -542,6 +648,58 @@ struct Batch {
     /// 只画索引缓冲的 `(起点, 数量)`，见 [`DrawCall::index_range`]。
     index_range: (u32, u32),
 }
+
+/// 交换链怎么出帧。
+///
+/// 默认 [`Vsync`](Self::Vsync)：跟着显示器刷新率走，不撕裂、不空转。量性能时要关掉，
+/// 不然每一帧都被锁在 16.7 ms（或 10 ms）上，看不出真正还剩多少余量。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PresentMode {
+    /// 垂直同步（FIFO）。所有平台都支持。
+    #[default]
+    Vsync,
+    /// 不等垂直同步、但不撕裂：新帧替换掉排队的旧帧（Mailbox）。延迟低，GPU 会满载。
+    Mailbox,
+    /// 立刻出帧，可能撕裂（Immediate）。量帧率用。
+    Immediate,
+}
+
+impl PresentMode {
+    /// 解析 `KENGINE_PRESENT` 的值：`fifo` / `vsync`、`mailbox`、`immediate` / `off`。
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "fifo" | "vsync" | "on" => Some(Self::Vsync),
+            "mailbox" => Some(Self::Mailbox),
+            "immediate" | "off" | "novsync" => Some(Self::Immediate),
+            _ => None,
+        }
+    }
+
+    /// 换成适配器支持的那一种：要的不支持时，不撕裂的先退 Mailbox，最后总能退到 FIFO。
+    fn resolve(self, supported: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+        let preference: &[wgpu::PresentMode] = match self {
+            Self::Vsync => &[wgpu::PresentMode::Fifo],
+            Self::Mailbox => &[
+                wgpu::PresentMode::Mailbox,
+                wgpu::PresentMode::Immediate,
+                wgpu::PresentMode::Fifo,
+            ],
+            Self::Immediate => &[
+                wgpu::PresentMode::Immediate,
+                wgpu::PresentMode::Mailbox,
+                wgpu::PresentMode::Fifo,
+            ],
+        };
+        preference
+            .iter()
+            .copied()
+            .find(|mode| supported.contains(mode))
+            .unwrap_or(wgpu::PresentMode::Fifo)
+    }
+}
+
+/// 默认多少帧没被画到就回收显存。见 [`Renderer::set_eviction_frames`]。
+const DEFAULT_EVICTION_FRAMES: u64 = 300;
 
 /// 一帧的渲染统计。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -571,6 +729,10 @@ pub struct RenderStats {
     pub cull_micros: u32,
     /// CPU 端准备一帧的总耗时（微秒）：剔除 + 收集 + 分批 + 上传。
     pub prepare_micros: u32,
+    /// 显存里留着的网格数。一直涨不回落就是有东西在漏。
+    pub gpu_meshes: u32,
+    /// 显存里留着的贴图数。
+    pub gpu_textures: u32,
 }
 
 impl RenderStats {
@@ -596,12 +758,8 @@ impl RenderStats {
 ///
 /// 排序会打乱原本的提交顺序。不透明物体有深度测试兜底，顺序无所谓；
 /// 将来加半透明时，那部分必须单独走一条按深度排序的路径。
-fn build_batches(
-    draws: &[DrawCall],
-    instances: &mut Vec<ObjectUniforms>,
-    bounds: &mut Vec<kmath::Aabb>,
-) -> Vec<Batch> {
-    build_batches_into(draws, instances, bounds, true)
+fn build_batches(draws: &[DrawCall], out: &mut FrameInstances) -> Vec<Batch> {
+    build_batches_into(draws, out, true)
 }
 
 /// 按每个实例的包围盒，把一批拆成「本级要画的连续段」。
@@ -614,19 +772,30 @@ fn build_batches(
 /// 比逐个提交好得多。
 fn cascade_batches(
     batches: &[Batch],
+    slots: &[InstanceSlot],
     bounds: &[kmath::Aabb],
     matrix: kmath::Mat4,
     resolution: u32,
     min_texels: f32,
 ) -> Vec<Batch> {
     let mut out: Vec<Batch> = Vec::with_capacity(batches.len());
+    // 实例化节点的一串槽属于同一个对象：判一次就够（十万个实例不该判十万次）。
+    let mut last: Option<(u32, bool)> = None;
     for batch in batches {
         let mut run: Option<Batch> = None;
         for offset in 0..batch.count {
             let index = (batch.first + offset) as usize;
-            let visible = bounds.get(index).is_some_and(|aabb| {
-                klight::cascade::shadow_visibility(matrix, *aabb, resolution, min_texels)
-            });
+            let object = slots.get(index).map_or(u32::MAX, |slot| slot[0]);
+            let visible = match last {
+                Some((cached, visible)) if cached == object => visible,
+                _ => {
+                    let visible = bounds.get(object as usize).is_some_and(|aabb| {
+                        klight::cascade::shadow_visibility(matrix, *aabb, resolution, min_texels)
+                    });
+                    last = Some((object, visible));
+                    visible
+                }
+            };
 
             match (visible, run.as_mut()) {
                 // 接着上一段。
@@ -659,40 +828,30 @@ fn cascade_batches(
 ///
 /// 所以这里先按距离从远到近排，再**只合并相邻的**同网格同贴图项。
 /// 合并率会低很多，但那是正确性的代价。
-fn build_transparent_batches(
-    draws: &mut [DrawCall],
-    instances: &mut Vec<ObjectUniforms>,
-    bounds: &mut Vec<kmath::Aabb>,
-) -> Vec<Batch> {
+fn build_transparent_batches(draws: &mut [DrawCall], out: &mut FrameInstances) -> Vec<Batch> {
     // 从远到近。`total_cmp` 而不是 `partial_cmp().unwrap()`：
     // 退化的变换会算出 NaN 距离，unwrap 会直接崩掉整帧。
     draws.sort_by(|a, b| b.depth.total_cmp(&a.depth));
-    build_batches_into(draws, instances, bounds, false)
+    build_batches_into(draws, out, false)
 }
 
 /// `reorder` 为真时按网格/贴图重排以最大化合并；为假时保持传入顺序。
-fn build_batches_into(
-    draws: &[DrawCall],
-    instances: &mut Vec<ObjectUniforms>,
-    bounds: &mut Vec<kmath::Aabb>,
-    reorder: bool,
-) -> Vec<Batch> {
+fn build_batches_into(draws: &[DrawCall], out: &mut FrameInstances, reorder: bool) -> Vec<Batch> {
     if !reorder {
         let mut batches: Vec<Batch> = Vec::new();
         for draw in draws {
-            instances.push(draw.uniforms);
-            // 和 `instances` 一一对齐：阴影逐级剔除按实例下标回查它。
-            bounds.push(draw.aabb);
+            let added = out.push(draw);
             match batches.last_mut() {
                 Some(last)
                     if last.mesh_id == draw.mesh_id
                         && last.texture_key == draw.texture_key
                         && last.skinned == draw.skinned
                         && last.double_sided == draw.double_sided
+                        && last.depth_write == draw.depth_write
                         && last.shader_id == draw.shader_id
                         && last.index_range == draw.index_range =>
                 {
-                    last.count += 1;
+                    last.count += added;
                 }
                 _ => batches.push(Batch {
                     mesh_id: draw.mesh_id,
@@ -700,22 +859,19 @@ fn build_batches_into(
                     texture_key: draw.texture_key,
                     skinned: draw.skinned,
                     double_sided: draw.double_sided,
-                    first: instances.len() as u32 - 1,
-                    count: 1,
+                    depth_write: draw.depth_write,
+                    first: out.slots.len() as u32 - added,
+                    count: added,
                     index_range: draw.index_range,
                 }),
             }
         }
         return batches;
     }
-    build_opaque_batches(draws, instances, bounds)
+    build_opaque_batches(draws, out)
 }
 
-fn build_opaque_batches(
-    draws: &[DrawCall],
-    instances: &mut Vec<ObjectUniforms>,
-    bounds: &mut Vec<kmath::Aabb>,
-) -> Vec<Batch> {
+fn build_opaque_batches(draws: &[DrawCall], out: &mut FrameInstances) -> Vec<Batch> {
     let mut order: Vec<u32> = (0..draws.len() as u32).collect();
     order.sort_unstable_by(|&a, &b| {
         let (a, b) = (&draws[a as usize], &draws[b as usize]);
@@ -734,13 +890,12 @@ fn build_opaque_batches(
             .then_with(|| a.texture_key.cmp(&b.texture_key))
     });
 
-    instances.reserve(draws.len());
+    out.objects.reserve(draws.len());
 
     let mut batches: Vec<Batch> = Vec::new();
     for &index in &order {
         let draw = &draws[index as usize];
-        instances.push(draw.uniforms);
-        bounds.push(draw.aabb);
+        let added = out.push(draw);
         match batches.last_mut() {
             // 排序保证同一批的对象连续出现，所以只用跟上一批比。
             Some(last)
@@ -748,10 +903,11 @@ fn build_opaque_batches(
                     && last.texture_key == draw.texture_key
                     && last.skinned == draw.skinned
                     && last.double_sided == draw.double_sided
+                    && last.depth_write == draw.depth_write
                     && last.shader_id == draw.shader_id
                     && last.index_range == draw.index_range =>
             {
-                last.count += 1;
+                last.count += added;
             }
             _ => batches.push(Batch {
                 mesh_id: draw.mesh_id,
@@ -759,8 +915,9 @@ fn build_opaque_batches(
                 texture_key: draw.texture_key,
                 skinned: draw.skinned,
                 double_sided: draw.double_sided,
-                first: instances.len() as u32 - 1,
-                count: 1,
+                depth_write: draw.depth_write,
+                first: out.slots.len() as u32 - added,
+                count: added,
                 index_range: draw.index_range,
             }),
         }
@@ -769,6 +926,7 @@ fn build_opaque_batches(
 }
 
 /// 一帧的绘制结果，供事件循环决定后续动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderOutcome {
     /// 正常绘制完成。
     Ok,
@@ -781,7 +939,10 @@ pub enum RenderOutcome {
 }
 
 pub struct Renderer {
-    surface: wgpu::Surface<'static>,
+    /// 交换链。无头渲染器（[`Renderer::headless`]）没有，画到 `offscreen` 上。
+    surface: Option<wgpu::Surface<'static>>,
+    /// 无头时代替交换链的那张纹理，格式与尺寸跟 `config` 一致。
+    offscreen: Option<wgpu::Texture>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -809,8 +970,16 @@ pub struct Renderer {
     object_layout: wgpu::BindGroupLayout,
     object_buffer: wgpu::Buffer,
     object_bind_group: wgpu::BindGroup,
-    /// 当前对象缓冲能容纳的实例数。
+    /// 当前对象缓冲能容纳的对象数。
     object_capacity: u64,
+    /// 实例槽（每个 GPU 实例一个，见 [`InstanceSlot`]）。
+    slot_buffer: wgpu::Buffer,
+    slot_capacity: u64,
+    /// 实例数据（`kscene::Instance`，每个实例 96 字节）。
+    instance_buffer: wgpu::Buffer,
+    instance_capacity: u64,
+    /// 槽 / 实例缓冲每换一次加一：阴影 pass 的绑定组也引用它们，看到变了就重建。
+    instance_generation: u64,
     /// 蒙皮管线。顶点布局多一路，只能单独开一条。
     /// 标准着色器的四条管线（蒙皮 × 半透明）。
     standard_pipelines: MaterialPipelines,
@@ -818,6 +987,8 @@ pub struct Renderer {
     ///
     /// **懒建**：用到双面材质才会有条目。
     double_sided_pipelines: FxHashMap<Uuid, MaterialPipelines>,
+    /// 半透明但写深度的管线（`Material::depth_write`），按 (钩子 id, 双面) 懒建：(静态, 蒙皮)。
+    depth_write_pipelines: FxHashMap<(Uuid, bool), (wgpu::RenderPipeline, wgpu::RenderPipeline)>,
     /// 标准着色器的模块，懒建双面管线时要用。
     standard_module: wgpu::ShaderModule,
     /// 自定义材质钩子编译出来的模块与它的 `override` 取值。
@@ -898,6 +1069,9 @@ pub struct Renderer {
     /// 编译一条管线是毫秒级的事，绝不能每帧做。材质的着色器换了会换 id，
     /// 于是自然地编译出新的一份。
     material_pipelines: FxHashMap<Uuid, MaterialPipelines>,
+    /// 写了 `material_vertex` 的材质在阴影 pass 和预通道里的管线，按钩子 id 缓存。
+    /// 没有的（没写顶点钩子，或建失败了）走普通的深度管线。
+    hooked_passes: FxHashMap<Uuid, HookedPasses>,
     /// 编译失败过的着色器 id。
     ///
     /// 记下来是为了**不每帧重试**——一个写错的着色器每帧重编译一次会
@@ -922,16 +1096,129 @@ pub struct Renderer {
 
     texture_layout: wgpu::BindGroupLayout,
     /// 已上传的单张贴图，键为 [`ktexture::Texture::id`]。
-    gpu_textures: FxHashMap<Uuid, GpuTexture>,
+    /// 值里的 `u64` 是最后一次被用到的帧号，回收用。
+    gpu_textures: FxHashMap<Uuid, (GpuTexture, u64)>,
     /// 材质贴图绑定组，键是五张贴图 id 的组合。
     ///
     /// 用组合而非材质 id 作键，是为了让异步加载中的贴图就绪后自动换上——
     /// 贴图 id 一变，键就变，会重新建一个绑定组。
-    material_bind_groups: FxHashMap<[Uuid; TEXTURE_KEY_SLOTS], wgpu::BindGroup>,
+    material_bind_groups: FxHashMap<[Uuid; TEXTURE_KEY_SLOTS], (wgpu::BindGroup, u64)>,
+    /// 多少帧没被画到的网格、贴图、绑定组就释放显存。0 表示永不回收。
+    eviction_frames: u64,
+    /// 渲染分辨率比例（`PostSettings::render_scale`，夹到 [0.25, 1]）。
+    render_scale: f32,
     /// 材质缺某张贴图时顶上的中性贴图。
     default_textures: DefaultTextures,
     meshes: FxHashMap<Uuid, GpuMesh>,
     stats: RenderStats,
+
+    /// 后处理遮罩 pass。
+    mask: mask::MaskPass,
+    /// 可编程后处理的执行器。
+    postfx: postfx::PostFx,
+    /// 离屏相机的目标，按视图编号。懒建：没有离屏相机就不占显存。
+    views: [Option<(wgpu::Texture, wgpu::TextureView)>; kcamera::MAX_VIEWS as usize],
+    /// 同上两张视图的数组视图：材质能把视图设进任何贴图槽（`Texture::camera_view`），
+    /// 纹理数组那个槽要维度对得上的那一份。
+    view_array_views: [Option<wgpu::TextureView>; kcamera::MAX_VIEWS as usize],
+    /// 材质采视图用的采样器：线性 + 夹边。
+    view_sampler: wgpu::Sampler,
+    /// 计算着色器写的、能被材质采样的存储纹理（`StorageTexture::texture`）。
+    /// 和每个 `ComputeContext::from_renderer` 共用。
+    pub(crate) shared_views: compute::SharedViews,
+    /// 超采样的累积缓冲。懒建。
+    ssaa_accum: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// 屏幕帧的编号。抖动序列按它走。
+    frame_index: u64,
+    /// 上一帧（屏幕那一次）不带抖动的视图投影。
+    prev_view_proj: Option<Mat4>,
+    /// 上一帧的抖动（NDC）。
+    prev_jitter: [f32; 2],
+    /// 各物体上一帧的模型矩阵与骨骼矩阵。运动向量要它。
+    motion: MotionHistory,
+    /// 引擎自带的两个抗锯齿效果，用 [`PostEffect`] 实现。
+    builtin_taa: PostEffect,
+    builtin_smaa: PostEffect,
+    /// 下一帧截图存到哪。见 [`Renderer::request_screenshot`]。
+    screenshot: Option<std::path::PathBuf>,
+    /// 覆盖层相机的目标纹理与合成管线。
+    overlay: overlay::Overlay,
+    /// 着色器里的时间与帧间隔由外面给（固定步长模式）。`None` 用墙上的钟。
+    time_override: Option<(f32, f32)>,
+    /// 额外投影光源最多用几层阴影图（0 = 只有主投影光源有影子）。
+    local_shadow_layers: usize,
+    /// 落盘的管线缓存。适配器不支持、或无头渲染器时是 `None`。
+    pipeline_cache: Option<pipeline_cache::DiskPipelineCache>,
+    /// 剔除的中间结果（BVH 叶子下标），跨帧复用。
+    cull_indices: Vec<u32>,
+    /// 绘制项列表的分配，跨帧复用。平时是空的，见 [`recycle_items`]。
+    visible_scratch: Vec<kscene::RenderItem<'static>>,
+    /// GPU 分段计时。适配器不支持时间戳查询时是 `None`。
+    gpu_timer: Option<gpu_profile::GpuTimer>,
+    /// 交换链支持的出帧方式，[`Renderer::set_present_mode`] 据此退化。
+    present_modes: Vec<wgpu::PresentMode>,
+    /// `KENGINE_PRESENT` 设了的话，代码里的设置不覆盖它（环境变量是给量性能的人用的）。
+    present_from_env: bool,
+}
+
+/// 跨帧记住每个物体上一帧在哪。
+///
+/// 放在渲染器而不是场景里：「上一帧」指的是**上一次画到屏幕上的那一帧**，
+/// 而 `Scene::update` 一帧可能被调好几次（物理子步、IK），拿它当节拍
+/// 会把运动向量算成零。
+#[derive(Default)]
+struct MotionHistory {
+    previous: FxHashMap<kcore::pool::Handle<kscene::Node>, Mat4>,
+    current: FxHashMap<kcore::pool::Handle<kscene::Node>, Mat4>,
+    previous_joints: FxHashMap<kcore::pool::Handle<kscene::Node>, Vec<Mat4>>,
+    current_joints: FxHashMap<kcore::pool::Handle<kscene::Node>, Vec<Mat4>>,
+}
+
+impl MotionHistory {
+    /// 屏幕帧结束：这一帧记下的变成「上一帧」。
+    fn advance(&mut self) {
+        std::mem::swap(&mut self.previous, &mut self.current);
+        self.current.clear();
+        std::mem::swap(&mut self.previous_joints, &mut self.current_joints);
+        self.current_joints.clear();
+    }
+}
+
+/// 一帧画到哪儿。
+#[derive(Clone, Copy)]
+enum FrameMode<'a> {
+    /// 正常的一帧：后处理 + UI，输出到交换链。
+    ///
+    /// `ssaa` 是超采样最后那一遍的 `(第几遍, 共几遍)`：主 pass 画完先累积，
+    /// 再把累积结果当场景颜色往下走。
+    Screen { ssaa: Option<(u32, u32)> },
+    /// 环境捕获的一面。
+    Capture(&'a CaptureFace<'a>),
+    /// 离屏相机，画完拷进视图纹理。
+    View(u8),
+    /// 超采样的前几遍：画完累积，不往下走。
+    SsaaSample { index: u32, count: u32 },
+    /// 覆盖层相机：清成透明、不画天空，画完拷进覆盖层纹理，等屏幕帧叠上去。
+    Overlay,
+}
+
+impl FrameMode<'_> {
+    fn is_screen(&self) -> bool {
+        matches!(self, Self::Screen { .. })
+    }
+}
+
+/// Halton 序列的第 `index` 项（`base` 进制的倒序小数）。TAA / SSAA 的亚像素偏移用它：
+/// 点分布均匀，而且任意前缀都均匀——停在第几帧都不会偏向一边。
+fn halton(mut index: u32, base: u32) -> f32 {
+    let mut result = 0.0;
+    let mut fraction = 1.0 / base as f32;
+    while index > 0 {
+        result += (index % base) as f32 * fraction;
+        index /= base;
+        fraction /= base as f32;
+    }
+    result
 }
 
 /// 一张已上传的贴图连同它自己的采样器。
@@ -947,6 +1234,46 @@ pub(crate) struct GpuTexture {
     /// 用不上也不占什么——视图只是个描述符，像素还是那一份。
     array_view: wgpu::TextureView,
     sampler: wgpu::Sampler,
+    /// 显存里那块纹理本身，原地更新（`Texture::with_pixels`）时往里写。
+    texture: wgpu::Texture,
+    /// 传上来的是第几版（`Texture::revision`）。
+    revision: u64,
+    /// 三维纹理：`view` / `array_view` 都是 `D3` 视图，只能绑到三维槽。
+    volume: bool,
+}
+
+impl GpuTexture {
+    /// 源贴图换了版本时原地重写像素。尺寸、层数、格式不变才能这么做，
+    /// 返回 `false` 表示对不上、得整张重建。
+    fn refresh(&mut self, queue: &wgpu::Queue, texture: &Texture) -> bool {
+        if texture.revision() == self.revision {
+            return true;
+        }
+        let size = self.texture.size();
+        let format = match texture.format() {
+            TextureFormat::Srgb => wgpu::TextureFormat::Rgba8UnormSrgb,
+            TextureFormat::Linear => wgpu::TextureFormat::Rgba8Unorm,
+        };
+        if size.width != texture.width().max(1)
+            || size.height != texture.height().max(1)
+            || size.depth_or_array_layers != texture.layers().max(1)
+            || self.texture.format() != format
+            || self.volume != texture.is_volume()
+        {
+            return false;
+        }
+        // 只改了一块（`Texture::with_region`）且显存里正好是改之前那一版：只传这一块。
+        match texture.dirty_region_since(self.revision) {
+            Some(region) if texture.layers() == 1 => {
+                write_texture_region(queue, &self.texture, texture, region)
+            }
+            _ => write_texture_pixels(queue, &self.texture, texture),
+        }
+        // 第 0 级变了，mip 链跟着重算（CPU 上，整张）。
+        write_texture_mips(queue, &self.texture, texture);
+        self.revision = texture.revision();
+        true
+    }
 }
 
 /// 材质缺贴图时使用的中性贴图。
@@ -958,6 +1285,32 @@ struct DefaultTextures {
     white: GpuTexture,
     /// (0.5, 0.5, 1.0)：切线空间里指向正上方，即"不扰动"。
     flat_normal: GpuTexture,
+    /// 1×1×1 的白色三维纹理：三维槽的占位。
+    white_volume: GpuTexture,
+}
+
+/// 主着色器片元阶段要的采样纹理数：group(2) 的材质贴图（含纹理数组）+ group(3) 的全局贴图。
+///
+/// WebGPU 的默认上限是 16。数一数 `shader.wgsl`：group(2) 是 5 张标准贴图 + 自定义槽位 + 纹理数组，
+/// group(3) 是 BRDF 表、阴影、环境图、场景颜色、场景深度、SSAO、cookie、局部阴影 8 张。
+pub const SAMPLED_TEXTURES_PER_STAGE: u32 = (TEXTURE_SLOTS + 2 + 8) as u32;
+
+/// 建设备时要的上限：默认值，采样纹理数抬到主着色器要的那么多。
+///
+/// 桌面后端都远高于 20（Vulkan / DX12 动辄上千）；适配器真给不了就按它能给的要，
+/// 建管线时会报清楚是哪一条超了，而不是在这里就失败。
+fn required_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
+    let supported = adapter.limits().max_sampled_textures_per_shader_stage;
+    let mut limits = wgpu::Limits::default();
+    limits.max_sampled_textures_per_shader_stage = SAMPLED_TEXTURES_PER_STAGE
+        .min(supported)
+        .max(limits.max_sampled_textures_per_shader_stage);
+    if supported < SAMPLED_TEXTURES_PER_STAGE {
+        klog::warn!(
+            "显卡每阶段只支持 {supported} 张采样纹理，主着色器要 {SAMPLED_TEXTURES_PER_STAGE} 张"
+        );
+    }
+    limits
 }
 
 /// 每级级联的全局量在缓冲里占多大一段。
@@ -966,6 +1319,12 @@ struct DefaultTextures {
 /// `min_uniform_buffer_offset_alignment` 的倍数——各家硬件普遍是 256，
 /// WebGPU 的下限保证也是 256，直接按它对齐最省事。
 const SHADOW_GLOBALS_STRIDE: u64 = 256;
+
+/// 主投影光源之外，额外的聚光 / 点光阴影最多占几层（聚光一层、点光六层）。
+///
+/// 单独一张纹理数组、分辨率是主阴影图的一半：主阴影图 2048² 一层就是 16 MB，
+/// 再加十二层同样大的就是快 200 MB，而局部光照的范围小，一半分辨率够用。
+pub const LOCAL_SHADOW_LAYERS: usize = 12;
 
 /// 环境捕获时，一面的朝向和它的落点。
 ///
@@ -1010,6 +1369,7 @@ fn build_material_pipelines(
     module: &wgpu::ShaderModule,
     constants: &[(&str, f64)],
     double_sided: bool,
+    cache: Option<&wgpu::PipelineCache>,
 ) -> MaterialPipelines {
     let side = if double_sided { "双面" } else { "单面" };
     MaterialPipelines {
@@ -1023,6 +1383,7 @@ fn build_material_pipelines(
             kmaterial::BlendMode::Opaque,
             constants,
             double_sided,
+            cache,
         ),
         skinned: create_standard_pipeline(
             device,
@@ -1034,6 +1395,7 @@ fn build_material_pipelines(
             kmaterial::BlendMode::Opaque,
             constants,
             double_sided,
+            cache,
         ),
         transparent: create_standard_pipeline(
             device,
@@ -1045,6 +1407,7 @@ fn build_material_pipelines(
             kmaterial::BlendMode::Alpha,
             constants,
             double_sided,
+            cache,
         ),
         skinned_transparent: create_standard_pipeline(
             device,
@@ -1056,6 +1419,7 @@ fn build_material_pipelines(
             kmaterial::BlendMode::Alpha,
             constants,
             double_sided,
+            cache,
         ),
     }
 }
@@ -1072,6 +1436,15 @@ impl MaterialPipelines {
     }
 }
 
+/// 写了 `material_vertex` 的材质在深度类 pass 里的管线：`[静态, 蒙皮]`。
+///
+/// 普通深度管线只做模型变换，位移出来的形状（海浪、置换贴图）进不了阴影和 SSAO——
+/// 这一套和主 pass 一样先过顶点钩子。
+struct HookedPasses {
+    shadow: [wgpu::RenderPipeline; 2],
+    prepass: [wgpu::RenderPipeline; 2],
+}
+
 /// 阴影 pass 所需的一组 GPU 资源。
 struct ShadowResources {
     settings: ShadowSettings,
@@ -1082,12 +1455,24 @@ struct ShadowResources {
     depth_view: wgpu::TextureView,
     /// 每层一个视图，渲染时当深度附件。
     layer_views: Vec<wgpu::TextureView>,
+    /// 额外投影光源的阴影图（整个数组的视图）。
+    local_depth_view: wgpu::TextureView,
+    /// 同上，每层一个视图。
+    local_layer_views: Vec<wgpu::TextureView>,
+    /// 每层的光空间矩阵，给主着色器采样时用。
+    local_matrices: wgpu::Buffer,
+    /// 额外阴影图的边长。
+    local_resolution: u32,
     globals_buffer: wgpu::Buffer,
+    /// 带顶点钩子的材质的阴影管线也要它（见 [`HookedPasses`]）。
+    globals_layout: wgpu::BindGroupLayout,
     globals_bind_group: wgpu::BindGroup,
     object_layout: wgpu::BindGroupLayout,
     object_buffer: wgpu::Buffer,
     object_bind_group: wgpu::BindGroup,
     object_capacity: u64,
+    /// 对象绑定组引用的是哪一代主 pass 槽 / 实例缓冲（见 `Renderer::instance_generation`）。
+    instance_generation: u64,
     /// 蒙皮深度管线。
     skinned_pipeline: wgpu::RenderPipeline,
     joint_buffer: wgpu::Buffer,
@@ -1096,6 +1481,14 @@ struct ShadowResources {
     morph_capacity: u64,
     morph_weight_buffer: wgpu::Buffer,
     morph_weight_capacity: u64,
+}
+
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        if let Some(cache) = self.pipeline_cache.as_mut() {
+            cache.save();
+        }
+    }
 }
 
 impl Renderer {
@@ -1110,37 +1503,116 @@ impl Renderer {
     /// 创建渲染器并配置交换链。
     pub async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
+        Self::create(Some(window), size)
+            .await
+            .expect("找不到可用的显卡适配器")
+    }
 
+    /// 不开窗口的渲染器：画到一张离屏纹理上，给基准测试和截图回归测试用。
+    ///
+    /// 走的是和屏幕帧完全一样的路径（后处理、UI、截图都在），只是最后不 `present`。
+    /// 机器上没有可用的适配器时返回 `None`（CI 上常见），调用方应当跳过。
+    pub async fn headless(width: u32, height: u32) -> Option<Self> {
+        Self::create(
+            None,
+            winit::dpi::PhysicalSize::new(width.max(1), height.max(1)),
+        )
+        .await
+    }
+
+    async fn create(
+        window: Option<Arc<Window>>,
+        size: winit::dpi::PhysicalSize<u32>,
+    ) -> Option<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
-        let surface = instance.create_surface(window.clone()).unwrap();
+        let surface = window.map(|window| instance.create_surface(window).unwrap());
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
+                compatible_surface: surface.as_ref(),
                 force_fallback_adapter: false,
                 apply_limit_buckets: false,
             })
             .await
-            .unwrap();
+            .ok()?;
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("kengine device"),
+                // 时间戳查询给剖析器用，有就开、没有不强求。
+                // 管线缓存同理：支持就开，冷启动少编几十条管线。
+                required_features: adapter.features()
+                    & (wgpu::Features::TIMESTAMP_QUERY
+                        | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
+                        | wgpu::Features::PIPELINE_CACHE),
+                required_limits: required_limits(&adapter),
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let mut config = surface
-            .get_default_config(&adapter, size.width, size.height)
-            .unwrap();
-        config.present_mode = wgpu::PresentMode::Fifo;
-        surface.configure(&device, &config);
+        let gpu_timer = gpu_profile::GpuTimer::new(&device, &queue);
+        // 无头渲染器（测试、基准）不碰用户的缓存目录。
+        let pipeline_cache = if surface.is_some() {
+            pipeline_cache::DiskPipelineCache::open(&device, &adapter)
+        } else {
+            None
+        };
+        // 无头时自己拼一份「交换链配置」：后面所有按交换链格式建的资源照旧。
+        let mut config = match &surface {
+            Some(surface) => surface
+                .get_default_config(&adapter, size.width, size.height)
+                .unwrap(),
+            None => wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                width: size.width,
+                height: size.height,
+                present_mode: wgpu::PresentMode::Fifo,
+                desired_maximum_frame_latency: 2,
+                alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+                view_formats: Vec::new(),
+                color_space: Default::default(),
+            },
+        };
+        let present_modes = surface.as_ref().map_or_else(
+            || vec![wgpu::PresentMode::Fifo],
+            |s| s.get_capabilities(&adapter).present_modes,
+        );
+        // 默认垂直同步；`KENGINE_PRESENT=immediate|mailbox|fifo` 可以改（量性能时要关掉）。
+        let from_env = std::env::var("KENGINE_PRESENT")
+            .ok()
+            .and_then(|v| PresentMode::parse(&v));
+        let present_from_env = from_env.is_some();
+        let wanted = from_env.unwrap_or(PresentMode::Vsync);
+        config.present_mode = wanted.resolve(&present_modes);
+        // 截图要拷**交换链本身**——那是 UI 画完之后屏幕上真正的样子。
+        // 支持就开，不支持（个别后端）退回从后处理链拷，那样截图里没有 UI。
+        if let Some(surface) = &surface {
+            if surface
+                .get_capabilities(&adapter)
+                .usages
+                .contains(wgpu::TextureUsages::COPY_SRC)
+            {
+                config.usage |= wgpu::TextureUsages::COPY_SRC;
+            }
+            surface.configure(&device, &config);
+        }
+        let offscreen = surface
+            .is_none()
+            .then(|| create_offscreen(&device, &config));
+        // 材质采离屏相机视图用（`Texture::camera_view`）。
+        let view_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("kengine camera view sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
 
         let depth_view = Self::create_depth_view(&device, &config);
 
@@ -1291,12 +1763,36 @@ impl Renderer {
                     },
                     count: None,
                 },
+                // 实例槽（GPU 实例 → 对象 + 实例数据）和实例数据。只在顶点阶段读：
+                // 片元阶段要的东西由顶点着色器平着传下去，片元阶段的存储缓冲数不加。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(size_of::<InstanceSlot>() as u64),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(size_of::<kscene::Instance>() as u64),
+                    },
+                    count: None,
+                },
             ],
         });
 
         let joint_buffer = create_joint_storage(&device, Self::INITIAL_JOINTS);
         let morph_buffer = create_morph_storage(&device, Self::INITIAL_MORPH);
         let morph_weight_buffer = create_morph_weight_storage(&device, Self::INITIAL_CAPACITY);
+        let slot_buffer = create_slot_storage(&device, Self::INITIAL_CAPACITY);
+        let instance_buffer = create_instance_storage(&device, Self::INITIAL_CAPACITY);
         let (object_buffer, object_bind_group) = Self::create_object_storage(
             &device,
             &object_layout,
@@ -1304,6 +1800,8 @@ impl Renderer {
             &joint_buffer,
             &morph_buffer,
             &morph_weight_buffer,
+            &slot_buffer,
+            &instance_buffer,
         );
 
         // ── group(2)：材质贴图 ──
@@ -1360,6 +1858,17 @@ impl Renderer {
             ty: wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable: true },
                 view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        });
+        // 自定义三维纹理（`Texture::volume`）。
+        texture_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: VOLUME_TEXTURE_BINDING,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D3,
                 multisampled: false,
             },
             count: None,
@@ -1472,6 +1981,27 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // 额外投影光源（聚光 / 点光）的阴影图和每层的矩阵。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 12,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(size_of::<[[f32; 4]; 4]>() as u64),
+                    },
+                    count: None,
+                },
                 // 屏幕空间环境光遮蔽。关着的时候绑一张 1×1 白图。
                 //
                 // `R16Float` 不可过滤，所以采样类型必须写
@@ -1509,8 +2039,14 @@ impl Renderer {
         // 双面那一套**不在这里建**：绝大多数项目一个双面材质都没有，
         // 而四条管线的编译不是免费的。用到了再建（见
         // `ensure_material_pipelines`）。
-        let standard_pipelines =
-            build_material_pipelines(&device, &pipeline_layout, &shader, &[], false);
+        let standard_pipelines = build_material_pipelines(
+            &device,
+            &pipeline_layout,
+            &shader,
+            &[],
+            false,
+            pipeline_cache.as_ref().map(|c| &c.cache),
+        );
 
         // ── 阴影 pass ──
         let shadow = create_shadow_resources(&device, ShadowSettings::default());
@@ -1555,6 +2091,18 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // 预滤波链。背景要模糊（`Scene::set_background_blurriness`）时
+                // 从这里按粗糙度取级；binding 1 是原分辨率的那张，只有一级。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let sky_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1563,8 +2111,13 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let sky_bind_group =
-            create_sky_bind_group(&device, &sky_layout, &sky_buffer, &placeholder_environment);
+        let sky_bind_group = create_sky_bind_group(
+            &device,
+            &sky_layout,
+            &sky_buffer,
+            &placeholder_environment,
+            &placeholder_environment,
+        );
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("kengine sky pipeline layout"),
             bind_group_layouts: &[Option::from(&sky_layout)],
@@ -1615,6 +2168,7 @@ impl Renderer {
 
         let default_textures = DefaultTextures {
             white: upload_texture(&device, &queue, &Texture::white()),
+            white_volume: upload_texture(&device, &queue, &Texture::volume(1, 1, 1, vec![255; 4])),
             flat_normal: upload_texture(
                 &device,
                 &queue,
@@ -1646,7 +2200,7 @@ impl Renderer {
             &device,
             &brdf_layout,
             &scene_statics,
-            &shadow.depth_view,
+            &shadow,
             &placeholder_environment,
             &scene_color_view,
             &placeholder_depth,
@@ -1657,14 +2211,24 @@ impl Renderer {
             &device,
             &brdf_layout,
             &scene_statics,
-            &shadow.depth_view,
+            &shadow,
             &placeholder_environment,
             &scene_color_view,
             &depth_view,
             ssao.occlusion_view(),
             &default_textures.white,
         );
-        let post = PostProcess::new(&device, config.width, config.height, config.format);
+        let post = PostProcess::new(&device, &queue, config.width, config.height, config.format);
+        let mask = mask::MaskPass::new(
+            &device,
+            &globals_layout,
+            &object_layout,
+            &geometry_prelude(),
+            &depth_view,
+            config.width,
+            config.height,
+        );
+        let postfx = postfx::PostFx::new(&device, &queue, config.width, config.height);
         // 粒子画在主 pass 里，因此目标格式与深度格式都要与主 pass 一致。
         let particles = ParticleResources::new(
             &device,
@@ -1681,8 +2245,10 @@ impl Renderer {
         // UI 画在后处理**之后**，目标是交换链，所以用交换链的格式。
         let ui_resources = UiResources::new(&device, config.format);
 
+        let overlay = overlay::Overlay::new(&device, post::HDR_FORMAT);
         let mut renderer = Self {
             surface,
+            offscreen,
             device,
             queue,
             config,
@@ -1701,8 +2267,14 @@ impl Renderer {
             object_buffer,
             object_bind_group,
             object_capacity: Self::INITIAL_CAPACITY,
+            slot_buffer,
+            slot_capacity: Self::INITIAL_CAPACITY,
+            instance_buffer,
+            instance_capacity: Self::INITIAL_CAPACITY,
+            instance_generation: 0,
             standard_pipelines,
             double_sided_pipelines: FxHashMap::default(),
+            depth_write_pipelines: FxHashMap::default(),
             material_modules: FxHashMap::default(),
             standard_module: shader,
             joint_buffer,
@@ -1735,6 +2307,7 @@ impl Renderer {
             scene_color,
             scene_color_view,
             material_pipelines: FxHashMap::default(),
+            hooked_passes: FxHashMap::default(),
             failed_shaders: FxHashSet::default(),
             pipeline_layout,
             started: std::time::Instant::now(),
@@ -1745,16 +2318,41 @@ impl Renderer {
             texture_layout,
             gpu_textures: FxHashMap::default(),
             material_bind_groups: FxHashMap::default(),
+            eviction_frames: DEFAULT_EVICTION_FRAMES,
+            render_scale: 1.0,
             default_textures,
             meshes: FxHashMap::default(),
             stats: RenderStats::default(),
+            mask,
+            postfx,
+            views: [None, None],
+            view_array_views: [None, None],
+            view_sampler,
+            shared_views: compute::SharedViews::default(),
+            ssaa_accum: None,
+            frame_index: 0,
+            prev_view_proj: None,
+            prev_jitter: [0.0; 2],
+            motion: MotionHistory::default(),
+            builtin_taa: effects::taa(),
+            builtin_smaa: effects::smaa(),
+            screenshot: None,
+            present_modes,
+            present_from_env,
+            gpu_timer,
+            pipeline_cache,
+            overlay,
+            time_override: None,
+            local_shadow_layers: LOCAL_SHADOW_LAYERS,
+            cull_indices: Vec::new(),
+            visible_scratch: Vec::new(),
         };
 
         // 粒子建的时候只有一张 1×1 占位深度，这里换成真的。
         renderer
             .particles
             .set_depth_view(&renderer.device, &renderer.depth_view);
-        renderer
+        Some(renderer)
     }
 
     /// 当前该绑的 cookie 图集。没设过就用那张 1×1 白图。
@@ -1811,7 +2409,7 @@ impl Renderer {
             &self.device,
             &self.brdf_layout,
             &self.scene_statics,
-            &self.shadow.depth_view,
+            &self.shadow,
             &self.environment_view,
             &self.scene_color_view,
             &self.placeholder_depth,
@@ -1822,13 +2420,24 @@ impl Renderer {
             &self.device,
             &self.brdf_layout,
             &self.scene_statics,
-            &self.shadow.depth_view,
+            &self.shadow,
             &self.environment_view,
             &self.scene_color_view,
             &self.depth_view,
             self.ssao.occlusion_view(),
             self.cookie_texture(),
         );
+    }
+
+    /// 提前编译这些材质要用的管线（自定义着色器、双面变体）。
+    ///
+    /// 管线默认在材质**第一次被画到**时才编，自定义着色器那一帧会卡几十毫秒。
+    /// 加载阶段把之后会生成的东西（子弹、特效、敌人）的材质传进来，开打以后就不卡了。
+    /// 场景里已经在画的材质不用传，第一帧就编好了。
+    pub fn prepare_materials<'m>(&mut self, materials: impl IntoIterator<Item = &'m Material>) {
+        for material in materials {
+            self.ensure_material_pipelines(material);
+        }
     }
 
     /// 确保这份材质的管线变体存在，返回它的着色器 id。
@@ -1846,7 +2455,61 @@ impl Renderer {
         if material.double_sided() {
             self.ensure_double_sided_pipelines(id);
         }
+        if material.blend_mode().is_blended() && material.depth_write() {
+            self.ensure_depth_write_pipelines(id, material.double_sided());
+        }
         id
+    }
+
+    /// 建（或复用）「半透明但写深度」的两条管线。
+    fn ensure_depth_write_pipelines(&mut self, id: Uuid, double_sided: bool) {
+        if self.depth_write_pipelines.contains_key(&(id, double_sided)) {
+            return;
+        }
+        let (module, constants): (&wgpu::ShaderModule, Vec<(&str, f64)>) = if id.is_nil() {
+            (&self.standard_module, Vec::new())
+        } else {
+            let Some((module, constants)) = self.material_modules.get(&id) else {
+                return;
+            };
+            (
+                module,
+                constants
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), *value))
+                    .collect(),
+            )
+        };
+        let cache = self.pipeline_cache.as_ref().map(|c| &c.cache);
+        let build = |entry: &str, buffers: &[Option<wgpu::VertexBufferLayout<'_>>], label: &str| {
+            create_standard_pipeline_with(
+                &self.device,
+                &self.pipeline_layout,
+                module,
+                entry,
+                buffers,
+                label,
+                kmaterial::BlendMode::Alpha,
+                &constants,
+                double_sided,
+                true,
+                cache,
+            )
+        };
+        let pipelines = (
+            build(
+                "vs_main",
+                &[Option::from(vertex_layout())],
+                "kengine transparent depth-write pipeline",
+            ),
+            build(
+                "vs_skinned",
+                &[Option::from(vertex_layout()), Option::from(skin_layout())],
+                "kengine skinned transparent depth-write pipeline",
+            ),
+        );
+        self.depth_write_pipelines
+            .insert((id, double_sided), pipelines);
     }
 
     /// 建（或复用）双面那一套。`id` 是钩子 id，[`Uuid::nil`] 表示标准着色器。
@@ -1861,6 +2524,7 @@ impl Renderer {
                 &self.standard_module,
                 &[],
                 true,
+                self.pipeline_cache.as_ref().map(|c| &c.cache),
             )
         } else {
             let Some((module, constants)) = self.material_modules.get(&id) else {
@@ -1871,7 +2535,14 @@ impl Renderer {
                 .iter()
                 .map(|(name, value)| (name.as_str(), *value))
                 .collect();
-            build_material_pipelines(&self.device, &self.pipeline_layout, module, &borrowed, true)
+            build_material_pipelines(
+                &self.device,
+                &self.pipeline_layout,
+                module,
+                &borrowed,
+                true,
+                self.pipeline_cache.as_ref().map(|c| &c.cache),
+            )
         };
         klog::debug!("建了一套双面管线 {id}");
         self.double_sided_pipelines.insert(id, pipelines);
@@ -1895,7 +2566,30 @@ impl Renderer {
             };
         }
 
-        let source = material_shader_source(data.source());
+        // 位移出来的形状（顶点钩子）、挖掉的洞（表面钩子里 discard）也要进阴影和预通道：
+        // 入口拼在同一个模块里，钩子和它要的贴图都在。
+        let vertex_hooked = hook_defines(data.source(), "material_vertex");
+        let cutout =
+            hook_defines(data.source(), "material_surface") && data.source().contains("discard");
+        let mut depth_hooked = vertex_hooked || cutout;
+        let base_source = material_shader_source(data.source());
+        let mut source = base_source.clone();
+        if depth_hooked {
+            source = format!(
+                "{source}\n{}\n{}",
+                include_str!("prepass.wgsl"),
+                include_str!("shadow_hooked.wgsl")
+            );
+            // 钩子读了 `globals`（公告板要相机位置）：阴影入口里它和光空间矩阵同号，整个模块过不了校验。
+            // 退回不带深度类入口的版本——材质照常画，只是影子不带位移 / 不镂空。
+            if Shader::from_wgsl(source.clone()).is_err()
+                && Shader::from_wgsl(base_source.clone()).is_ok()
+            {
+                klog::debug!("材质钩子用了阴影 pass 里没有的东西，影子走普通管线：{id}");
+                source = base_source;
+                depth_hooked = false;
+            }
+        }
         // 先自己校验一遍再交给 wgpu：wgpu 的校验失败会**直接 panic**
         // 掉整个进程，而用户写的着色器出错是常态，不该是致命的。
         if let Err(error) = Shader::from_wgsl(source.clone()) {
@@ -1921,10 +2615,15 @@ impl Renderer {
             &module,
             &constants,
             false,
+            self.pipeline_cache.as_ref().map(|c| &c.cache),
         );
 
         klog::debug!("编译了一份自定义材质着色器 {id}");
         self.material_pipelines.insert(id, pipelines);
+        if depth_hooked && let Some(passes) = self.build_hooked_passes(&module, &constants, cutout)
+        {
+            self.hooked_passes.insert(id, passes);
+        }
         self.material_modules.insert(
             id,
             (
@@ -1938,8 +2637,116 @@ impl Renderer {
         id
     }
 
+    /// 建带顶点钩子的材质在阴影 pass、预通道里用的四条管线。
+    ///
+    /// 包在错误作用域里：钩子读了 `globals`（阴影管线的 group 0 是光空间矩阵，不是它）之类的
+    /// 情况建不出来，wgpu 默认会直接 panic。这里退回普通深度管线，记一条警告。
+    fn build_hooked_passes(
+        &self,
+        module: &wgpu::ShaderModule,
+        constants: &[(&str, f64)],
+        cutout: bool,
+    ) -> Option<HookedPasses> {
+        // 镂空材质的阴影要跑片元阶段（表面钩子里 discard）；只有顶点钩子的不必，深度 pass 越便宜越好。
+        let fragment = cutout.then_some("shadow_hooked_fs");
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let shadow_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("kengine hooked shadow layout"),
+                bind_group_layouts: &[
+                    Option::from(&self.shadow.globals_layout),
+                    Option::from(&self.object_layout),
+                    Option::from(&self.texture_layout),
+                ],
+                immediate_size: 0,
+            });
+        let prepass_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("kengine hooked prepass layout"),
+                bind_group_layouts: &[
+                    Option::from(&self.globals_layout),
+                    Option::from(&self.object_layout),
+                    Option::from(&self.texture_layout),
+                ],
+                immediate_size: 0,
+            });
+        let static_buffers = [Option::from(vertex_layout())];
+        let skinned_buffers = [Option::from(vertex_layout()), Option::from(skin_layout())];
+        let passes = HookedPasses {
+            shadow: [
+                create_shadow_pipeline_with(
+                    &self.device,
+                    &shadow_layout,
+                    module,
+                    "shadow_hooked_vs",
+                    fragment,
+                    &static_buffers,
+                    "kengine hooked shadow",
+                    constants,
+                ),
+                create_shadow_pipeline_with(
+                    &self.device,
+                    &shadow_layout,
+                    module,
+                    "shadow_hooked_skinned_vs",
+                    fragment,
+                    &skinned_buffers,
+                    "kengine hooked skinned shadow",
+                    constants,
+                ),
+            ],
+            prepass: [
+                ssao::create_prepass_pipeline(
+                    &self.device,
+                    &prepass_layout,
+                    module,
+                    "prepass_vs",
+                    &static_buffers,
+                    "kengine hooked prepass",
+                    constants,
+                ),
+                ssao::create_prepass_pipeline(
+                    &self.device,
+                    &prepass_layout,
+                    module,
+                    "prepass_vs_skinned",
+                    &skinned_buffers,
+                    "kengine hooked skinned prepass",
+                    constants,
+                ),
+            ],
+        };
+        match pollster::block_on(scope.pop()) {
+            None => Some(passes),
+            Some(error) => {
+                klog::warn!(
+                    "带钩子的材质的阴影 / 预通道管线建不出来，这个材质的影子不带位移、不镂空：{error}"
+                );
+                None
+            }
+        }
+    }
+
+    /// 阴影 pass、预通道里给这一批用的管线：写了顶点钩子的材质有自己的一套。
+    fn hooked_passes_for(&self, batch: &Batch) -> Option<&HookedPasses> {
+        if batch.shader_id.is_nil() {
+            return None;
+        }
+        self.hooked_passes.get(&batch.shader_id)
+    }
+
     /// 按批次选管线。
     fn pipeline_for(&self, batch: &Batch, transparent: bool) -> &wgpu::RenderPipeline {
+        if transparent
+            && batch.depth_write
+            && let Some((plain, skinned)) = self
+                .depth_write_pipelines
+                .get(&(batch.shader_id, batch.double_sided))
+        {
+            return if batch.skinned { skinned } else { plain };
+        }
         if batch.double_sided
             && let Some(pipelines) = self.double_sided_pipelines.get(&batch.shader_id)
         {
@@ -2015,11 +2822,193 @@ impl Renderer {
     /// 「真的那张」和「1×1 白图」之间换。不重建的话开了没效果、
     /// 关了还留着上一帧的遮蔽——两种都不报错。
     pub fn set_ssao(&mut self, settings: SsaoSettings) {
-        let toggled = settings.enabled != self.ssao.settings.enabled;
+        let was_active = self.ssao.occlusion_active();
         self.ssao.settings = settings;
+        let toggled = was_active != self.ssao.occlusion_active();
         if toggled {
             self.rebuild_scene_bind_groups();
         }
+    }
+
+    /// 下一个屏幕帧画完之后，把画面存成 PNG。
+    ///
+    /// 存的是后处理之后、UI 之前的那一张（UI 是叠在交换链上的，
+    /// 而交换链的纹理不一定能拷出来）。开了 FXAA 时是 FXAA 之前的。
+    /// 同步写盘，那一帧会卡一下。
+    pub fn request_screenshot(&mut self, path: impl Into<std::path::PathBuf>) {
+        self.screenshot = Some(path.into());
+    }
+
+    /// 无头渲染器上一帧画出来的样子（RGBA8，sRGB 编码，含 UI）。
+    ///
+    /// 只对 [`Renderer::headless`] 建的渲染器有效，窗口渲染器返回 `None`
+    /// （窗口的要用 [`Renderer::request_screenshot`]）。同步等显卡，测试里用。
+    pub fn read_pixels(&self) -> Option<(u32, u32, Vec<u8>)> {
+        let texture = self.offscreen.as_ref()?;
+        let (width, height) = (texture.width(), texture.height());
+        let bytes_per_row = (width * 4).div_ceil(256) * 256;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kengine read pixels"),
+            size: u64::from(bytes_per_row) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("kengine read pixels"),
+            });
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(std::iter::once(encoder.finish()));
+        let pixels = read_rgba(&self.device, &buffer, width, height, bytes_per_row, false)?;
+        Some((width, height, pixels))
+    }
+
+    /// 等显卡把已经提交的工作做完。基准测试里量「CPU + GPU 一帧」时用。
+    pub fn wait_idle(&self) {
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+
+    /// 让着色器里的时间（`frame.time`）和帧间隔用给定值 `(开场以来秒数, 帧间隔)`，
+    /// 而不是墙上的钟。固定步长渲染（截图回归、录像）时用；`None` 恢复。
+    pub fn set_time_override(&mut self, time: Option<(f32, f32)>) {
+        self.time_override = time;
+    }
+
+    /// 额外投影光源最多用几层阴影图，上限 [`LOCAL_SHADOW_LAYERS`]（默认用满）。
+    ///
+    /// 场景里第一盏 `cast_shadows` 的灯是主投影光源（方向光走级联）。其余投影的
+    /// 聚光灯各占一层、点光各占六层，**离相机近的优先**；分不到的照常照亮、不投影。
+    /// 每层是一次深度 pass，灯多的场景嫌贵可以调小，0 等于只有主光源投影。
+    pub fn set_local_shadow_layers(&mut self, layers: usize) {
+        self.local_shadow_layers = layers.min(LOCAL_SHADOW_LAYERS);
+    }
+
+    /// 给主投影光源之外的投影光源分阴影层。返回 `(可见光源序号, 起始层)` 和每层的矩阵。
+    ///
+    /// 序号是 [`Scene::visible_lights`] 里的位置。「离相机近」量的是相机到光照范围边缘的
+    /// 距离：一盏范围很大的远灯照得到相机跟前，应该排在一盏近处的小灯前面。
+    fn assign_local_shadows(
+        &self,
+        scene: &Scene,
+        camera_position: Vec3,
+    ) -> (Vec<(usize, u32)>, Vec<Mat4>) {
+        let mut assigned = Vec::new();
+        let mut faces = Vec::new();
+        if self.local_shadow_layers == 0 {
+            return (assigned, faces);
+        }
+        let mut candidates: Vec<(f32, usize, &klight::Light, Mat4)> = scene
+            .visible_lights()
+            .enumerate()
+            .filter(|(_, (light, _))| light.cast_shadows)
+            // 第一盏是主投影光源，走原来那条路。
+            .skip(1)
+            .filter(|(_, (light, _))| {
+                matches!(
+                    light.kind,
+                    klight::LightKind::Point { .. }
+                        | klight::LightKind::Spot { .. }
+                        | klight::LightKind::Rect { .. }
+                )
+            })
+            .map(|(index, (light, transform))| {
+                let position = transform.w_axis.truncate();
+                let reach = (camera_position.distance(position) - light.kind.range()).max(0.0);
+                (reach, index, light, transform)
+            })
+            .collect();
+        candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, index, light, transform) in candidates {
+            let position = transform.w_axis.truncate();
+            let range = light.kind.range().clamp(0.5, 1.0e4);
+            let near = (range * 0.001).max(0.02);
+            let new_faces = match light.kind {
+                klight::LightKind::Point { .. } => {
+                    klight::cascade::point_faces(position, near, range)
+                }
+                klight::LightKind::Spot { outer_angle, .. } => klight::cascade::spot_face(
+                    position,
+                    light.direction(transform),
+                    outer_angle,
+                    near,
+                    range,
+                ),
+                _ => klight::cascade::spot_face(
+                    position,
+                    light.direction(transform),
+                    80.0,
+                    near,
+                    range,
+                ),
+            };
+            if faces.len() + new_faces.len() > self.local_shadow_layers {
+                // 点光放不下时还可能塞得下后面的聚光，接着看。
+                continue;
+            }
+            assigned.push((index, faces.len() as u32));
+            faces.extend(new_faces.iter().map(|face| face.matrix));
+        }
+        (assigned, faces)
+    }
+
+    /// 网格、贴图多少帧没被画到就释放显存（默认 300 帧，约五秒）。0 表示永不回收。
+    ///
+    /// 释放掉的东西再被画到时会重新上传，代价是那一帧多一次上传。
+    /// 关卡切换频繁、来回用同一批资源的游戏可以调大。
+    pub fn set_eviction_frames(&mut self, frames: u64) {
+        self.eviction_frames = frames;
+    }
+
+    /// 释放长时间没被画到的网格、贴图和绑定组。每 60 帧扫一次。
+    ///
+    /// 带形变目标的网格不回收：它们的增量追加在一块全局缓冲里，那块缓冲只增不减，
+    /// 释放后重新上传会再追加一份——回收反而是在漏。
+    fn evict_unused(&mut self) {
+        if self.eviction_frames == 0 || !self.frame_index.is_multiple_of(60) {
+            return;
+        }
+        let horizon = self.frame_index.saturating_sub(self.eviction_frames);
+        let before = (self.meshes.len(), self.gpu_textures.len());
+        self.meshes
+            .retain(|_, mesh| mesh.morph_count > 0 || mesh.last_used >= horizon);
+        self.gpu_textures.retain(|_, (_, used)| *used >= horizon);
+        let textures = &self.gpu_textures;
+        // 绑定组引用着贴图视图：贴图走了，引用它的绑定组也得走，不然下次建出来的是新视图、
+        // 这里留的那份永远对不上。
+        self.material_bind_groups.retain(|key, (_, used)| {
+            *used >= horizon
+                && key
+                    .iter()
+                    .all(|id| id.is_nil() || textures.contains_key(id))
+        });
+        let freed = (
+            before.0 - self.meshes.len(),
+            before.1 - self.gpu_textures.len(),
+        );
+        if freed != (0, 0) {
+            klog::debug!("回收了 {} 个网格、{} 张贴图的显存", freed.0, freed.1);
+        }
+    }
+
+    /// 截图是否还在排队。
+    pub fn screenshot_pending(&self) -> bool {
+        self.screenshot.is_some()
     }
 
     /// 当前渲染目标尺寸。
@@ -2053,7 +3042,37 @@ impl Renderer {
 
     /// 修改后处理设置。
     pub fn set_post_settings(&mut self, settings: PostSettings) {
+        let scale = if settings.render_scale.is_finite() {
+            settings.render_scale.clamp(0.25, 1.0)
+        } else {
+            1.0
+        };
         self.post.set_settings(settings);
+        if scale != self.render_scale {
+            self.render_scale = scale;
+            let (width, height) = self.internal_size();
+            self.resize_offscreen(width, height);
+        }
+    }
+
+    /// 这一帧走不走 TAAU（低分辨率渲染且选了 TAAU）。
+    pub(crate) fn taau_active(&self, settings: &PostSettings) -> bool {
+        settings.upscaling == Upscaling::Taau && self.render_scale < 1.0
+    }
+
+    /// 离屏目标的尺寸：窗口尺寸 × 渲染比例（`PostSettings::render_scale`）。
+    fn internal_size(&self) -> (u32, u32) {
+        let scale = |v: u32| ((v as f32 * self.render_scale).round() as u32).max(1);
+        (scale(self.size.width), scale(self.size.height))
+    }
+
+    /// 交换链的配置：尺寸永远是窗口的（`self.config` 的宽高跟的是离屏目标，低分辨率渲染时更小）。
+    fn surface_config(&self) -> wgpu::SurfaceConfiguration {
+        wgpu::SurfaceConfiguration {
+            width: self.size.width.max(1),
+            height: self.size.height.max(1),
+            ..self.config.clone()
+        }
     }
 
     /// 顶点被改过的网格：把新数据送进已有的显存。
@@ -2107,6 +3126,45 @@ impl Renderer {
     }
 
     /// 重新配置交换链与深度缓冲。
+    /// 最近一次读回的 GPU 分段耗时 `(段名, 毫秒)`，按帧内顺序。
+    ///
+    /// 只在剖析开着（`klog::profile::set_enabled(true)`）且适配器支持时间戳查询时有数据，
+    /// 结果比当前帧晚两三帧（异步读回）。
+    pub fn gpu_profile(&self) -> &[(&'static str, f32)] {
+        self.gpu_timer.as_ref().map_or(&[], |t| t.latest())
+    }
+
+    /// 适配器支不支持 GPU 分段计时。
+    pub fn gpu_profiling_supported(&self) -> bool {
+        self.gpu_timer.is_some()
+    }
+
+    /// 改出帧方式（垂直同步开关）。适配器不支持的会退到最接近的一种。
+    ///
+    /// 设了 `KENGINE_PRESENT` 环境变量时这里不生效——那是量性能时临时改的，
+    /// 不该被游戏代码里写死的设置盖掉。
+    pub fn set_present_mode(&mut self, mode: PresentMode) {
+        if self.present_from_env {
+            return;
+        }
+        let resolved = mode.resolve(&self.present_modes);
+        if resolved != self.config.present_mode {
+            self.config.present_mode = resolved;
+            if let Some(surface) = &self.surface {
+                surface.configure(&self.device, &self.surface_config());
+            }
+        }
+    }
+
+    /// 当前实际在用的出帧方式。
+    pub fn present_mode(&self) -> PresentMode {
+        match self.config.present_mode {
+            wgpu::PresentMode::Immediate => PresentMode::Immediate,
+            wgpu::PresentMode::Mailbox => PresentMode::Mailbox,
+            _ => PresentMode::Vsync,
+        }
+    }
+
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width == 0 || new_size.height == 0 {
             return;
@@ -2116,8 +3174,12 @@ impl Renderer {
         // `resize_offscreen` 会再写一遍同样的值，无害。
         self.config.width = new_size.width;
         self.config.height = new_size.height;
-        self.surface.configure(&self.device, &self.config);
-        self.resize_offscreen(new_size.width, new_size.height);
+        match &self.surface {
+            Some(surface) => surface.configure(&self.device, &self.config),
+            None => self.offscreen = Some(create_offscreen(&self.device, &self.config)),
+        }
+        let (width, height) = self.internal_size();
+        self.resize_offscreen(width, height);
     }
 
     /// 重建所有**离屏**目标，不碰交换链。
@@ -2147,6 +3209,25 @@ impl Renderer {
         self.rebuild_scene_bind_groups();
         self.post
             .resize(&self.device, self.config.width, self.config.height);
+        self.mask.resize(
+            &self.device,
+            &self.depth_view,
+            self.config.width,
+            self.config.height,
+        );
+        self.postfx.resize(self.config.width, self.config.height);
+        // 视图和累积缓冲要和帧缓冲同尺寸，下次用到时按新尺寸重建。
+        self.views = [None, None];
+        self.view_array_views = [None, None];
+        // 采视图的材质绑定组还指着旧的那块显存。
+        self.material_bind_groups.retain(|key, _| {
+            !key.iter()
+                .any(|id| ktexture::Texture::camera_view_slot_of(*id).is_some())
+        });
+        self.overlay.resize();
+        self.ssaa_accum = None;
+        // 尺寸变了，上一帧的投影和屏幕坐标都对不上了。
+        self.prev_view_proj = None;
     }
 
     /// 站在 `position` 往六个方向各渲一遍，拼成一张等距柱状 HDR。
@@ -2262,7 +3343,13 @@ impl Renderer {
                 bytes_per_row,
             };
             if !matches!(
-                self.render_frame(scene, None, &[], Some(&face)),
+                self.render_frame(
+                    scene,
+                    None,
+                    &[],
+                    FrameMode::Capture(&face),
+                    &PostStack::default()
+                ),
                 RenderOutcome::Ok
             ) {
                 klog::error!("捕获环境的第 {index} 面渲染失败");
@@ -2352,7 +3439,66 @@ impl Renderer {
         ui: &Ui,
         gpu_particles: &[GpuParticles],
     ) -> RenderOutcome {
-        self.render_frame(scene, Some(ui), gpu_particles, None)
+        self.render_with_effects(scene, ui, gpu_particles, &PostStack::default())
+    }
+
+    /// 绘制一帧，带上一串自定义后处理。见 [`postfx`]。
+    ///
+    /// 场景里有离屏相机（[`kcamera::CameraTarget::View`]）时先把它们各画一遍；
+    /// 开了超采样时主相机画 N 遍再平均。
+    pub fn render_with_effects(
+        &mut self,
+        scene: &Scene,
+        ui: &Ui,
+        gpu_particles: &[GpuParticles],
+        effects: &PostStack,
+    ) -> RenderOutcome {
+        for (slot, _, _) in scene.view_cameras() {
+            let outcome = self.render_frame(scene, None, &[], FrameMode::View(slot), effects);
+            if outcome != RenderOutcome::Ok {
+                return outcome;
+            }
+        }
+        if scene.overlay_camera().is_some() {
+            let outcome = self.render_frame(scene, None, &[], FrameMode::Overlay, effects);
+            if outcome != RenderOutcome::Ok {
+                return outcome;
+            }
+        }
+        let samples = self.post.settings().ssaa.clamp(1, 32);
+        if samples > 1 {
+            for index in 0..samples - 1 {
+                let outcome = self.render_frame(
+                    scene,
+                    None,
+                    gpu_particles,
+                    FrameMode::SsaaSample {
+                        index,
+                        count: samples,
+                    },
+                    effects,
+                );
+                if outcome != RenderOutcome::Ok {
+                    return outcome;
+                }
+            }
+            return self.render_frame(
+                scene,
+                Some(ui),
+                gpu_particles,
+                FrameMode::Screen {
+                    ssaa: Some((samples - 1, samples)),
+                },
+                effects,
+            );
+        }
+        self.render_frame(
+            scene,
+            Some(ui),
+            gpu_particles,
+            FrameMode::Screen { ssaa: None },
+            effects,
+        )
     }
 
     /// 一帧的全部工作。`render` 和环境捕获共用这一条。
@@ -2372,157 +3518,144 @@ impl Renderer {
         scene: &Scene,
         ui: Option<&Ui>,
         gpu_particles: &[GpuParticles],
-        capture: Option<&CaptureFace<'_>>,
+        mode: FrameMode<'_>,
+        effects: &PostStack,
     ) -> RenderOutcome {
         let now = std::time::Instant::now();
-        let frame_delta = now.duration_since(self.last_frame).as_secs_f32();
-        self.last_frame = now;
-
-        // 相机：捕获时由调用方指定那一面的朝向；否则取场景里第一个
-        // 启用的，没有就用一个看向原点的默认视角。
-        let (camera_to_world, camera) = match capture {
-            Some(face) => (face.camera_to_world, face.camera),
-            None => scene.active_camera().unwrap_or_else(|| {
-                let eye = Vec3::new(0.0, 1.5, 3.0);
-                (
-                    Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y).inverse(),
-                    Camera::default(),
-                )
-            }),
+        let frame_delta = match self.time_override {
+            Some((_, delta)) => delta,
+            None => now.duration_since(self.last_frame).as_secs_f32(),
         };
+        let shader_time = self
+            .time_override
+            .map_or_else(|| self.started.elapsed().as_secs_f32(), |(time, _)| time);
+        // 只有屏幕帧推进时钟：离屏视图和超采样的那几遍是同一帧的一部分，
+        // 让它们推的话屏幕那一帧拿到的帧间隔永远接近零。
+        if mode.is_screen() {
+            self.last_frame = now;
+        }
+
+        let Some((camera_to_world, camera)) = self.frame_camera(scene, &mode) else {
+            return RenderOutcome::Ok;
+        };
+        // 环境捕获看一切：它要的是「这个位置周围有什么」，不是某台相机的视角。
+        let camera_layers = match mode {
+            FrameMode::Capture(_) => u32::MAX,
+            _ => camera.layers,
+        };
+
+        // 剖析：CPU 分段（`section.next` 关上一段、开下一段）和 GPU 分段（`gpu_timing` 时在 pass 之间写时间戳）。
+        let _profile_render = klog::profile!("渲染器");
+        let mut section = klog::profile::Sequence::new();
+        section.next("准备");
+        // ── 这一帧后处理要什么 ──
+        //
+        // 只有屏幕帧跑后处理；超采样的前几遍只是攒颜色。
+        let post_settings = self.post.settings();
+        let screen = mode.is_screen();
+        let overlay = matches!(mode, FrameMode::Overlay);
+        let ssaa_on = post_settings.ssaa > 1;
+        // TAAU 自己就是时间性的抗锯齿：开着它时内置 TAA 让位，抖动和运动向量照要。
+        let taau = screen && !ssaa_on && self.taau_active(&post_settings);
+        let taa = screen && post_settings.anti_alias == AntiAlias::Taa && !ssaa_on && !taau;
+        let mut needs = if screen {
+            effects.required_inputs()
+        } else {
+            PostInputs::NONE
+        };
+        if taau {
+            needs |= PostInputs::VELOCITY | PostInputs::JITTER;
+        }
+        if taa {
+            needs |= self.builtin_taa.required_inputs();
+        }
+        if screen && post_settings.bloom_mask.is_some() && post_settings.bloom_intensity > 0.0 {
+            needs |= PostInputs::MASK;
+        }
+        let velocity_needed = needs.contains(PostInputs::VELOCITY);
+        let mask_needed = needs.contains(PostInputs::MASK);
 
         let view = camera_to_world.inverse();
         let camera_position = camera_to_world.to_scale_rotation_translation().2;
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-        let projection = camera.projection_matrix(aspect);
+        let clean_projection = camera.projection_matrix(aspect);
+
+        // ── 亚像素抖动 ──
+        //
+        // 超采样：第 i 遍挪到 Halton 序列的第 i 个点。TAA：按帧号挪，
+        // 八帧一圈。挪的方式是在投影**之后**平移 NDC——对透视和正交都成立，
+        // 不必管投影矩阵的具体形状。
+        let jitter_pixels = match mode {
+            FrameMode::SsaaSample { index, .. }
+            | FrameMode::Screen {
+                ssaa: Some((index, _)),
+            } => Vec2::new(halton(index + 1, 2) - 0.5, halton(index + 1, 3) - 0.5),
+            FrameMode::Screen { ssaa: None } if taa || needs.contains(PostInputs::JITTER) => {
+                let index = (self.frame_index % 8) as u32 + 1;
+                Vec2::new(halton(index, 2) - 0.5, halton(index, 3) - 0.5)
+            }
+            _ => Vec2::ZERO,
+        };
+        let jitter = Vec2::new(
+            2.0 * jitter_pixels.x / self.config.width.max(1) as f32,
+            2.0 * jitter_pixels.y / self.config.height.max(1) as f32,
+        );
+        let projection =
+            Mat4::from_translation(Vec3::new(jitter.x, jitter.y, 0.0)) * clean_projection;
         let view_proj = projection * view;
-
-        // 收集光源，超出容量的部分丢弃并告警。
-        //
-        // 投射阴影的光源必须占据 index 0——着色器只对首个光源做阴影判定，
-        // 顺序错了会导致阴影套在错误的光源上。
-        // 光源分成两段：**前面是全局光**（方向光、半球光——没有位置也没有
-        // 范围，照亮一切），**后面是可聚簇的**（点光源、聚光灯）。
-        //
-        // 分段是聚簇的前提：全局光塞进簇里等于每个簇都有它们，白白占名单。
-        // 着色器无条件遍历前一段，按簇遍历后一段。
-        //
-        // 投射阴影的那盏必须占据 index 0——着色器只对首个光源做阴影判定。
-        let shadow_caster = scene.shadow_caster();
-        let mut global_lights: Vec<GpuLight> = Vec::new();
-        let mut clustered_lights: Vec<GpuLight> = Vec::new();
-        let mut cluster_spheres: Vec<klight::cluster::ClusterLight> = Vec::new();
-
-        if let Some((light, transform)) = shadow_caster {
-            global_lights.push(light.to_gpu(transform));
-        }
-
-        let mut caster_skipped = false;
-        let mut overflowed = false;
-        for (light, transform) in scene.visible_lights() {
-            // 跳过已放在首位的那一盏；后续同样标记了投影的光源按普通光源处理。
-            if light.cast_shadows && shadow_caster.is_some() && !caster_skipped {
-                caster_skipped = true;
-                continue;
+        // 不带抖动的那份：运动向量、阴影级联都用它。级联跟着抖动一起挪的话，
+        // 阴影边缘会跟着每帧闪。
+        let clip_view_proj = clean_projection * view;
+        let prev_view_proj = match mode {
+            FrameMode::Screen { .. } | FrameMode::SsaaSample { .. } => {
+                self.prev_view_proj.unwrap_or(clip_view_proj)
             }
-            if global_lights.len() + clustered_lights.len() >= MAX_LIGHTS {
-                overflowed = true;
-                break;
-            }
+            _ => clip_view_proj,
+        };
 
-            let gpu = light.to_gpu(transform);
-            match light.kind {
-                klight::LightKind::Directional | klight::LightKind::Hemisphere { .. } => {
-                    global_lights.push(gpu)
-                }
-                _ => {
-                    cluster_spheres.push(klight::cluster::ClusterLight {
-                        position: transform.w_axis.truncate(),
-                        radius: light.kind.range(),
-                    });
-                    clustered_lights.push(gpu);
-                }
-            }
-        }
-        if overflowed {
-            klog::once!(klog::warn!("场景光源超过上限 {MAX_LIGHTS}，多余的已被忽略"));
-        }
-
-        // 全局光排在前面，可聚簇的接在后面。簇名单里存的是**后一段里的下标**，
-        // 着色器取用时要加上全局段的长度。
-        let global_count = global_lights.len();
-        let mut lights = global_lights;
-        lights.extend_from_slice(&clustered_lights);
+        let FrameLights {
+            lights,
+            global_count,
+            cluster_spheres,
+            local_faces,
+            shadow_caster,
+        } = self.gather_lights(scene, camera_position);
         let light_count = lights.len();
 
-        // ── cookie 图集 ──
-        //
-        // 换了才重传。图集是长期资源，每帧重传一张多层纹理是实打实的浪费。
-        // 换了之后 group(3) 要重建——旧的绑定组还指着已经没人用的那块显存。
-        let atlas_id = scene.cookie_atlas().map(ktexture::Texture::id);
-        if atlas_id != self.cookie_id {
-            self.cookie = scene
-                .cookie_atlas()
-                .map(|texture| upload_texture(&self.device, &self.queue, texture));
-            self.cookie_id = atlas_id;
-            self.rebuild_scene_bind_groups();
-        }
+        self.sync_environment(scene);
 
-        // ── HDR 环境图 ──
-        // 只在版本号变了时重传：一条 256×128 的 mip 链是几兆的浮点数据，
-        // 每帧重传纯属浪费，而它只在换环境图时才变。
-        if scene.environment_version() != self.environment_version {
-            self.environment_version = scene.environment_version();
-            let probe_levels: Vec<&[kpbr::prefilter::PrefilteredLevel]> = scene
-                .reflection_probes()
-                .iter()
-                .map(|entry| entry.levels.as_slice())
-                .collect();
-            let uploaded = scene.prefiltered_environment().and_then(|levels| {
-                upload_prefiltered_environment(&self.device, &self.queue, levels, &probe_levels)
-                    .map(|view| (view, levels.len()))
-            });
-
-            let (view, mips) = match uploaded {
-                Some((view, mips)) => (view, mips),
-                // 换回程序化天空：绑占位图，着色器靠 `ibl_params.x == 0`
-                // 跳过采样。
-                None => (create_placeholder_environment(&self.device), 0),
-            };
-            self.environment_mips = mips;
-            self.environment_view = view.clone();
-            self.rebuild_scene_bind_groups();
-            // 天空 pass 也要跟着换：不换的话反射来自新 HDR、
-            // 天上还是旧的那张，两者对不上。
-            self.sky_bind_group =
-                create_sky_bind_group(&self.device, &self.sky_layout, &self.sky_buffer, &view);
-        }
-
+        section.next("阴影准备");
         // ── 级联阴影 ──
         // 把视锥按距离切段，每段一张阴影图。近处那段覆盖的世界范围小，
         // 同样分辨率下纹素密度高一个数量级。
-        let cascades = match shadow_caster {
-            Some((light, transform)) => klight::cascade::compute(
-                view_proj,
-                light.direction(transform),
-                scene.visible_bounds(),
-                self.shadow.cascades,
-            ),
-            None => Vec::new(),
-        };
+        //
+        // 点光和聚光不走级联：它们有位置，影子是**透视**的。点光画立方体的
+        // 六个面，聚光画一张。原来这里不分类型一律按方向光算，点光的影子
+        // 就成了「从它的 −Z 轴方向打来的平行光的影子」。
+        let (cascades, shadow_kind) = primary_shadow_faces(
+            shadow_caster,
+            clip_view_proj,
+            scene.visible_bounds(),
+            self.shadow.cascades,
+        );
 
         let mut light_view_proj =
-            [Mat4::IDENTITY.to_cols_array_2d(); klight::cascade::MAX_CASCADES];
+            [Mat4::IDENTITY.to_cols_array_2d(); klight::cascade::MAX_SHADOW_LAYERS];
         // 切分距离交给着色器选级联。用不满的级填一个极大值，
         // 免得着色器选到没渲染过的层——那是一片未初始化的噪点。
         let mut cascade_splits = [f32::MAX; 4];
-        for (index, cascade) in cascades.iter().enumerate() {
+        for (index, cascade) in cascades
+            .iter()
+            .take(klight::cascade::MAX_SHADOW_LAYERS)
+            .enumerate()
+        {
             light_view_proj[index] = cascade.matrix.to_cols_array_2d();
-            if index < 3 {
+            if index < 3 && shadow_kind == klight::cascade::ShadowKind::Cascades {
                 cascade_splits[index] = cascade.far;
             }
         }
         cascade_splits[3] = cascades.len() as f32;
+        section.next("聚簇");
         // ── 聚簇：分配 + 上传 ──
         //
         // 正交相机下深度切片的公式（按 z 取对数）不成立，直接退回
@@ -2582,7 +3715,7 @@ impl Renderer {
                 ibl_params: [self.environment_mips as f32, 0.0, 0.0, 0.0],
                 depth_params: [projection.z_axis.z, projection.w_axis.z, 0.0, 0.0],
                 frame_params: [
-                    self.started.elapsed().as_secs_f32(),
+                    shader_time,
                     frame_delta,
                     self.config.width.max(1) as f32,
                     self.config.height.max(1) as f32,
@@ -2591,7 +3724,11 @@ impl Renderer {
                     settings.depth_bias,
                     settings.normal_bias,
                     settings.resolution.max(256) as f32,
-                    if shadow_enabled { 1.0 } else { 0.0 },
+                    if shadow_enabled {
+                        shadow_kind as u32 as f32
+                    } else {
+                        0.0
+                    },
                 ],
                 cluster_grid: [
                     self.clusters.grid.tiles_x,
@@ -2607,10 +3744,14 @@ impl Renderer {
                     1.0 / (self.clusters.grid.far / self.clusters.grid.near).ln(),
                     0.0,
                 ],
+                clip_view_proj: clip_view_proj.to_cols_array_2d(),
+                prev_view_proj: prev_view_proj.to_cols_array_2d(),
+                jitter: [jitter.x, jitter.y, self.prev_jitter[0], self.prev_jitter[1]],
                 environment: scene.environment().to_gpu(),
             }]),
         );
 
+        section.next("剔除");
         // ── 剔除 ──
         // 视锥来自本帧的视图投影矩阵；实际判定由场景图的 BVH 完成，
         // 对象多时它还会自动切到并行分片。
@@ -2619,302 +3760,94 @@ impl Renderer {
             .frustum_culling
             .then(|| Frustum::from_view_projection(view_proj));
 
-        let visible: Vec<_> = match &frustum {
-            Some(frustum) => scene.cull(frustum),
-            None => scene.visible_meshes().collect(),
-        };
+        // 绘制项借着场景，存不进 `self`——存的是一块空的分配，每帧换个生命周期接着用。
+        // 两万个可见物体时这块有三四兆，每帧重新要的话光缺页就是半毫秒。
+        let mut visible = recycle_items(std::mem::take(&mut self.visible_scratch));
+        match &frustum {
+            Some(frustum) => scene.cull_into(frustum, &mut self.cull_indices, &mut visible),
+            None => visible.extend(scene.visible_meshes()),
+        }
         let cull_micros = prepare_start.elapsed().as_micros() as u32;
 
         let mut stats = RenderStats {
             drawn: visible.len() as u32,
             culled: (scene.drawable_count() - visible.len()) as u32,
             cull_micros,
+            gpu_meshes: self.meshes.len() as u32,
+            gpu_textures: self.gpu_textures.len() as u32,
             ..RenderStats::default()
         };
 
-        // 收集绘制项，顺便把没上传过的网格与贴图传到显存。
-        // 标准材质建一次就够：它内部是带 String 键的哈希表，
-        // 放在循环里等于每个对象都重新分配一遍。
-        let default_material = Material::standard();
-        // 探针参数拿出来一份：`select` 要一个连续切片，而场景里
-        // 存的是带像素的条目。
-        let probe_params: Vec<kpbr::probe::ReflectionProbe> = scene
-            .reflection_probes()
-            .iter()
-            .map(|entry| entry.probe)
-            .collect();
-        let mut draws = Vec::with_capacity(visible.len());
-        // 半透明的单独收：它们要按距离排序，混不进不透明的批次里。
-        let mut transparent_draws: Vec<DrawCall> = Vec::new();
-        // 所有蒙皮实例的骨骼矩阵拼进同一个数组，各实例记下自己的起点。
-        let mut joints = std::mem::take(&mut self.joint_scratch);
-        joints.clear();
-        let mut morph_weights = std::mem::take(&mut self.morph_weight_scratch);
-        morph_weights.clear();
-        for item in visible {
-            stats.triangles += item.mesh.triangle_count() as u32;
+        let CollectedDraws {
+            draws,
+            mut transparent_draws,
+            mask_draws,
+            joints,
+            morph_weights,
+            drawn,
+            triangles,
+            instance_lists,
+        } = self.collect_draws(
+            scene,
+            &mut visible,
+            camera_layers,
+            camera_position,
+            mask_needed,
+            velocity_needed,
+        );
+        stats.drawn = drawn;
+        stats.triangles = triangles;
 
-            let mesh = item.mesh;
-            // 显存里那份是不是这一版。版本对不上说明顶点被改过
-            // （顶点动画每帧都会），要么原地覆写、要么重建。
-            let stale = self
-                .meshes
-                .get(&mesh.id())
-                .is_some_and(|gpu| gpu.version != mesh.version());
-            if stale {
-                self.refresh_mesh(mesh);
-            }
-
-            if !self.meshes.contains_key(&mesh.id()) {
-                // 形变增量是随网格一次性上传的静态数据，追加到全局缓冲末尾。
-                let (morph_offset, morph_count) = self.upload_morph_targets(mesh);
-                let gpu_mesh = GpuMesh {
-                    vertex_buffer: self.device.create_buffer_init(
-                        &wgpu::util::BufferInitDescriptor {
-                            label: Some("kengine vertex buffer"),
-                            contents: bytemuck::cast_slice(mesh.vertices()),
-                            // COPY_DST 是给顶点动画留的：几何改了之后
-                            // `refresh_mesh` 要原地覆写这块缓冲，而不是
-                            // 每帧重新分配一个。不带这个标志 wgpu 会拒绝
-                            // `write_buffer`。
-                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                        },
-                    ),
-                    // 蒙皮属性单独一路顶点缓冲，静态网格没有这一路。
-                    skin_buffer: mesh.skin().map(|skin| {
-                        self.device
-                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("kengine skin buffer"),
-                                contents: bytemuck::cast_slice(skin),
-                                usage: wgpu::BufferUsages::VERTEX,
-                            })
-                    }),
-                    index_buffer: self.device.create_buffer_init(
-                        &wgpu::util::BufferInitDescriptor {
-                            label: Some("kengine index buffer"),
-                            contents: bytemuck::cast_slice(mesh.indices()),
-                            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                        },
-                    ),
-                    index_count: mesh.index_count(),
-                    version: mesh.version(),
-                    morph_offset,
-                    morph_count,
-                };
-                self.meshes.insert(mesh.id(), gpu_mesh);
-            }
-
-            let material = item.material.unwrap_or(&default_material);
-            let texture_key = self.ensure_material_textures(material);
-            let shader_id = self.ensure_material_pipelines(material);
-
-            // 形变权重逐实例写进权重缓冲：同一个网格的两个实例可以有不同的表情。
-            let morph = self
-                .meshes
-                .get(&mesh.id())
-                .map(|gpu| (gpu.morph_offset, gpu.morph_count))
-                .unwrap_or((0, 0));
-            let weight_offset = morph_weights.len() as u32;
-            if morph.1 > 0 {
-                morph_weights.extend(
-                    (0..morph.1 as usize)
-                        .map(|index| item.morph_weights.get(index).copied().unwrap_or(0.0)),
-                );
-            }
-
-            // 只有网格自己也带蒙皮属性时才走蒙皮管线：
-            // 骨架挂在没有蒙皮顶点的网格上是导入出的错，按静态画至少不会崩。
-            let skin_offset = match item.skin.filter(|_| mesh.is_skinned()) {
-                Some(matrices) => {
-                    let offset = joints.len() as u32;
-                    joints.extend(matrices.iter().map(|m| m.to_cols_array_2d()));
-                    Some(offset)
-                }
-                None => None,
-            };
-
-            // 逐对象选探针，用包围盒中心。横跨两个房间的大物体只能
-            // 用一个探针——前向渲染的常规取舍，办法是把大物体拆开。
-            let (primary, secondary, blend_weight) =
-                kpbr::probe::select_blend(&probe_params, item.aabb.center());
-            let (probe_position, probe_min, probe_max) = match primary {
-                Some(index) => {
-                    let probe = &probe_params[index];
-                    (
-                        // 层号 +1：第 0 层是全局环境。
-                        probe.position.extend((index + 1) as f32).to_array(),
-                        probe
-                            .bounds
-                            .min
-                            .extend(if probe.parallax { 1.0 } else { 0.0 })
-                            .to_array(),
-                        probe.bounds.max.extend(probe.intensity).to_array(),
-                    )
-                }
-                // 没探针管它：层号 0（全局环境）、不做视差、强度 1。
-                None => ([0.0; 4], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
-            };
-            // 过渡的那一半：次探针是罩住同一个点、盒子次小的那个；
-            // 没有就是全局环境（层 0，强度 1）。
-            let probe_blend = match (primary, secondary) {
-                // 压根没进任何探针，无处可过渡。
-                (None, _) => [0.0; 4],
-                (Some(_), Some(index)) => [
-                    (index + 1) as f32,
-                    blend_weight,
-                    probe_params[index].intensity,
-                    0.0,
-                ],
-                (Some(_), None) => [0.0, blend_weight, 1.0, 0.0],
-            };
-
-            let model = item.transform;
-            // 用包围盒中心而不是变换的平移：蒙皮网格的变换是单位阵，
-            // 拿平移排序的话所有角色都会被当成在原点。
-            let depth = (item.aabb.center() - camera_position).length_squared();
-            let target = if material.blend_mode() == kmaterial::BlendMode::Alpha {
-                &mut transparent_draws
-            } else {
-                &mut draws
-            };
-            target.push(DrawCall {
-                mesh_id: mesh.id(),
-                shader_id,
-                texture_key,
-                skinned: skin_offset.is_some(),
-                double_sided: material.double_sided(),
-                depth,
-                aabb: item.aabb,
-                // 没有子网格材质组时画整份网格——用 `mesh.index_count()`
-                // 而不是缓存里的 `gpu.index_count`：两者理应相等，但网格
-                // 缓存刚好在上面才建好或刷新过，直接用来源数据更直接。
-                index_range: item.index_range.unwrap_or((0, mesh.index_count())),
-                uniforms: ObjectUniforms {
-                    model: model.to_cols_array_2d(),
-                    // 逆转置，保证非均匀缩放下法线方向仍然正确。
-                    normal_matrix: model.inverse().transpose().to_cols_array_2d(),
-                    base_color: material.base_color().to_array(),
-                    metallic: material.metallic(),
-                    roughness: material.roughness(),
-                    // 没挂法线贴图时置 0，着色器据此完全跳过切线空间计算。
-                    normal_scale: if material.get(kpbr::standard::NORMAL_TEXTURE).is_some() {
-                        material.get("normal_scale").and_then(kmaterial::MaterialValue::as_float).unwrap_or(1.0)
-                    } else {
-                        0.0
-                    },
-                    occlusion_strength: material
-                        .get(kpbr::standard::OCCLUSION)
-                        .and_then(kmaterial::MaterialValue::as_float)
-                        .unwrap_or(1.0),
-                    emissive: material
-                        .get(kpbr::standard::EMISSIVE)
-                        .and_then(kmaterial::MaterialValue::as_vec3)
-                        .unwrap_or(Vec3::ZERO)
-                        .extend(0.0)
-                        .to_array(),
-                    skin: [skin_offset.unwrap_or(0), morph.0, morph.1, weight_offset],
-                    flags: [item.light_mask, 0, 0, 0],
-                    uv_transform: uv_transform_of(material),
-                    probe_position,
-                    probe_blend,
-                    probe_min,
-                    probe_max,
-                    params: custom_params_of(material),
-                },
-            });
-        }
-
+        section.next("合批");
         // ── 批处理：同网格同贴图的对象合并成一次绘制 ──
-        let mut instances = Vec::new();
-        // 和 `instances` 一一对齐的包围盒，阴影逐级剔除按实例下标回查它。
-        let mut instance_bounds = Vec::new();
-        let batches = build_batches(&draws, &mut instances, &mut instance_bounds);
+        // 对象数据每个绘制项一份，槽每个 GPU 实例一个（实例化节点一个绘制项 N 个槽）。
+        let mut frame_instances = FrameInstances::new(instance_lists);
+        let batches = build_batches(&draws, &mut frame_instances);
         // 半透明的批次接在不透明的后面，共用同一个实例数组——
         // 实例下标是全局的，两边分开建数组的话下标会撞。
         let transparent_batches =
-            build_transparent_batches(&mut transparent_draws, &mut instances, &mut instance_bounds);
-        stats.draw_calls = (batches.len() + transparent_batches.len()) as u32;
-        let total_draws = draws.len() + transparent_draws.len();
-
-        // 骨骼矩阵超出容量时翻倍。它排在对象缓冲之前，
-        // 因为对象绑定组引用了骨骼缓冲，换了缓冲就得重建绑定组。
-        let joint_grew = joints.len() as u64 > self.joint_capacity;
-        if joint_grew {
-            let capacity = (joints.len() as u64).next_power_of_two();
-            self.joint_buffer = create_joint_storage(&self.device, capacity);
-            self.joint_capacity = capacity;
-        }
-
-        // 对象数超出缓冲容量时翻倍扩容。
-        if total_draws as u64 > self.object_capacity {
-            let capacity = (total_draws as u64).next_power_of_two();
-            let (buffer, bind_group) = Self::create_object_storage(
-                &self.device,
-                &self.object_layout,
-                capacity,
-                &self.joint_buffer,
-                &self.morph_buffer,
-                &self.morph_weight_buffer,
-            );
-            self.object_buffer = buffer;
-            self.object_bind_group = bind_group;
-            self.object_capacity = capacity;
-        } else if joint_grew {
-            // 对象缓冲没换但骨骼缓冲换了，绑定组仍然指着旧的，得重建。
-            self.object_bind_group = create_object_bind_group(
-                &self.device,
-                &self.object_layout,
-                &self.object_buffer,
-                &self.joint_buffer,
-                &self.morph_buffer,
-                &self.morph_weight_buffer,
-            );
-        }
-
-        if !joints.is_empty() {
-            self.queue
-                .write_buffer(&self.joint_buffer, 0, bytemuck::cast_slice(&joints));
-        }
-
-        // 形变权重每帧重写；缓冲不够就翻倍，并重建引用它的绑定组。
-        if morph_weights.len() as u64 > self.morph_weight_capacity {
-            let capacity = (morph_weights.len() as u64).next_power_of_two();
-            self.morph_weight_buffer = create_morph_weight_storage(&self.device, capacity);
-            self.morph_weight_capacity = capacity;
-            self.object_bind_group = create_object_bind_group(
-                &self.device,
-                &self.object_layout,
-                &self.object_buffer,
-                &self.joint_buffer,
-                &self.morph_buffer,
-                &self.morph_weight_buffer,
-            );
-        }
-        if !morph_weights.is_empty() {
-            self.queue.write_buffer(
-                &self.morph_weight_buffer,
-                0,
-                bytemuck::cast_slice(&morph_weights),
-            );
-        }
-
-        // 一次写完整个数组。逐对象写在上万实例时，光是写入调用本身就很可观。
-        if !instances.is_empty() {
-            self.queue
-                .write_buffer(&self.object_buffer, 0, bytemuck::cast_slice(&instances));
-        }
+            build_transparent_batches(&mut transparent_draws, &mut frame_instances);
+        // 遮罩的实例接在最后。不重排——遮罩 pass 只关心画没画上，不在乎顺序。
+        let mask_batches = if mask_needed {
+            build_batches_into(&mask_draws, &mut frame_instances, false)
+        } else {
+            Vec::new()
+        };
+        stats.draw_calls = (batches.len() + transparent_batches.len() + mask_batches.len()) as u32;
+        self.upload_frame_buffers(&joints, &morph_weights, &frame_instances);
 
         self.queue.write_buffer(
             &self.sky_buffer,
             0,
             bytemuck::cast_slice(&[SkyGlobals {
                 inverse_view_proj: view_proj.inverse().to_cols_array_2d(),
-                ibl_params: [self.environment_mips as f32, 0.0, 0.0, 0.0],
+                ibl_params: [
+                    self.environment_mips as f32,
+                    scene.background_intensity().unwrap_or(-1.0),
+                    scene.background_blurriness(),
+                    0.0,
+                ],
                 camera_position: camera_position.extend(1.0).to_array(),
+                background: camera
+                    .background
+                    .or(scene.background())
+                    .map_or([0.0; 4], |color| {
+                        // 纯色背景是「屏幕上就是这个颜色」：反算色调映射和曝光，
+                        // 过完后处理正好落回原色。环境捕获不过色调映射，原样用。
+                        if matches!(mode, FrameMode::Capture(_)) {
+                            return color.extend(1.0).to_array();
+                        }
+                        let exposure = post_settings.exposure.max(1e-6);
+                        let hdr = post_settings.tone_mapping.invert(color.to_array());
+                        [hdr[0] / exposure, hdr[1] / exposure, hdr[2] / exposure, 1.0]
+                    }),
                 environment: scene.environment().to_gpu(),
             }]),
         );
 
+        self.visible_scratch = recycle_items(visible);
+
+        section.next("粒子");
         // ── 粒子：收集、排序、上传 ──
         // 半透明，所以既不进 BVH 也不参与批处理，单独走一条路。
         let particle_items = scene.visible_particles(frustum.as_ref());
@@ -2927,7 +3860,7 @@ impl Renderer {
             particle::ParticleCamera {
                 view_proj,
                 camera_to_world,
-                projection: camera.projection_matrix(aspect),
+                projection,
             },
             &mut scratch,
         );
@@ -2937,6 +3870,7 @@ impl Renderer {
         stats.draw_calls += particle_batches.len() as u32;
         self.particle_scratch = scratch;
 
+        section.next("精灵");
         // ── 2D 精灵：排序、合批、上传 ──
         // 先把新登记的贴图传上去。`upload` 内部会跳过已经见过的，
         // 所以每帧扫一遍很便宜。
@@ -2959,6 +3893,7 @@ impl Renderer {
         stats.draw_calls += sprite_batches.len() as u32;
         self.sprite_scratch = sprite_scratch;
 
+        section.next("UI 上传");
         // ── UI：几何与图集 ──
         // 图集只在版本号变了之后才重传：1024² 展开成 RGBA 是 4 MB，
         // 而绝大多数帧里图集是不动的。
@@ -2988,9 +3923,12 @@ impl Renderer {
             .prepare(&self.device, &self.queue, scene.gizmos(), view_proj);
         stats.gizmo_vertices = scene.gizmos().len() as u32;
         // 常驻线段（`kgizmo::LineSet`）：顶点只在第一次见到时上传。
-        let line_draws = self
-            .gizmos
-            .prepare_retained(&self.device, &self.queue, scene.visible_lines(), view_proj);
+        let line_draws = self.gizmos.prepare_retained(
+            &self.device,
+            &self.queue,
+            scene.visible_lines(),
+            view_proj,
+        );
         stats.draw_calls += line_draws.len() as u32;
 
         // 统计在取交换链纹理之前定格：那一步会因垂直同步而阻塞，
@@ -3005,10 +3943,10 @@ impl Renderer {
         // 捕获时压根不碰交换链：那张纹理是给窗口的，而捕获的结果
         // 要拷回内存。顺带也就不会因为窗口最小化（`Occluded`）
         // 而跳过一次捕获——捕获是加载期的一次性操作，跳过就没了。
-        let output = if capture.is_some() {
+        let output = if !screen {
             None
-        } else {
-            match self.surface.get_current_texture() {
+        } else if let Some(surface) = &self.surface {
+            match surface.get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(t)
                 | wgpu::CurrentSurfaceTexture::Suboptimal(t) => Some(t),
                 wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
@@ -3019,337 +3957,113 @@ impl Renderer {
                 }
                 wgpu::CurrentSurfaceTexture::Validation => return RenderOutcome::Fatal,
             }
+        } else {
+            None
         };
-        let surface_view = output.as_ref().map(|output| {
-            output
-                .texture
-                .create_view(&wgpu::TextureViewDescriptor::default())
-        });
-        // 主 pass 与天空都画到 HDR 离屏目标，后处理链再输出到屏幕。
-        let target = self.post.hdr_target();
+        // 无头时屏幕帧画到离屏纹理上。
+        let screen_texture = match &output {
+            Some(output) => Some(&output.texture),
+            None if screen => self.offscreen.as_ref(),
+            None => None,
+        };
+        let surface_view = screen_texture
+            .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
+        let screen_texture = screen_texture.cloned();
 
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("kengine encoder"),
             });
+        section.next("编码命令");
+        // GPU 分段只记屏幕帧：离屏视图、捕获、超采样的前几遍各有自己的提交，混进来就对不上了。
+        let gpu_timing = screen && klog::profile::is_enabled() && self.gpu_timer.is_some();
+        if gpu_timing && let Some(timer) = self.gpu_timer.as_mut() {
+            // 让上几帧的映射回调有机会跑。
+            let _ = self.device.poll(wgpu::PollType::Poll);
+            timer.begin_frame();
+            timer.mark(&mut encoder, "阴影");
+        }
 
         // ── 阴影深度 pass ──
         // 从光源视角把所有可见物体画一遍，只写深度。
         if shadow_enabled {
-            // 深度 pass 有自己的一份骨骼矩阵缓冲：它与主 pass 分属不同的绑定组布局，
-            // 共用一个缓冲反而要多传一层引用。数据是同一份，写两遍。
-            let shadow_joints_grew = joint_count as u64 > self.shadow.joint_capacity;
-            if shadow_joints_grew {
-                let capacity = (joint_count as u64).next_power_of_two();
-                self.shadow.joint_buffer = create_joint_storage(&self.device, capacity);
-                self.shadow.joint_capacity = capacity;
-            }
-            // 深度 pass 有自己的一份形变权重缓冲，数据同主 pass。
-            let shadow_weights_grew = morph_weight_count as u64 > self.shadow.morph_weight_capacity;
-            if shadow_weights_grew {
-                let capacity = (morph_weight_count as u64).next_power_of_two();
-                self.shadow.morph_weight_buffer =
-                    create_morph_weight_storage(&self.device, capacity);
-                self.shadow.morph_weight_capacity = capacity;
-            }
-            // 形变增量是静态数据，主 pass 那边可能已经扩过容，这里跟上。
-            let shadow_morph_stale = self.shadow.morph_capacity != self.morph_capacity;
-            if shadow_morph_stale {
-                self.shadow.morph_buffer = create_morph_storage(&self.device, self.morph_capacity);
-                self.shadow.morph_capacity = self.morph_capacity;
-            }
-
-            if draws.len() as u64 > self.shadow.object_capacity
-                || shadow_joints_grew
-                || shadow_weights_grew
-                || shadow_morph_stale
-            {
-                let capacity = (draws.len() as u64)
-                    .next_power_of_two()
-                    .max(self.shadow.object_capacity);
-                let (buffer, bind_group) = create_shadow_object_storage(
-                    &self.device,
-                    &self.shadow.object_layout,
-                    capacity,
-                    &self.shadow.joint_buffer,
-                    &self.shadow.morph_buffer,
-                    &self.shadow.morph_weight_buffer,
-                );
-                self.shadow.object_buffer = buffer;
-                self.shadow.object_bind_group = bind_group;
-                self.shadow.object_capacity = capacity;
-            }
-            if joint_count > 0 {
-                self.queue.write_buffer(
-                    &self.shadow.joint_buffer,
-                    0,
-                    bytemuck::cast_slice(&self.joint_scratch),
-                );
-            }
-            if morph_weight_count > 0 {
-                self.queue.write_buffer(
-                    &self.shadow.morph_weight_buffer,
-                    0,
-                    bytemuck::cast_slice(&self.morph_weight_scratch),
-                );
-            }
-            // 形变增量只在网格新上传时变，用一次拷贝把主 pass 的那份同步过来。
-            if self.morph_used > 0 {
-                encoder.copy_buffer_to_buffer(
-                    &self.morph_buffer,
-                    0,
-                    &self.shadow.morph_buffer,
-                    0,
-                    self.morph_used * size_of::<MorphDelta>() as u64,
-                );
-            }
-
-            // 深度 pass 只要模型矩阵，实例顺序与主 pass 完全一致。
-            let shadow_objects: Vec<ShadowObject> = instances
+            // 半透明的批次也进阴影 pass：没开 `blended_shadows` 的包围盒是空的，逐级剔除时就丢了。
+            let shadow_batches: Vec<Batch> = batches
                 .iter()
-                .map(|instance| ShadowObject {
-                    model: instance.model,
-                    skin: instance.skin,
-                })
+                .chain(transparent_batches.iter())
+                .copied()
                 .collect();
-            if !shadow_objects.is_empty() {
-                self.queue.write_buffer(
-                    &self.shadow.object_buffer,
-                    0,
-                    bytemuck::cast_slice(&shadow_objects),
-                );
-            }
-
-            // 每级级联跑一遍：一次 render pass 只能挂一层当深度附件。
-            //
-            // 这曾经是级联最主要的代价——N 级就是 N 次**完整**的场景遍历。
-            // 现在每级先剔一遍：范围外的不画，投影小于两个纹素的也不画
-            // （小物件在几百米外投的影子还不到一个像素）。
-            // 所有级联的全局量**一次写完**，各占一段。
-            //
-            // 见 `has_dynamic_offset` 那里的注释：分开写会被 wgpu 的
-            // 写入时序合并成最后一次。
-            {
-                let mut blob = vec![0u8; SHADOW_GLOBALS_STRIDE as usize * cascades.len().max(1)];
-                for (index, cascade) in cascades.iter().enumerate() {
-                    let globals = ShadowGlobals {
-                        light_view_proj: cascade.matrix.to_cols_array_2d(),
-                        params: [
-                            settings.depth_bias,
-                            settings.normal_bias,
-                            settings.resolution.max(256) as f32,
-                            1.0,
-                        ],
-                    };
-                    let start = index * SHADOW_GLOBALS_STRIDE as usize;
-                    blob[start..start + size_of::<ShadowGlobals>()]
-                        .copy_from_slice(bytemuck::bytes_of(&globals));
-                }
-                self.queue
-                    .write_buffer(&self.shadow.globals_buffer, 0, &blob);
-            }
-
-            for (index, cascade) in cascades.iter().enumerate() {
-                let cascade_batches = cascade_batches(
-                    &batches,
-                    &instance_bounds,
-                    cascade.matrix,
-                    settings.resolution.max(256),
-                    settings.min_shadow_texels,
-                );
-                // 写 `self.stats` 而不是本地的 `stats`：后者在阴影 pass
-                // 之前就已经定格并搬进 self 了，改它不会被任何人读到。
-                self.stats.shadow_draw_calls += cascade_batches.len() as u32;
-
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("kengine shadow pass"),
-                    color_attachments: &[],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.shadow.layer_views[index],
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-
-                // 动态偏移选中本级那一段。
-                pass.set_bind_group(
-                    0,
-                    &self.shadow.globals_bind_group,
-                    &[index as u32 * SHADOW_GLOBALS_STRIDE as u32],
-                );
-                pass.set_bind_group(1, &self.shadow.object_bind_group, &[]);
-
-                // 深度 pass 与贴图无关，本可以按网格合并得更狠，
-                // 但沿用主 pass 的分批能保证两边的实例下标一一对应。
-                let mut current_skinned = None;
-                for batch in &cascade_batches {
-                    let Some(gpu_mesh) = self.meshes.get(&batch.mesh_id) else {
-                        continue;
-                    };
-                    // 批次已按蒙皮与否排过序，管线最多切换一次。
-                    if current_skinned != Some(batch.skinned) {
-                        pass.set_pipeline(if batch.skinned {
-                            &self.shadow.skinned_pipeline
-                        } else {
-                            &self.shadow.pipeline
-                        });
-                        current_skinned = Some(batch.skinned);
-                    }
-
-                    pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
-                    if batch.skinned {
-                        let Some(skin) = gpu_mesh.skin_buffer.as_ref() else {
-                            continue;
-                        };
-                        pass.set_vertex_buffer(1, skin.slice(..));
-                    }
-                    pass.set_index_buffer(
-                        gpu_mesh.index_buffer.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
-                    pass.draw_indexed(
-                        batch.index_range.0..batch.index_range.0 + batch.index_range.1,
-                        0,
-                        batch.first..batch.first + batch.count,
-                    );
-                }
-            }
+            self.encode_shadow_pass(
+                &mut encoder,
+                passes::ShadowInputs {
+                    batches: &shadow_batches,
+                    objects: &frame_instances.objects,
+                    slots: &frame_instances.slots,
+                    instance_bounds: &frame_instances.bounds,
+                    cascades: &cascades,
+                    local_faces: &local_faces,
+                    // 阴影对象和对象数据一一对应（不透明 + 半透明 + 遮罩），实例化靠槽再展开。
+                    draw_count: frame_instances.objects.len(),
+                    joint_count,
+                    morph_weight_count,
+                    time: shader_time,
+                },
+            );
         }
 
-        // ── 深度／法线预通道 + SSAO ──
+        // 0 号光源（阴影投射者）：接触阴影朝它走，后处理的体积光也要它。
+        // xyz = 指向光源的方向（w = 0）或光源位置（w = 1）；半球光没有方向，给 None。
+        let first_light = lights.first().copied().and_then(|light| {
+            let kind = light.position[3];
+            let color = [
+                light.color[0] * light.color[3],
+                light.color[1] * light.color[3],
+                light.color[2] * light.color[3],
+                1.0,
+            ];
+            if kind == 0.0 {
+                Some((
+                    [
+                        -light.direction[0],
+                        -light.direction[1],
+                        -light.direction[2],
+                        0.0,
+                    ],
+                    color,
+                ))
+            } else if kind == 3.0 {
+                None
+            } else {
+                Some((
+                    [light.position[0], light.position[1], light.position[2], 1.0],
+                    color,
+                ))
+            }
+        });
+
+        if gpu_timing && let Some(timer) = self.gpu_timer.as_mut() {
+            timer.mark(&mut encoder, "预通道");
+        }
+        // ── 深度／法线预通道 + SSAO + 接触阴影 ──
         //
         // 必须排在主 pass **之前**：主 pass 要采那张遮蔽图。
-        // 关着 SSAO 时这一整段不跑，主 pass 绑的是 1×1 白图（乘 1）。
-        if self.ssao.settings.enabled {
-            {
-                let mut pass = self.ssao.begin_prepass(&mut encoder);
-                pass.set_bind_group(0, &self.globals_bind_group, &[]);
-                pass.set_bind_group(1, &self.object_bind_group, &[]);
-
-                let mut current_skinned: Option<bool> = None;
-                for batch in &batches {
-                    let Some(gpu_mesh) = self.meshes.get(&batch.mesh_id) else {
-                        continue;
-                    };
-                    // 预通道只关心几何，不关心材质——所以换管线的判据
-                    // 只有「蒙皮与否」，比主 pass 少一半的切换。
-                    if current_skinned != Some(batch.skinned) {
-                        pass.set_pipeline(self.ssao.prepass_pipeline(batch.skinned));
-                        current_skinned = Some(batch.skinned);
-                    }
-
-                    pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
-                    if batch.skinned {
-                        let Some(skin) = gpu_mesh.skin_buffer.as_ref() else {
-                            continue;
-                        };
-                        pass.set_vertex_buffer(1, skin.slice(..));
-                    }
-                    pass.set_index_buffer(
-                        gpu_mesh.index_buffer.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
-                    pass.draw_indexed(
-                        batch.index_range.0..batch.index_range.0 + batch.index_range.1,
-                        0,
-                        batch.first..batch.first + batch.count,
-                    );
-                }
-            }
-            self.ssao
-                .run(&self.queue, &mut encoder, view_proj, camera_position);
-            // 走 `self.stats`：本地那份在取交换链纹理之前就已经定格了
-            // （见上面 `self.stats = stats`），这里再改它没人看得到。
-            // 阴影 pass 也是这么记的。
-            self.stats.draw_calls += batches.len() as u32 + 1;
+        // 谁都不要的时候这一整段不跑，主 pass 绑的是 1×1 白图（乘 1）。
+        // 后处理要法线、运动向量、材质缓冲时也得跑——它们都是这一趟的产物。
+        let prepass_needed = self.ssao.occlusion_active() || needs.needs_prepass();
+        if prepass_needed {
+            let light = first_light.map(|(light, _)| light);
+            self.encode_prepass(&mut encoder, &batches, view_proj, camera_position, light);
         }
 
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("kengine render pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.05,
-                            g: 0.05,
-                            b: 0.08,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            pass.set_pipeline(self.standard_pipelines.pick(false, false));
-            pass.set_bind_group(0, &self.globals_bind_group, &[]);
-            // 整个实例数组绑一次就够，着色器按实例号自己寻址。
-            pass.set_bind_group(1, &self.object_bind_group, &[]);
-            pass.set_bind_group(3, &self.brdf_bind_group, &[]);
-
-            let mut current_pipeline: Option<(bool, Uuid)> = None;
-            for batch in &batches {
-                let Some(gpu_mesh) = self.meshes.get(&batch.mesh_id) else {
-                    continue;
-                };
-                let Some(texture_bind_group) = self.material_bind_groups.get(&batch.texture_key)
-                else {
-                    continue;
-                };
-
-                // 换管线的判据是「蒙皮与否 + 着色器」这一对。只看蒙皮的话，
-                // 相邻两个自定义材质会共用前一个的着色器。
-                let key = (batch.skinned, batch.shader_id);
-                if current_pipeline != Some(key) {
-                    pass.set_pipeline(self.pipeline_for(batch, false));
-                    // 换管线不影响已绑定的组，它们的布局是同一个。
-                    current_pipeline = Some(key);
-                }
-
-                pass.set_bind_group(2, texture_bind_group, &[]);
-                pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
-                if batch.skinned {
-                    let Some(skin) = gpu_mesh.skin_buffer.as_ref() else {
-                        continue;
-                    };
-                    pass.set_vertex_buffer(1, skin.slice(..));
-                }
-                pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                // 实例范围的起点即 `@builtin(instance_index)` 的起始值。
-                pass.draw_indexed(
-                    batch.index_range.0..batch.index_range.0 + batch.index_range.1,
-                    0,
-                    batch.first..batch.first + batch.count,
-                );
-            }
-
-            // 天空放在最后画：此时深度缓冲已填好，只有空白像素能通过 LessEqual 测试，
-            // 被物体挡住的部分直接被剔除，省下大片无用的着色。
-            pass.set_pipeline(&self.sky_pipeline);
-            pass.set_bind_group(0, &self.sky_bind_group, &[]);
-            pass.draw(0..3, 0..1);
+        if gpu_timing && let Some(timer) = self.gpu_timer.as_mut() {
+            timer.mark(&mut encoder, "主通道");
         }
+        self.encode_main_pass(&mut encoder, &batches, overlay);
 
+        if gpu_timing && let Some(timer) = self.gpu_timer.as_mut() {
+            timer.mark(&mut encoder, "拷颜色");
+        }
         // ── 拷一份场景颜色 ──
         //
         // 不透明几何和天空都画完了，此刻的颜色缓冲就是「半透明物体背后
@@ -3368,96 +4082,123 @@ impl Renderer {
             },
         );
 
+        if gpu_timing && let Some(timer) = self.gpu_timer.as_mut() {
+            timer.mark(&mut encoder, "半透明");
+        }
         // ── 半透明、精灵、粒子、调试线：只读深度的第二个 pass ──
-        //
-        // 合成一个 pass 的前提是这里**没人写深度**：半透明、精灵、粒子、
-        // 调试线四者的管线都是只测不写（见各自管线的注释）。
-        //
-        // 只读深度换来两件事：软粒子能把深度当纹理采样；自定义材质能同时
-        // 读场景颜色和场景深度，做出按水深分层的效果。
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("kengine transparent pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: self.post.hdr_target(),
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        // 接着上一个 pass 画，不能清。
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    // `None` = 只读。这一条就是软粒子和折射能成立的原因。
-                    depth_ops: None,
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+        self.encode_transparent_pass(
+            &mut encoder,
+            &transparent_batches,
+            &sprite_batches,
+            &particle_batches,
+            &line_draws,
+            &gizmo_draw,
+            overlay,
+        );
 
-            // 半透明必须在天空之后：它要和背后的东西混合，而天空就是
-            // 最远的那个「背后」。
-            if !transparent_batches.is_empty() {
-                pass.set_bind_group(0, &self.globals_bind_group, &[]);
-                pass.set_bind_group(1, &self.object_bind_group, &[]);
-                // 换成带真实场景深度的那份：这个 pass 用只读深度附件，
-                // 允许同一张纹理既当附件又当采样源。
-                pass.set_bind_group(3, &self.brdf_bind_group_transparent, &[]);
-                let mut current: Option<(bool, Uuid)> = None;
-                for batch in &transparent_batches {
-                    let Some(gpu_mesh) = self.meshes.get(&batch.mesh_id) else {
-                        continue;
-                    };
-                    let Some(texture_bind_group) =
-                        self.material_bind_groups.get(&batch.texture_key)
-                    else {
-                        continue;
-                    };
-                    let key = (batch.skinned, batch.shader_id);
-                    if current != Some(key) {
-                        pass.set_pipeline(self.pipeline_for(batch, true));
-                        current = Some(key);
-                    }
-                    pass.set_bind_group(2, texture_bind_group, &[]);
-                    pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
-                    if batch.skinned {
-                        let Some(skin) = gpu_mesh.skin_buffer.as_ref() else {
-                            continue;
-                        };
-                        pass.set_vertex_buffer(1, skin.slice(..));
-                    }
-                    pass.set_index_buffer(
-                        gpu_mesh.index_buffer.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
-                    pass.draw_indexed(
-                        batch.index_range.0..batch.index_range.0 + batch.index_range.1,
-                        0,
-                        batch.first..batch.first + batch.count,
+        if gpu_timing && let Some(timer) = self.gpu_timer.as_mut() {
+            timer.mark(&mut encoder, "遮罩");
+        }
+        // ── 后处理遮罩 ──
+        if mask_needed {
+            self.encode_mask_pass(&mut encoder, &mask_batches);
+        }
+
+        let extent = wgpu::Extent3d {
+            width: self.config.width.max(1),
+            height: self.config.height.max(1),
+            depth_or_array_layers: 1,
+        };
+
+        // ── 覆盖层：拷走，等屏幕帧叠上去 ──
+        if overlay {
+            let texture = self.overlay.target(&self.device, extent);
+            encoder.copy_texture_to_texture(
+                self.post.hdr_texture().as_image_copy(),
+                texture.as_image_copy(),
+                extent,
+            );
+            self.overlay.ready = true;
+            self.queue.submit(std::iter::once(encoder.finish()));
+            return RenderOutcome::Ok;
+        }
+
+        // ── 离屏视图：拷走，这一遍就结束了 ──
+        if let FrameMode::View(slot) = mode {
+            let index = usize::from(slot).min(self.views.len() - 1);
+            if self.views[index].is_none() {
+                let (texture, view) =
+                    create_view_target(&self.device, extent, "kengine camera view");
+                self.view_array_views[index] =
+                    Some(texture.create_view(&wgpu::TextureViewDescriptor {
+                        dimension: Some(wgpu::TextureViewDimension::D2Array),
+                        ..Default::default()
+                    }));
+                self.views[index] = Some((texture, view));
+                // 之前采这个视图的材质绑的是白图占位，重建。
+                let id = ktexture::Texture::camera_view_id(slot);
+                self.material_bind_groups
+                    .retain(|key, _| !key.contains(&id));
+            }
+            if let Some((texture, _)) = &self.views[index] {
+                encoder.copy_texture_to_texture(
+                    self.post.hdr_texture().as_image_copy(),
+                    texture.as_image_copy(),
+                    extent,
+                );
+            }
+            self.queue.submit(std::iter::once(encoder.finish()));
+            return RenderOutcome::Ok;
+        }
+
+        // ── 超采样：每一遍按 1/N 累加 ──
+        let ssaa_step = match mode {
+            FrameMode::SsaaSample { index, count } => Some((index, count)),
+            FrameMode::Screen { ssaa } => ssaa,
+            _ => None,
+        };
+        if let Some((index, count)) = ssaa_step {
+            if self.ssaa_accum.is_none() {
+                self.ssaa_accum = Some(create_view_target(
+                    &self.device,
+                    extent,
+                    "kengine ssaa accumulation",
+                ));
+            }
+            self.postfx
+                .prepare_blit(&self.device, post::HDR_FORMAT, true);
+            if let Some((accumulation, accumulation_view)) = &self.ssaa_accum {
+                self.postfx.blit(
+                    &self.device,
+                    &mut encoder,
+                    self.post.hdr_target(),
+                    accumulation_view,
+                    post::HDR_FORMAT,
+                    Some((1.0 / f64::from(count.max(1)), index == 0)),
+                );
+                // 最后一遍：累积结果拷回 HDR 目标，当作这一帧的场景颜色往下走。
+                if mode.is_screen() {
+                    encoder.copy_texture_to_texture(
+                        accumulation.as_image_copy(),
+                        self.post.hdr_texture().as_image_copy(),
+                        extent,
                     );
                 }
             }
+            if !mode.is_screen() {
+                self.queue.submit(std::iter::once(encoder.finish()));
+                return RenderOutcome::Ok;
+            }
+        }
 
-            // 2D 精灵画在半透明之后、粒子之前：精灵该被粒子盖住
-            // （粒子通常是特效）。
-            self.sprites.draw(&mut pass, &sprite_batches);
-
-            // 粒子在精灵之后：它们半透明且不写深度，任何在它们之后画的
-            // 不透明物体都会把它们盖掉——包括天空。
-            self.particles.draw(&mut pass, &particle_batches);
-
-            // 调试线放在最后：它要盖在所有东西上面，而且不写深度，
-            // 所以画在哪一步都不会影响别人，唯独顺序决定了它自己可不可见。
-            self.gizmos.draw_retained(&mut pass, &line_draws);
-            self.gizmos.draw(&mut pass, &gizmo_draw);
+        // ── 覆盖层：叠在主画面上，一起过后处理 ──
+        // 放在超采样累积之后：覆盖层只画了一遍，混进累积里会被除以 N 变淡。
+        if mode.is_screen() {
+            self.overlay.composite(&mut encoder, self.post.hdr_target());
         }
 
         // ── 捕获：主 pass 画完就把 HDR 目标拷走 ──
-        if let Some(face) = capture {
+        if let FrameMode::Capture(face) = mode {
             encoder.copy_texture_to_buffer(
                 self.post.hdr_texture().as_image_copy(),
                 wgpu::TexelCopyBufferInfo {
@@ -3480,43 +4221,104 @@ impl Renderer {
 
         let surface_view = surface_view.expect("非捕获路径一定拿到了交换链纹理");
 
-        // 后处理：Bloom + 色调映射，最终写入交换链。
-        self.post.run(&self.queue, &mut encoder, &surface_view);
+        if gpu_timing && let Some(timer) = self.gpu_timer.as_mut() {
+            timer.mark(&mut encoder, "后处理");
+        }
+        // ── 后处理 ──
+        //
+        // 场景 HDR ─→ [HDR 阶段的效果（+ TAA）] ─→ Bloom + 色调映射
+        //          ─→ [LDR 阶段的效果（+ SMAA）] ─→ FXAA 或原样拷贝 ─→ 交换链
+        let ldr_final_index = self.encode_post(
+            &mut encoder,
+            &surface_view,
+            PostFrameParams {
+                view,
+                projection,
+                clean_projection,
+                view_proj,
+                clip_view_proj,
+                prev_view_proj,
+                camera_position,
+                camera,
+                jitter,
+                shader_time,
+                frame_delta,
+                post_settings,
+                first_light,
+                cascades: &cascades,
+                cascade_splits,
+                shadow_kind: shadow_enabled.then_some(shadow_kind),
+                effects,
+                taa,
+                prepass_needed,
+                mask_needed,
+            },
+        );
 
-        // ── UI ──
-        // 画在后处理之后：UI 的颜色是设计好的，过一遍色调映射会被整体压暗，
-        // 白色不再是白色。代价是 UI 拿不到 bloom。
-        if let Some((ui, ui_list)) = ui.zip(ui_list)
-            && !ui_list.is_empty()
+        // 这一帧成了「上一帧」。
+        self.prev_view_proj = Some(clip_view_proj);
+        self.prev_jitter = [jitter.x, jitter.y];
+        self.frame_index += 1;
+        self.evict_unused();
+        // 开场两秒左右，常用的管线基本都建过了，先存一次；退出时（`Drop`）再存一次。
+        if self.frame_index == 120
+            && let Some(cache) = self.pipeline_cache.as_mut()
         {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("kengine ui pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &surface_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        // 保留后处理的输出，UI 叠在上面。
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            self.ui.draw(
-                &mut pass,
-                ui_list,
-                [self.config.width, self.config.height],
-                ui.scale(),
-            );
+            cache.save();
+        }
+        if velocity_needed {
+            self.motion.advance();
+        } else if !self.motion.previous.is_empty() || !self.motion.previous_joints.is_empty() {
+            // 不要运动向量的时候不记；把残留清掉，免得重新打开时拿到一份很久以前的位置。
+            self.motion = MotionHistory::default();
         }
 
+        if gpu_timing && let Some(timer) = self.gpu_timer.as_mut() {
+            timer.mark(&mut encoder, "UI");
+        }
+        // ── UI ──
+        if let Some((ui, ui_list)) = ui.zip(ui_list) {
+            self.encode_ui_pass(&mut encoder, &surface_view, ui_list, ui.scale());
+        }
+
+        if gpu_timing && let Some(timer) = self.gpu_timer.as_mut() {
+            timer.mark(&mut encoder, "结束");
+        }
+        section.next("提交");
+        // ── 截图 ──
+        // 排在 UI 之后，从交换链拷：截下来的就是屏幕上看到的，UI 也在里面。
+        // 交换链不能拷（不支持 COPY_SRC）时退回后处理链的最后一张，没有 UI。
+        let surface_copyable = self.config.usage.contains(wgpu::TextureUsages::COPY_SRC);
+        let source = match screen_texture.as_ref() {
+            Some(texture) if surface_copyable => Some(texture.clone()),
+            _ => self
+                .postfx
+                .chain_texture(PostStage::Ldr, ldr_final_index)
+                .cloned(),
+        };
+        let screenshot_buffer = self.encode_screenshot(&mut encoder, source.as_ref());
+
+        if gpu_timing && let Some(timer) = self.gpu_timer.as_mut() {
+            timer.resolve(&mut encoder);
+        }
         self.queue.submit(std::iter::once(encoder.finish()));
+        if gpu_timing && let Some(timer) = self.gpu_timer.as_mut() {
+            timer.after_submit();
+        }
         if let Some(output) = output {
             self.queue.present(output);
+        }
+
+        if let Some((buffer, path, width, height, bytes_per_row, bgra)) = screenshot_buffer {
+            save_screenshot(
+                &self.device,
+                &buffer,
+                &path,
+                width,
+                height,
+                bytes_per_row,
+                bgra,
+            );
         }
 
         RenderOutcome::Ok
@@ -3564,6 +4366,8 @@ impl Renderer {
                 &self.joint_buffer,
                 &self.morph_buffer,
                 &self.morph_weight_buffer,
+                &self.slot_buffer,
+                &self.instance_buffer,
             );
         }
 
@@ -3592,7 +4396,10 @@ impl Renderer {
             kpbr::standard::EMISSIVE_TEXTURE,
             kmaterial::standard::CUSTOM_TEXTURES[0],
             kmaterial::standard::CUSTOM_TEXTURES[1],
+            kmaterial::standard::CUSTOM_TEXTURES[2],
+            kmaterial::standard::CUSTOM_TEXTURES[3],
             kmaterial::standard::CUSTOM_TEXTURE_ARRAY,
+            kmaterial::standard::CUSTOM_TEXTURE_3D,
         ];
 
         let mut key = [Uuid::nil(); TEXTURE_KEY_SLOTS];
@@ -3608,16 +4415,45 @@ impl Renderer {
             };
 
             let id = texture.id();
-            if !self.gpu_textures.contains_key(&id) {
+            // 离屏相机视图 / 存储纹理的替身：不上传，建绑定组时换成那个视图（`create_material_bind_group`）。
+            // 存储纹理已经析构的替身照普通贴图走（1×1 白图）。
+            if texture.camera_view_slot().is_some()
+                || (texture.is_external()
+                    && self
+                        .shared_views
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .contains_key(&id))
+            {
+                key[slot] = id;
+                continue;
+            }
+            let frame = self.frame_index;
+            let fresh = match self.gpu_textures.get_mut(&id) {
+                Some((existing, used)) => {
+                    *used = frame;
+                    !existing.refresh(&self.queue, &texture)
+                }
+                None => true,
+            };
+            if fresh {
                 let uploaded = upload_texture(&self.device, &self.queue, &texture);
-                self.gpu_textures.insert(id, uploaded);
+                if self.gpu_textures.insert(id, (uploaded, frame)).is_some() {
+                    // 同一个 id 换了尺寸：旧的绑定组还指着旧的那块显存。
+                    self.material_bind_groups
+                        .retain(|key, _| !key.contains(&id));
+                }
             }
             key[slot] = id;
         }
 
-        if !self.material_bind_groups.contains_key(&key) {
-            let bind_group = self.create_material_bind_group(&key);
-            self.material_bind_groups.insert(key, bind_group);
+        let frame = self.frame_index;
+        match self.material_bind_groups.get_mut(&key) {
+            Some((_, used)) => *used = frame,
+            None => {
+                let bind_group = self.create_material_bind_group(&key);
+                self.material_bind_groups.insert(key, (bind_group, frame));
+            }
         }
 
         key
@@ -3625,41 +4461,79 @@ impl Renderer {
 
     fn create_material_bind_group(&self, key: &[Uuid; TEXTURE_KEY_SLOTS]) -> wgpu::BindGroup {
         // 第二个槽位是法线贴图，缺失时要用「不扰动」的中性法线而非白色。
-        let texture_for = |slot: usize| -> &GpuTexture {
-            self.gpu_textures.get(&key[slot]).unwrap_or({
-                if slot == 1 {
-                    &self.default_textures.flat_normal
-                } else {
-                    &self.default_textures.white
-                }
-            })
+        let fallback = |slot: usize| -> &GpuTexture {
+            if slot == 1 {
+                &self.default_textures.flat_normal
+            } else {
+                &self.default_textures.white
+            }
         };
+        // 存储纹理的视图先拷出来（表在锁里，借不出引用）。
+        let external: Vec<Option<(wgpu::TextureView, wgpu::TextureView)>> = {
+            let views = self
+                .shared_views
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            key.iter().map(|id| views.get(id).cloned()).collect()
+        };
+        // (视图, 数组视图, 采样器)。离屏相机视图的替身换成那个视图；还没画出来就是占位图。
+        let texture_for =
+            |slot: usize| -> (&wgpu::TextureView, &wgpu::TextureView, &wgpu::Sampler) {
+                if let Some((view, array)) = &external[slot] {
+                    return (view, array, &self.view_sampler);
+                }
+                if let Some(view) = ktexture::Texture::camera_view_slot_of(key[slot]) {
+                    let index = usize::from(view);
+                    if let (Some((_, view)), Some(array)) =
+                        (&self.views[index], &self.view_array_views[index])
+                    {
+                        return (view, array, &self.view_sampler);
+                    }
+                    let white = &self.default_textures.white;
+                    return (&white.view, &white.array_view, &white.sampler);
+                }
+                let wanted_volume = slot == TEXTURE_KEY_SLOTS - 1;
+                let texture = self
+                    .gpu_textures
+                    .get(&key[slot])
+                    .map(|(texture, _)| texture)
+                    // 维度对不上（三维纹理设进了二维槽，或者反过来）当作没设。
+                    .filter(|texture| texture.volume == wanted_volume)
+                    .unwrap_or(if wanted_volume {
+                        &self.default_textures.white_volume
+                    } else {
+                        fallback(slot)
+                    });
+                (&texture.view, &texture.array_view, &texture.sampler)
+            };
 
         // 采样器取自基础色贴图——一个材质的各张贴图共享同一套 UV，
         // 平铺与过滤方式理应一致。
         let mut entries = vec![
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(&texture_for(0).view),
+                resource: wgpu::BindingResource::TextureView(texture_for(0).0),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::Sampler(&texture_for(0).sampler),
+                resource: wgpu::BindingResource::Sampler(texture_for(0).2),
             },
         ];
         for slot in 1..TEXTURE_SLOTS {
             entries.push(wgpu::BindGroupEntry {
                 binding: slot as u32 + 1,
-                resource: wgpu::BindingResource::TextureView(&texture_for(slot).view),
+                resource: wgpu::BindingResource::TextureView(texture_for(slot).0),
             });
         }
         // 纹理数组走另一份视图。没设的时候落到白图的数组视图——
         // 它只有一层，采任何层号都得到白色，钩子不必为缺图写分支。
         entries.push(wgpu::BindGroupEntry {
             binding: ARRAY_TEXTURE_BINDING,
-            resource: wgpu::BindingResource::TextureView(
-                &texture_for(TEXTURE_KEY_SLOTS - 1).array_view,
-            ),
+            resource: wgpu::BindingResource::TextureView(texture_for(TEXTURE_SLOTS).1),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: VOLUME_TEXTURE_BINDING,
+            resource: wgpu::BindingResource::TextureView(texture_for(TEXTURE_KEY_SLOTS - 1).0),
         });
 
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -3669,6 +4543,8 @@ impl Renderer {
         })
     }
 
+    // 参数就是 group(1) 的六个缓冲，一一对应绑定号；包成结构体只是换个地方列同样的六项。
+    #[allow(clippy::too_many_arguments)]
     fn create_object_storage(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
@@ -3676,6 +4552,8 @@ impl Renderer {
         joints: &wgpu::Buffer,
         morphs: &wgpu::Buffer,
         morph_weights: &wgpu::Buffer,
+        slots: &wgpu::Buffer,
+        instances: &wgpu::Buffer,
     ) -> (wgpu::Buffer, wgpu::BindGroup) {
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("kengine object buffer"),
@@ -3684,8 +4562,16 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let bind_group =
-            create_object_bind_group(device, layout, &buffer, joints, morphs, morph_weights);
+        let bind_group = create_object_bind_group(
+            device,
+            layout,
+            &buffer,
+            joints,
+            morphs,
+            morph_weights,
+            slots,
+            instances,
+        );
         (buffer, bind_group)
     }
 
@@ -3731,8 +4617,39 @@ fn create_standard_pipeline(
     blend_mode: kmaterial::BlendMode,
     constants: &[(&str, f64)],
     double_sided: bool,
+    cache: Option<&wgpu::PipelineCache>,
 ) -> wgpu::RenderPipeline {
-    let transparent = blend_mode == kmaterial::BlendMode::Alpha;
+    create_standard_pipeline_with(
+        device,
+        layout,
+        shader,
+        entry_point,
+        buffers,
+        label,
+        blend_mode,
+        constants,
+        double_sided,
+        false,
+        cache,
+    )
+}
+
+/// [`create_standard_pipeline`]，外加「半透明也写深度」的开关（`Material::depth_write`）。
+#[allow(clippy::too_many_arguments)]
+fn create_standard_pipeline_with(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    entry_point: &str,
+    buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
+    label: &str,
+    blend_mode: kmaterial::BlendMode,
+    constants: &[(&str, f64)],
+    double_sided: bool,
+    transparent_depth_write: bool,
+    cache: Option<&wgpu::PipelineCache>,
+) -> wgpu::RenderPipeline {
+    let transparent = blend_mode.is_blended();
     // 顶点和片元两个阶段都要给：`override` 是模块级的声明，
     // 只给一个阶段的话另一个阶段引用它时会报「常量没有值」。
     let compilation_options = wgpu::PipelineCompilationOptions {
@@ -3755,8 +4672,10 @@ fn create_standard_pipeline(
             targets: &[Some(wgpu::ColorTargetState {
                 // 主 pass 画到 HDR 离屏目标，不是直接画到屏幕。
                 format: post::HDR_FORMAT,
+                // 半透明这一条是**预乘**混合：着色器输出 (rgb·a, a) 就是普通的 alpha 混合，
+                // 输出 (rgb·a, 0) 就是叠加——两种混合方式共用一条管线，叠加不用多编一份。
                 blend: Some(if transparent {
-                    wgpu::BlendState::ALPHA_BLENDING
+                    wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING
                 } else {
                     wgpu::BlendState::REPLACE
                 }),
@@ -3783,14 +4702,14 @@ fn create_standard_pipeline(
             // 半透明不写深度：写了的话先画的半透明物体会把后画的挡掉，
             // 透过玻璃就看不见玻璃后面的玻璃了。仍然要**测试**深度，
             // 不然半透明物体会画在挡着它的墙前面。
-            depth_write_enabled: Option::from(!transparent),
+            depth_write_enabled: Option::from(!transparent || transparent_depth_write),
             depth_compare: Option::from(wgpu::CompareFunction::Less),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
-        cache: None,
+        cache,
     })
 }
 
@@ -3805,6 +4724,8 @@ fn create_joint_storage(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
 }
 
 /// 把对象数组与骨骼矩阵数组绑进同一个绑定组。
+// 同上：group(1) 的六个缓冲。
+#[allow(clippy::too_many_arguments)]
 fn create_object_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -3812,6 +4733,8 @@ fn create_object_bind_group(
     joints: &wgpu::Buffer,
     morphs: &wgpu::Buffer,
     morph_weights: &wgpu::Buffer,
+    slots: &wgpu::Buffer,
+    instances: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("kengine object bind group"),
@@ -3834,8 +4757,158 @@ fn create_object_bind_group(
                 binding: 3,
                 resource: morph_weights.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: slots.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: instances.as_entire_binding(),
+            },
         ],
     })
+}
+
+/// 实例数据的存储缓冲（`kscene::Instance` 的数组）。
+fn create_instance_storage(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("kengine instance data"),
+        size: size_of::<kscene::Instance>() as u64 * capacity.max(1),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+/// 实例槽的存储缓冲。
+fn create_slot_storage(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("kengine instance slots"),
+        size: size_of::<InstanceSlot>() as u64 * capacity.max(1),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+/// 把截图缓冲读回来存成 PNG。
+fn save_screenshot(
+    device: &wgpu::Device,
+    buffer: &wgpu::Buffer,
+    path: &std::path::Path,
+    width: u32,
+    height: u32,
+    bytes_per_row: u32,
+    bgra: bool,
+) {
+    let Some(pixels) = read_rgba(device, buffer, width, height, bytes_per_row, bgra) else {
+        return;
+    };
+    // `KENGINE_SCREENSHOT_WIDTH` 给了的话按盒式滤波缩到这个宽度——
+    // 批量对画面时不需要全分辨率。
+    let (width, height, pixels) = match std::env::var("KENGINE_SCREENSHOT_WIDTH")
+        .ok()
+        .and_then(|w| w.parse::<u32>().ok())
+        .filter(|&w| w > 0 && w < width)
+    {
+        Some(target) => {
+            let factor = width.div_ceil(target).max(1);
+            let (w, h) = (width / factor, height / factor);
+            let mut small = Vec::with_capacity((w * h * 4) as usize);
+            for y in 0..h {
+                for x in 0..w {
+                    let mut sum = [0u32; 3];
+                    for dy in 0..factor {
+                        for dx in 0..factor {
+                            let i = (((y * factor + dy) * width + x * factor + dx) * 4) as usize;
+                            for c in 0..3 {
+                                sum[c] += u32::from(pixels[i + c]);
+                            }
+                        }
+                    }
+                    let n = factor * factor;
+                    small.extend_from_slice(&[
+                        (sum[0] / n) as u8,
+                        (sum[1] / n) as u8,
+                        (sum[2] / n) as u8,
+                        255,
+                    ]);
+                }
+            }
+            (w, h, small)
+        }
+        None => (width, height, pixels),
+    };
+    match ktexture::write_png(path, width, height, &pixels) {
+        Ok(()) => klog::info!("截图已保存：{}", path.display()),
+        Err(error) => klog::warn!("截图失败：{error}"),
+    }
+}
+
+/// 等显卡把回读缓冲映射好，按行去掉对齐填充，转成紧凑的 RGBA8。
+fn read_rgba(
+    device: &wgpu::Device,
+    buffer: &wgpu::Buffer,
+    width: u32,
+    height: u32,
+    bytes_per_row: u32,
+    bgra: bool,
+) -> Option<Vec<u8>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    buffer
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+    if device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
+        klog::warn!("截图失败：等不到显卡");
+        return None;
+    }
+    if !matches!(receiver.recv(), Ok(Ok(()))) {
+        klog::warn!("截图失败：映射缓冲出错");
+        return None;
+    }
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    {
+        let Ok(mapped) = buffer.slice(..).get_mapped_range() else {
+            klog::warn!("截图失败：读不到映射的缓冲");
+            return None;
+        };
+        for row in 0..height as usize {
+            let start = row * bytes_per_row as usize;
+            let line = &mapped[start..start + width as usize * 4];
+            for texel in line.chunks_exact(4) {
+                if bgra {
+                    pixels.extend_from_slice(&[texel[2], texel[1], texel[0], 255]);
+                } else {
+                    pixels.extend_from_slice(&[texel[0], texel[1], texel[2], 255]);
+                }
+            }
+        }
+    }
+    buffer.unmap();
+    Some(pixels)
+}
+
+/// 离屏视图 / 超采样累积用的 HDR 纹理。
+fn create_view_target(
+    device: &wgpu::Device,
+    extent: wgpu::Extent3d,
+    label: &str,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: post::HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
 }
 
 /// 把网格的形变增量排成**顶点优先**的一维数组：
@@ -3887,8 +4960,8 @@ fn create_morph_weight_storage(device: &wgpu::Device, capacity: u64) -> wgpu::Bu
 const DEFAULT_SURFACE_HOOK: &str =
     "fn material_surface(surface: Surface) -> Surface {\n    return surface;\n}";
 
-/// 什么都不改的默认顶点钩子——绝大多数材质不需要顶点位移。
-const DEFAULT_VERTEX_HOOK: &str =
+/// 什么都不改的默认顶点钩子——绝大多数材质不需要顶点位移。预通道也拼它（见 `ssao.rs`）。
+pub(crate) const DEFAULT_VERTEX_HOOK: &str =
     "fn material_vertex(vertex: VertexSurface) -> VertexSurface {\n    return vertex;\n}";
 
 /// 默认的光照模型：引擎自己那套 PBR。
@@ -3905,6 +4978,14 @@ const DEFAULT_AMBIENT_HOOK: &str = r#"fn material_ambient(
     input: AmbientInput,
 ) -> vec3<f32> {
     return input.diffuse + input.specular + input.hemisphere;
+}"#;
+
+/// 默认的输出钩子：原样返回。
+const DEFAULT_OUTPUT_HOOK: &str = r#"fn material_output(
+    surface: ptr<function, Surface>,
+    color: vec4<f32>,
+) -> vec4<f32> {
+    return color;
 }"#;
 
 const DEFAULT_LIGHTING_HOOK: &str = r#"fn material_lighting(
@@ -3984,6 +5065,14 @@ pub fn validate_material_hook(hook: &str) -> Result<(), kshader::ShaderError> {
     Shader::from_wgsl(material_shader_source(hook)).map(|_| ())
 }
 
+/// 钩子拼进引擎着色器之后的**完整** WGSL（主画面那一份）。
+///
+/// 看钩子最终变成了什么、对照报错里的行号时用（three.js 的 `renderer.debug.getShaderAsync`）。
+/// 没写的钩子已经补上默认实现。
+pub fn composed_material_shader(hook: &str) -> String {
+    material_shader_source(hook)
+}
+
 /// `shader.wgsl` 的正文，供测试检查拼装之外的结构。
 #[cfg(test)]
 fn shader_body_for_test() -> &'static str {
@@ -4004,8 +5093,8 @@ fn standard_shader_source() -> String {
 /// - `surface.wgsl` 定义 `Surface` 与 `LightingInput`，钩子要用它们；
 /// - `shader.wgsl` 调用钩子，所以钩子必须排在它之前。
 ///
-/// 四个钩子（`material_vertex`、`material_surface`、`material_lighting`、
-/// `material_ambient`）**全都是可选的**，没写的在这里补上默认实现。
+/// 五个钩子（`material_vertex`、`material_surface`、`material_lighting`、
+/// `material_ambient`、`material_output`）**全都是可选的**，没写的在这里补上默认实现。
 /// 只想改颜色的材质不必抄三段「照搬顶点/光照/环境」，只想做顶点位移的
 /// 也不必抄三段「照搬表面/光照/环境」。
 fn material_shader_source(hook: &str) -> String {
@@ -4029,6 +5118,11 @@ fn material_shader_source(hook: &str) -> String {
     } else {
         DEFAULT_AMBIENT_HOOK
     };
+    let output_default = if hook_defines(hook, "material_output") {
+        ""
+    } else {
+        DEFAULT_OUTPUT_HOOK
+    };
     [
         klight::LIGHT_WGSL,
         // 聚簇的下标公式。和 `klight::cluster::ClusterGrid` 是同一份数学，
@@ -4044,6 +5138,7 @@ fn material_shader_source(hook: &str) -> String {
         surface_default,
         lighting_default,
         ambient_default,
+        output_default,
         include_str!("shader.wgsl"),
     ]
     .join("\n")
@@ -4097,7 +5192,8 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
         size: wgpu::Extent3d {
             width: resolution,
             height: resolution,
-            depth_or_array_layers: klight::cascade::MAX_CASCADES as u32,
+            // 方向光的级联用不满；点光的立方体要六层。
+            depth_or_array_layers: klight::cascade::MAX_SHADOW_LAYERS as u32,
         },
         mip_level_count: 1,
         sample_count: 1,
@@ -4112,7 +5208,7 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
         ..Default::default()
     });
     // 渲染时每层一个视图：一次 pass 只能挂一层当深度附件。
-    let layer_views: Vec<wgpu::TextureView> = (0..klight::cascade::MAX_CASCADES as u32)
+    let layer_views: Vec<wgpu::TextureView> = (0..klight::cascade::MAX_SHADOW_LAYERS as u32)
         .map(|layer| {
             texture.create_view(&wgpu::TextureViewDescriptor {
                 label: Some("kengine shadow layer"),
@@ -4129,11 +5225,50 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
         source: wgpu::ShaderSource::Wgsl(shadow_shader_source().into()),
     });
 
+    // 额外投影光源（聚光 / 点光）的阴影图：单独一张，分辨率减半。
+    let local_resolution = (resolution / 2).max(256);
+    let local_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("kengine local shadow map"),
+        size: wgpu::Extent3d {
+            width: local_resolution,
+            height: local_resolution,
+            depth_or_array_layers: LOCAL_SHADOW_LAYERS as u32,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let local_depth_view = local_texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    let local_layer_views: Vec<wgpu::TextureView> = (0..LOCAL_SHADOW_LAYERS as u32)
+        .map(|layer| {
+            local_texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("kengine local shadow layer"),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: layer,
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        })
+        .collect();
+    let local_matrices = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("kengine local shadow matrices"),
+        size: (size_of::<[[f32; 4]; 4]>() * LOCAL_SHADOW_LAYERS) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
     let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("kengine shadow globals layout"),
         entries: &[wgpu::BindGroupLayoutEntry {
             binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX,
+            // 片元也要：镂空材质的阴影片元阶段读时间（`shadow_hooked.wgsl`）。
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 // 每级级联一段，靠动态偏移选。
@@ -4151,7 +5286,9 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
     });
     let globals_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("kengine shadow globals"),
-        size: SHADOW_GLOBALS_STRIDE * klight::cascade::MAX_CASCADES as u64,
+        // 主光源的级联在前，额外投影光源的各层接在后面。
+        size: SHADOW_GLOBALS_STRIDE
+            * (klight::cascade::MAX_SHADOW_LAYERS + LOCAL_SHADOW_LAYERS) as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -4212,6 +5349,27 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
                 },
                 count: None,
             },
+            // 主 pass 的实例槽和实例数据（深度 pass 也按槽展开实例化节点）。
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(size_of::<InstanceSlot>() as u64),
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(size_of::<kscene::Instance>() as u64),
+                },
+                count: None,
+            },
         ],
     });
     let joint_buffer = create_joint_storage(device, Renderer::INITIAL_JOINTS);
@@ -4224,6 +5382,10 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
         &joint_buffer,
         &morph_buffer,
         &morph_weight_buffer,
+        // 占位：主 pass 的槽 / 实例缓冲这时候还没建。`instance_generation` 给个不可能的值，
+        // 第一次画阴影时就会换成真的。
+        &create_slot_storage(device, 1),
+        &create_instance_storage(device, 1),
     );
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -4256,6 +5418,10 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
         pipeline,
         depth_view,
         layer_views,
+        local_depth_view,
+        local_layer_views,
+        local_matrices,
+        local_resolution,
         skinned_pipeline,
         joint_buffer,
         joint_capacity: Renderer::INITIAL_JOINTS,
@@ -4264,11 +5430,13 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
         morph_weight_buffer,
         morph_weight_capacity: Renderer::INITIAL_CAPACITY,
         globals_buffer,
+        globals_layout,
         globals_bind_group,
         object_layout,
         object_buffer,
         object_bind_group,
         object_capacity: Renderer::INITIAL_CAPACITY,
+        instance_generation: u64::MAX,
     }
 }
 
@@ -4281,17 +5449,53 @@ fn create_shadow_pipeline(
     buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
     label: &str,
 ) -> wgpu::RenderPipeline {
+    create_shadow_pipeline_with(
+        device,
+        layout,
+        shader,
+        entry_point,
+        None,
+        buffers,
+        label,
+        &[],
+    )
+}
+
+/// 同上，带材质着色器的 `override` 常量和可选的片元入口（带钩子的材质用）。
+/// 片元入口只负责 discard：没有颜色附件，深度照常由光栅化写。
+#[allow(clippy::too_many_arguments)]
+fn create_shadow_pipeline_with(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    entry_point: &str,
+    fragment_entry: Option<&str>,
+    buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
+    label: &str,
+    constants: &[(&str, f64)],
+) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
             entry_point: Some(entry_point),
-            compilation_options: Default::default(),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants,
+                ..Default::default()
+            },
             buffers,
         },
-        // 深度 pass 不需要片元着色器。
-        fragment: None,
+        // 深度 pass 一般不需要片元着色器；镂空材质要一个只 discard 的。
+        fragment: fragment_entry.map(|entry| wgpu::FragmentState {
+            module: shader,
+            entry_point: Some(entry),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants,
+                ..Default::default()
+            },
+            targets: &[],
+        }),
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
@@ -4321,6 +5525,7 @@ fn create_shadow_pipeline(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_shadow_object_storage(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -4328,6 +5533,8 @@ fn create_shadow_object_storage(
     joints: &wgpu::Buffer,
     morphs: &wgpu::Buffer,
     morph_weights: &wgpu::Buffer,
+    slots: &wgpu::Buffer,
+    instances: &wgpu::Buffer,
 ) -> (wgpu::Buffer, wgpu::BindGroup) {
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("kengine shadow object buffer"),
@@ -4354,6 +5561,15 @@ fn create_shadow_object_storage(
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: morph_weights.as_entire_binding(),
+            },
+            // 主 pass 的槽和实例数据，原样共用：深度 pass 也按槽展开实例。
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: slots.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: instances.as_entire_binding(),
             },
         ],
     });
@@ -4494,7 +5710,7 @@ fn create_scene_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     statics: &SceneStatics,
-    shadow_view: &wgpu::TextureView,
+    shadow: &ShadowResources,
     environment_view: &wgpu::TextureView,
     scene_color_view: &wgpu::TextureView,
     scene_depth_view: &wgpu::TextureView,
@@ -4515,7 +5731,15 @@ fn create_scene_bind_group(
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: wgpu::BindingResource::TextureView(shadow_view),
+                resource: wgpu::BindingResource::TextureView(&shadow.depth_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 11,
+                resource: wgpu::BindingResource::TextureView(&shadow.local_depth_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 12,
+                resource: shadow.local_matrices.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 3,
@@ -4559,6 +5783,7 @@ fn create_sky_bind_group(
     layout: &wgpu::BindGroupLayout,
     buffer: &wgpu::Buffer,
     environment_view: &wgpu::TextureView,
+    prefiltered_view: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     // 天空的采样器和主 pass 那个是同一套设置：水平重复、垂直夹取。
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -4587,6 +5812,10 @@ fn create_sky_bind_group(
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(prefiltered_view),
             },
         ],
     })
@@ -4644,6 +5873,69 @@ fn create_placeholder_environment(device: &wgpu::Device) -> wgpu::TextureView {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
         })
+}
+
+/// 把原分辨率的 HDR 环境图传上显存，给天空背景用。
+///
+/// 建成只有一层、一级的 2D 数组纹理：天空着色器声明的是
+/// `texture_2d_array`（和预滤波链共用一套绑定布局），这样不必再开一套。
+/// 超过设备上限的图按最近邻降采样——只是背景，够用。
+fn upload_environment_background(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    image: &kpbr::hdr::HdrImage,
+) -> wgpu::TextureView {
+    let limit = device.limits().max_texture_dimension_2d as usize;
+    let step = image.width().max(image.height()).div_ceil(limit).max(1);
+    let width = image.width().div_ceil(step).max(1);
+    let height = image.height().div_ceil(step).max(1);
+    let pixels = image.pixels();
+
+    let mut texels: Vec<u8> = Vec::with_capacity(width * height * 8);
+    for y in 0..height {
+        let row = (y * step).min(image.height() - 1) * image.width();
+        for x in 0..width {
+            let index = (row + (x * step).min(image.width() - 1)) * 3;
+            for channel in [pixels[index], pixels[index + 1], pixels[index + 2], 1.0] {
+                texels.extend_from_slice(&half_from_f32(channel).to_le_bytes());
+            }
+        }
+    }
+
+    let size = wgpu::Extent3d {
+        width: width as u32,
+        height: height as u32,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("kengine environment background"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &texels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width as u32 * 8),
+            rows_per_image: Some(height as u32),
+        },
+        size,
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    })
 }
 
 /// 把预滤波的 mip 链传上显存。
@@ -4788,34 +6080,33 @@ pub(crate) fn upload_texture(
         TextureFormat::Linear => wgpu::TextureFormat::Rgba8Unorm,
     };
 
+    let descriptor = texture.sampler();
+    let volume = texture.is_volume();
+    let mip_levels = if descriptor.mipmaps && !volume {
+        ktexture::mip_level_count(size.width, size.height)
+    } else {
+        1
+    };
     let gpu_texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("kengine texture"),
         size,
-        mip_level_count: 1,
+        mip_level_count: mip_levels,
         sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
+        dimension: if volume {
+            wgpu::TextureDimension::D3
+        } else {
+            wgpu::TextureDimension::D2
+        },
         format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
 
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &gpu_texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        texture.data(),
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(4 * size.width),
-            rows_per_image: Some(size.height),
-        },
-        size,
-    );
+    write_texture_pixels(queue, &gpu_texture, texture);
+    write_texture_mips(queue, &gpu_texture, texture);
 
-    let descriptor = texture.sampler();
+    let linear =
+        descriptor.mag_filter == FilterMode::Linear && descriptor.min_filter == FilterMode::Linear;
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("kengine texture sampler"),
         address_mode_u: convert_wrap(descriptor.wrap_u),
@@ -4823,7 +6114,18 @@ pub(crate) fn upload_texture(
         address_mode_w: wgpu::AddressMode::Repeat,
         mag_filter: convert_filter(descriptor.mag_filter),
         min_filter: convert_filter(descriptor.min_filter),
-        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        // 有 mip 时两级之间也插值（三线性）；像素风的最近邻贴图照旧取最近的一级。
+        mipmap_filter: if linear {
+            wgpu::MipmapFilterMode::Linear
+        } else {
+            wgpu::MipmapFilterMode::Nearest
+        },
+        // 各向异性要三种过滤都是线性（wgpu 的校验规则），否则退回 1。
+        anisotropy_clamp: if linear && mip_levels > 1 {
+            u16::from(descriptor.anisotropy.clamp(1, 16))
+        } else {
+            1
+        },
         ..Default::default()
     });
 
@@ -4832,6 +6134,20 @@ pub(crate) fn upload_texture(
     // 二维那份必须显式限定成「第 0 层，共 1 层」：不写的话 wgpu 会按
     // 层数自己挑维度，多层纹理拿到的是 `D2Array`，绑到 `texture_2d` 的
     // 槽位上直接被打回。
+    if volume {
+        let view = gpu_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D3),
+            ..Default::default()
+        });
+        return GpuTexture {
+            array_view: view.clone(),
+            view,
+            sampler,
+            texture: gpu_texture,
+            revision: texture.revision(),
+            volume: true,
+        };
+    }
     GpuTexture {
         view: gpu_texture.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2),
@@ -4844,7 +6160,100 @@ pub(crate) fn upload_texture(
             ..Default::default()
         }),
         sampler,
+        texture: gpu_texture,
+        revision: texture.revision(),
+        volume: false,
     }
+}
+
+/// 把贴图的全部像素写进一块尺寸相同的显存纹理。
+fn write_texture_pixels(queue: &wgpu::Queue, target: &wgpu::Texture, texture: &Texture) {
+    let size = target.size();
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        texture.data(),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * size.width),
+            rows_per_image: Some(size.height),
+        },
+        size,
+    );
+}
+
+/// 第 1 级起的 mip 链（显存里那张纹理建了几级就写几级）。
+fn write_texture_mips(queue: &wgpu::Queue, target: &wgpu::Texture, texture: &Texture) {
+    let count = target.mip_level_count();
+    if count <= 1 {
+        return;
+    }
+    let size = target.size();
+    let layers = size.depth_or_array_layers;
+    let srgb = texture.format() == TextureFormat::Srgb;
+    let levels = ktexture::generate_mips(texture.data(), size.width, size.height, layers, srgb);
+    for (index, data) in levels.iter().enumerate().take(count as usize - 1) {
+        let level = index as u32 + 1;
+        let (w, h) = ((size.width >> level).max(1), (size.height >> level).max(1));
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: target,
+                mip_level: level,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * w),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: layers,
+            },
+        );
+    }
+}
+
+/// 只传一块矩形（第 0 层）。行从整张图的像素里按行切出来——`write_texture` 的行跨距
+/// 可以比拷贝宽度大，所以不用先拼一块紧凑的缓冲。
+fn write_texture_region(
+    queue: &wgpu::Queue,
+    target: &wgpu::Texture,
+    texture: &Texture,
+    region: (u32, u32, u32, u32),
+) {
+    let (x, y, width, height) = region;
+    if width == 0 || height == 0 {
+        return;
+    }
+    let row = texture.width() as usize * 4;
+    let start = y as usize * row + x as usize * 4;
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: target,
+            mip_level: 0,
+            origin: wgpu::Origin3d { x, y, z: 0 },
+            aspect: wgpu::TextureAspect::All,
+        },
+        &texture.data()[start..],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(row as u32),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
 }
 
 fn convert_filter(filter: FilterMode) -> wgpu::FilterMode {
@@ -4937,7 +6346,8 @@ mod test {
         for (attribute, size) in VERTEX_ATTRIBUTES.iter().zip(sizes) {
             assert_eq!(
                 attribute.offset, expected_offset,
-                "属性 {:?} 的偏移对不上", attribute.shader_location
+                "属性 {:?} 的偏移对不上",
+                attribute.shader_location
             );
             expected_offset += size as u64;
         }
@@ -4954,15 +6364,18 @@ mod test {
         assert_eq!(
             size_of::<Globals>(),
             64 + 16 * 3
-                + 64 * klight::cascade::MAX_CASCADES
+                + 64 * klight::cascade::MAX_SHADOW_LAYERS
                 + 16 * 5
                 + 16 * 2
+                // 不带抖动的本帧 / 上一帧视图投影 + 抖动（TAA、运动向量）
+                + 64 * 2
+                + 16
                 + size_of::<GpuEnvironment>()
         );
         assert_eq!(size_of::<Globals>() % 16, 0);
         // ObjectUniforms：mat4x4(64) × 2 + base_color(16) + f32 × 4 + emissive(16)
         //                 + 骨骼偏移(16) + 光照掩码(16) + UV 变换(16)
-        //                 + 探针 vec4 × 4(64) + 自定义参数 vec4 × 4(64)。
+        //                 + 探针 vec4 × 4(64) + 自定义参数 vec4 × PARAM_SLOTS。
         // 四个 f32 恰好凑满 16 字节，emissive 才能落在 vec4 要求的对齐边界上。
         //
         // 探针那一组是四个而不是三个：采集点、盒子两角，再加一个
@@ -4970,6 +6383,8 @@ mod test {
         assert_eq!(
             size_of::<ObjectUniforms>(),
             64 * 2 + 16 * 3 + 16 * 3 + 16 * 4 + 16 * PARAM_SLOTS
+                // 上一帧的模型矩阵（运动向量）
+                + 64
         );
         assert_eq!(size_of::<ObjectUniforms>() % 16, 0);
     }
@@ -5078,7 +6493,7 @@ mod test {
         let source = include_str!("shader.wgsl");
         // 0 是基础色，1 是采样器，2..=TEXTURE_SLOTS 是其余二维贴图，
         // 最后 ARRAY_TEXTURE_BINDING 是纹理数组。
-        for binding in 0..=ARRAY_TEXTURE_BINDING {
+        for binding in 0..=VOLUME_TEXTURE_BINDING {
             assert!(
                 source.contains(&format!("@group(2) @binding({binding})")),
                 "shader.wgsl 缺少 group(2) 的 binding {binding}"
@@ -5087,9 +6502,37 @@ mod test {
         assert!(
             !source.contains(&format!(
                 "@group(2) @binding({})",
-                ARRAY_TEXTURE_BINDING + 1
+                VOLUME_TEXTURE_BINDING + 1
             )),
             "shader.wgsl 的 group(2) 声明多于布局里登记的数量"
+        );
+    }
+
+    #[test]
+    fn the_wgsl_param_alias_matches_the_slot_count() {
+        // 钩子里的函数签名写的是 `MaterialParams`；别名的长度和 Rust 侧的槽位数对不上时，
+        // 逐对象数据的布局就错开了——后面的 `prev_model` 读到的是参数，运动向量全乱。
+        assert!(
+            include_str!("geometry.wgsl").contains(&format!(
+                "alias MaterialParams = array<vec4<f32>, {PARAM_SLOTS}>;"
+            )),
+            "geometry.wgsl 里 MaterialParams 的长度和 kmaterial::standard::PARAM_SLOTS 对不上"
+        );
+    }
+
+    #[test]
+    fn the_device_is_asked_for_enough_sampled_textures() {
+        // 主着色器片元阶段的采样纹理（含深度纹理）一张张数出来，和建设备时要的上限比。
+        // 多声明一张而没抬上限的话，建管线时才报错，而且报的是「超过设备限制」不说是哪张。
+        let source = include_str!("shader.wgsl");
+        let declared = source
+            .lines()
+            .filter(|line| line.trim_start().starts_with("@group("))
+            .filter(|line| line.contains(": texture_"))
+            .count() as u32;
+        assert_eq!(
+            declared, SAMPLED_TEXTURES_PER_STAGE,
+            "shader.wgsl 声明了 {declared} 张采样纹理"
         );
     }
 
@@ -5113,12 +6556,13 @@ mod test {
 
     #[test]
     fn post_shader_exposes_every_entry_point() {
-        // 这四个名字硬编码在建管线的代码里。
+        // 这些名字硬编码在建管线的代码里。
         let source = include_str!("post.wgsl");
         for entry in [
             "fullscreen_vs",
             "bloom_extract_fs",
-            "bloom_blur_fs",
+            "bloom_down_fs",
+            "bloom_up_fs",
             "composite_fs",
         ] {
             assert!(source.contains(entry), "后处理着色器缺少入口 {entry}");
@@ -5143,7 +6587,8 @@ mod test {
 
     #[test]
     fn shadow_uniform_layouts_are_aligned() {
-        assert_eq!(size_of::<ShadowGlobals>(), 80);
+        // 矩阵(64) + params(16) + frame(16)：frame.x 是给带顶点钩子的材质的时间。
+        assert_eq!(size_of::<ShadowGlobals>(), 96);
         assert_eq!(size_of::<ShadowGlobals>() % 16, 0);
         assert_eq!(size_of::<ShadowObject>() % 16, 0);
     }
@@ -5165,6 +6610,7 @@ mod test {
     fn draw(mesh: u128, texture: u128) -> DrawCall {
         DrawCall {
             double_sided: false,
+            depth_write: false,
             mesh_id: Uuid::from_u128(mesh),
             shader_id: Uuid::nil(),
             texture_key: [Uuid::from_u128(texture); TEXTURE_KEY_SLOTS],
@@ -5172,6 +6618,7 @@ mod test {
             depth: 0.0,
             aabb: kmath::Aabb::new(kmath::Vec3::ZERO, kmath::Vec3::ONE),
             index_range: (0, 36),
+            instances: None,
             uniforms: ObjectUniforms::zeroed(),
         }
     }
@@ -5183,20 +6630,14 @@ mod test {
         // 要么布的背面没了，要么地面的背面被白画一遍。
         //
         // 两种症状都不报错。
-        let mut instances = Vec::new();
-        let mut bounds = Vec::new();
+        let mut instances = FrameInstances::default();
         let flat = draw(1, 1);
         let two_sided = DrawCall {
             double_sided: true,
             ..draw(1, 1)
         };
         // 其余的键完全一样，只有剔除模式不同。
-        let batches = build_batches_into(
-            &[flat.clone(), two_sided, flat],
-            &mut instances,
-            &mut bounds,
-            false,
-        );
+        let batches = build_batches_into(&[flat.clone(), two_sided, flat], &mut instances, false);
         assert_eq!(batches.len(), 3, "剔除模式不同的对象被合进了同一批");
         assert!(!batches[0].double_sided);
         assert!(batches[1].double_sided);
@@ -5209,8 +6650,7 @@ mod test {
         // 贴图都一样，也是两段不同的几何。合成一批的话 `draw_indexed`
         // 只会用其中一段的区间，另一段的实例会被画成同一段的样子——
         // 不报错，只是画面上多出一份不该在那里的三角形。
-        let mut instances = Vec::new();
-        let mut bounds = Vec::new();
+        let mut instances = FrameInstances::default();
         let first_group = draw(1, 1);
         let second_group = DrawCall {
             index_range: (36, 12),
@@ -5219,7 +6659,6 @@ mod test {
         let batches = build_batches_into(
             &[first_group.clone(), second_group, first_group],
             &mut instances,
-            &mut bounds,
             false,
         );
         assert_eq!(batches.len(), 3, "不同的索引区间被合进了同一批");
@@ -5233,8 +6672,7 @@ mod test {
         // 不透明那条路会重排。重排时把剔除模式和蒙皮放在同一优先级上，
         // 是因为两者都是换管线——不分组的话单双面交替出现，
         // 每个对象都要换一次管线。
-        let mut instances = Vec::new();
-        let mut bounds = Vec::new();
+        let mut instances = FrameInstances::default();
         let flat = draw(1, 1);
         let two_sided = DrawCall {
             double_sided: true,
@@ -5243,7 +6681,6 @@ mod test {
         let batches = build_batches_into(
             &[two_sided.clone(), flat.clone(), two_sided, flat],
             &mut instances,
-            &mut bounds,
             true,
         );
         assert_eq!(
@@ -5273,8 +6710,8 @@ mod test {
 
     /// 跑一遍半透明分批，返回批次和每批的第一个实例的距离。
     fn transparent_batch(mut draws: Vec<DrawCall>) -> Vec<f32> {
-        let mut instances = Vec::new();
-        let batches = build_transparent_batches(&mut draws, &mut instances, &mut Vec::new());
+        let mut instances = FrameInstances::default();
+        let batches = build_transparent_batches(&mut draws, &mut instances);
         // 排序后的顺序体现在 draws 上，按批次的 first 反查。
         batches
             .iter()
@@ -5302,8 +6739,8 @@ mod test {
             draw_at(2, 2, 50.0),
             draw_at(1, 1, 10.0),
         ];
-        let mut instances = Vec::new();
-        let batches = build_transparent_batches(&mut draws, &mut instances, &mut Vec::new());
+        let mut instances = FrameInstances::default();
+        let batches = build_transparent_batches(&mut draws, &mut instances);
         assert_eq!(batches.len(), 3, "隔着一个物体的两项被错误合并了");
 
         // 相邻的同类项仍然要合并。
@@ -5312,8 +6749,8 @@ mod test {
             draw_at(1, 1, 90.0),
             draw_at(2, 2, 10.0),
         ];
-        instances.clear();
-        let batches = build_transparent_batches(&mut adjacent, &mut instances, &mut Vec::new());
+        instances = FrameInstances::default();
+        let batches = build_transparent_batches(&mut adjacent, &mut instances);
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].count, 2);
     }
@@ -5326,10 +6763,10 @@ mod test {
             draw_at(2, 2, 5.0),
             draw_at(3, 3, f32::NAN),
         ];
-        let mut instances = Vec::new();
-        let batches = build_transparent_batches(&mut draws, &mut instances, &mut Vec::new());
+        let mut instances = FrameInstances::default();
+        let batches = build_transparent_batches(&mut draws, &mut instances);
         assert_eq!(batches.len(), 3);
-        assert_eq!(instances.len(), 3);
+        assert_eq!(instances.objects.len(), 3);
     }
 
     #[test]
@@ -5337,13 +6774,12 @@ mod test {
         // 实例下标是全局的：两边各建一个数组的话下标会撞，
         // 半透明物体会用上不透明物体的变换矩阵。
         let opaque = [draw(1, 1), draw(2, 2)];
-        let mut instances = Vec::new();
-        let opaque_batches = build_batches(&opaque, &mut instances, &mut Vec::new());
+        let mut instances = FrameInstances::default();
+        let opaque_batches = build_batches(&opaque, &mut instances);
         let mut transparent = vec![draw_at(3, 3, 10.0), draw_at(4, 4, 20.0)];
-        let transparent_batches =
-            build_transparent_batches(&mut transparent, &mut instances, &mut Vec::new());
+        let transparent_batches = build_transparent_batches(&mut transparent, &mut instances);
 
-        assert_eq!(instances.len(), 4);
+        assert_eq!(instances.objects.len(), 4);
         // 半透明的批次全部指向后两个槽位。
         for batch in &transparent_batches {
             assert!(
@@ -5359,9 +6795,9 @@ mod test {
 
     /// 跑一遍分批，返回批次与按批次排好的实例数组。
     fn batch(draws: &[DrawCall]) -> (Vec<Batch>, Vec<ObjectUniforms>) {
-        let mut instances = Vec::new();
-        let batches = build_batches(draws, &mut instances, &mut Vec::new());
-        (batches, instances)
+        let mut instances = FrameInstances::default();
+        let batches = build_batches(draws, &mut instances);
+        (batches, instances.objects)
     }
 
     #[test]
@@ -5676,6 +7112,7 @@ mod test {
             let globals = ShadowGlobals {
                 light_view_proj: matrix.to_cols_array_2d(),
                 params: [index as f32, 0.0, 0.0, 1.0],
+                frame: [0.0; 4],
             };
             let start = index * SHADOW_GLOBALS_STRIDE as usize;
             blob[start..start + size_of::<ShadowGlobals>()]
@@ -5692,5 +7129,53 @@ mod test {
                 "第 {index} 级读到了别人的数据"
             );
         }
+    }
+}
+
+/// 无头渲染器代替交换链的纹理。
+fn create_offscreen(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("kengine headless target"),
+        size: wgpu::Extent3d {
+            width: config.width.max(1),
+            height: config.height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: config.format,
+        usage: config.usage,
+        view_formats: &[],
+    })
+}
+
+/// 把一个绘制项列表清空，换成任意生命周期，保留分配。
+///
+/// 列表是空的，`map` 一次都不会跑；标准库对「同布局的 `into_iter().map().collect()`」
+/// 原地复用分配，所以这里没有拷贝也没有重新分配，只是让借用检查器忘掉旧的借用。
+fn recycle_items<'b>(mut items: Vec<kscene::RenderItem<'_>>) -> Vec<kscene::RenderItem<'b>> {
+    items.clear();
+    items
+        .into_iter()
+        .map(|_| unreachable!("列表已清空"))
+        .collect()
+}
+
+#[cfg(test)]
+mod recycle_tests {
+    use super::recycle_items;
+
+    #[test]
+    fn recycling_keeps_the_allocation() {
+        let items: Vec<kscene::RenderItem<'_>> = Vec::with_capacity(1000);
+        let pointer = items.as_ptr() as usize;
+        let recycled: Vec<kscene::RenderItem<'static>> = recycle_items(items);
+        assert!(
+            recycled.capacity() >= 1000,
+            "分配丢了：{}",
+            recycled.capacity()
+        );
+        assert_eq!(recycled.as_ptr() as usize, pointer, "换了一块分配");
     }
 }

@@ -13,8 +13,11 @@
 
 #![warn(missing_docs)]
 
+mod bvh;
 pub mod decal;
 mod primitives;
+mod teapot;
+mod teapot_data;
 
 use bytemuck::{Pod, Zeroable};
 use kasset::ResourceData;
@@ -25,12 +28,16 @@ use kcore::{
 use kmath::{Aabb, Vec3};
 use std::{fmt, path::PathBuf, sync::Arc};
 
+pub use bvh::MeshBvh;
+
 /// [`Mesh`] 的资源类型标识。
 pub const MESH_TYPE_UUID: Uuid = uuid!("5d7e9a32-1c48-4f60-8b93-a2e5c740d816");
 
 /// 常用类型的集中导出。
 pub mod prelude {
-    pub use crate::{Mesh, MeshGroup, MeshSource, MorphDelta, MorphTarget, SkinVertex, Vertex};
+    pub use crate::{
+        Mesh, MeshBvh, MeshGroup, MeshSource, MorphDelta, MorphTarget, SkinVertex, Vertex,
+    };
     pub use kmath::Aabb;
 }
 
@@ -662,6 +669,17 @@ impl Mesh {
         self.data_mut().aabb = aabb;
     }
 
+    /// 手动指定局部包围盒（剔除拿它当真相）。
+    ///
+    /// 顶点钩子（`material_vertex`）在 GPU 上挪顶点时，CPU 这边按原始顶点算的盒子不知道它们挪去了哪儿，
+    /// 跑出盒子的部分会跟着整个物体被视锥剔除。给一个装得下挪动后所有位置的盒子
+    /// （three.js 里手动设 `geometry.boundingSphere`，或者干脆 `frustumCulled = false`）。
+    /// 之后再调 [`recompute_bounds`](Self::recompute_bounds) 会把它覆盖掉。
+    pub fn with_bounds(mut self, aabb: Aabb) -> Self {
+        self.data_mut().aabb = aabb;
+        self
+    }
+
     /// 索引数量，即 `draw_indexed` 的绘制量。
     pub fn index_count(&self) -> u32 {
         self.data.indices.len() as u32
@@ -853,7 +871,13 @@ impl Mesh {
 ///
 /// 返回 `Some((t, 面法线))` 或 `None`（平行/背面在调用侧过滤）。
 /// 用行列式形式，避免除以面积再乘回来的精度损失。
-fn ray_triangle(origin: Vec3, dir: Vec3, v0: Vec3, v1: Vec3, v2: Vec3) -> Option<(f32, Vec3)> {
+pub(crate) fn ray_triangle(
+    origin: Vec3,
+    dir: Vec3,
+    v0: Vec3,
+    v1: Vec3,
+    v2: Vec3,
+) -> Option<(f32, Vec3)> {
     let edge1 = v1 - v0;
     let edge2 = v2 - v0;
     let normal = edge1.cross(edge2);
@@ -1648,7 +1672,10 @@ mod test {
         let hit = plane1.raycast(Vec3::new(0.0, 5.0, 0.0), Vec3::NEG_Y);
         assert!(hit.is_some(), "垂直打平面应命中");
         let (t, _) = hit.unwrap();
-        assert!((t - 5.0).abs() < 0.1, "平面在 Y=0，距离应约为 5，得到 t={t}");
+        assert!(
+            (t - 5.0).abs() < 0.1,
+            "平面在 Y=0，距离应约为 5，得到 t={t}"
+        );
     }
 
     #[test]
@@ -1657,4 +1684,3 @@ mod test {
         assert!(mesh.raycast(Vec3::ZERO, Vec3::Y).is_none());
     }
 }
-

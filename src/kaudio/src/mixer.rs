@@ -400,7 +400,6 @@ impl Mixer {
             }
         }
 
-
         // 播完的非循环声源就地回收，调用方不必自己收尸。
         for handle in finished {
             self.sounds.free(handle);

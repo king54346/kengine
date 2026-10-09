@@ -40,7 +40,9 @@ pub use shake::ScreenShake;
 
 /// 常用类型的集中导出。
 pub mod prelude {
-    pub use crate::{Camera, FlyCamera, Frustum, OrbitCamera, PanCamera, Projection, ScreenShake};
+    pub use crate::{
+        Camera, CameraTarget, FlyCamera, Frustum, OrbitCamera, PanCamera, Projection, ScreenShake,
+    };
     pub use kmath::Intersection;
 }
 
@@ -95,7 +97,48 @@ pub struct Camera {
     pub enabled: bool,
     /// 是否对本相机启用视锥剔除。
     pub frustum_culling: bool,
+    /// 这台相机看得见**哪些渲染层**。位掩码，和节点的
+    /// `render_layers` 按位与，非零才画。
+    ///
+    /// 默认全 1：看得见一切。典型用法是「两个场景共用一棵树」——
+    /// 转场、画中画、遮罩里那个只该出现在另一台相机里的物体，
+    /// 各自放进一层，相机只开自己那层。
+    pub layers: u32,
+    /// 画到哪儿。默认 [`CameraTarget::Screen`]。
+    pub target: CameraTarget,
+    /// 这台相机自己的纯色背景（线性 HDR 值），盖过场景的背景设置。
+    ///
+    /// 离屏相机最常用：转场的两个「场景」其实在同一棵树里，各自的背景色
+    /// 只能跟着相机走。
+    pub background: Option<Vec3>,
 }
+
+/// 相机的输出目标。
+///
+/// 屏幕只有一个，渲染器取**第一个**启用的屏幕相机；离屏视图各有编号，
+/// 在后处理里按编号采样（`view0`、`view1`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CameraTarget {
+    /// 交换链。
+    #[default]
+    Screen,
+    /// 离屏视图 `0..MAX_VIEWS`。
+    ///
+    /// 画出来的是**线性 HDR**、没有后处理——它是给后处理当素材的，
+    /// 先色调映射一遍再混进主画面等于压两次。
+    View(u8),
+    /// 覆盖层：画完主画面后用这台相机再画一遍、叠在上面（第一人称手里的枪）。
+    ///
+    /// 自己的 FOV、自己的渲染层，不和主画面比深度——枪永远不会插进墙里。
+    /// 不画天空，没画到的地方透出主画面。只认第一台启用的覆盖层相机。
+    Overlay,
+}
+
+/// 离屏视图最多几个。
+///
+/// 每个视图是一次完整的场景渲染（阴影、聚簇、主 pass 全套），
+/// 放开了就是「一不小心帧时间翻几倍」。两个够转场和遮罩用。
+pub const MAX_VIEWS: u8 = 2;
 
 impl Default for Camera {
     fn default() -> Self {
@@ -105,6 +148,9 @@ impl Default for Camera {
             z_far: 1000.0,
             enabled: true,
             frustum_culling: true,
+            layers: u32::MAX,
+            target: CameraTarget::Screen,
+            background: None,
         }
     }
 }
@@ -170,6 +216,38 @@ impl kcore::visitor::Visit for Camera {
         self.z_far.visit("ZFar", &mut region)?;
         self.enabled.visit("Enabled", &mut region)?;
         self.frustum_culling.visit("FrustumCulling", &mut region)?;
+        // 这两项是后加的：旧文件里没有，读不到就按默认值（看得见一切、
+        // 画到屏幕），而不是整台相机读失败。
+        let mut layers = self.layers;
+        if layers.visit("Layers", &mut region).is_ok() {
+            self.layers = layers;
+        } else if region.is_reading() {
+            self.layers = u32::MAX;
+        }
+        let mut view = match self.target {
+            CameraTarget::Screen => -1i32,
+            CameraTarget::Overlay => -2,
+            CameraTarget::View(slot) => i32::from(slot),
+        };
+        if view.visit("Target", &mut region).is_ok() {
+            self.target = if view == -2 {
+                CameraTarget::Overlay
+            } else if view < 0 {
+                CameraTarget::Screen
+            } else {
+                CameraTarget::View(view.min(i32::from(MAX_VIEWS) - 1) as u8)
+            };
+        } else if region.is_reading() {
+            self.target = CameraTarget::Screen;
+        }
+        // 背景：存成「有没有」+ 颜色两项。
+        let mut has_background = self.background.is_some();
+        let mut background = self.background.unwrap_or(Vec3::ZERO);
+        let read_flag = has_background.visit("HasBackground", &mut region).is_ok();
+        let read_color = background.visit("Background", &mut region).is_ok();
+        if region.is_reading() {
+            self.background = (read_flag && read_color && has_background).then_some(background);
+        }
         Ok(())
     }
 }
@@ -189,6 +267,36 @@ impl Camera {
             projection: Projection::Orthographic { height },
             ..Default::default()
         }
+    }
+
+    /// 近裁剪面（three.js 构造函数的第三个参数）。
+    pub fn with_near(mut self, near: f32) -> Self {
+        self.z_near = near;
+        self
+    }
+
+    /// 远裁剪面。
+    pub fn with_far(mut self, far: f32) -> Self {
+        self.z_far = far;
+        self
+    }
+
+    /// 只看 `layers` 这些层。
+    pub fn with_layers(mut self, layers: u32) -> Self {
+        self.layers = layers;
+        self
+    }
+
+    /// 这台相机用自己的纯色背景。见 [`Camera::background`]。
+    pub fn with_background(mut self, color: Vec3) -> Self {
+        self.background = Some(color);
+        self
+    }
+
+    /// 画到离屏视图，而不是屏幕。见 [`CameraTarget::View`]。
+    pub fn with_target(mut self, target: CameraTarget) -> Self {
+        self.target = target;
+        self
     }
 
     /// 用自己算好的投影矩阵创建一台相机。

@@ -61,10 +61,17 @@ impl Script {
 
     /// 包成工厂函数的完整源码。
     ///
-    /// 换行是必须的：脚本最后一行如果是 `// 注释`，不换行会把闭合的 `}`
+    /// 结尾的换行是必须的：脚本最后一行如果是 `// 注释`，不换行会把闭合的 `}`
     /// 一起注释掉，报出来的语法错误指向一个根本不存在的位置。
+    ///
+    /// 开头那个换行也别去掉：有了它，boa 报错里的行号正好等于脚本文件里的
+    /// 行号（`errors_name_the_script_file_and_line` 钉着这件事）。
+    ///
+    /// 工厂收一个参数 `self`：这个实例自己的节点。它遮住了全局那个
+    /// 「当前在跑谁」的 `self` getter——`await` 之后、计时器和信号回调里，
+    /// 当前在跑的未必是自己，但闭包里的 `self` 永远是。
     pub fn as_factory(&self) -> String {
-        format!("(function(){{\n{}\n}})", self.source)
+        format!("(function(self){{\n{}\n}})", self.source)
     }
 }
 
@@ -120,7 +127,7 @@ mod test {
         let script = Script::new("return {}; // 收尾", "x.js");
         let factory = script.as_factory();
 
-        assert!(factory.starts_with("(function(){\n"));
+        assert!(factory.starts_with("(function(self){\n"));
         assert!(factory.ends_with("\n})"));
     }
 

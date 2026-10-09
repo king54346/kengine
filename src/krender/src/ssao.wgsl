@@ -94,7 +94,9 @@ const KERNEL: array<vec3<f32>, 16> = array<vec3<f32>, 16>(
 );
 
 @fragment
-fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) f32 {
+// 输出是 vec4：遮蔽图是 Rg32Float（r = SSAO，g = 接触阴影），片元输出的
+// 分量数不能少于目标格式的通道数。管线只开了红通道的写入，g 不受影响。
+fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let coord = vec2<i32>(position.xy);
     let uv = position.xy * params.texel.xy;
 
@@ -102,7 +104,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) f32 {
     // 天空：深度是清除值，那里没有几何，遮蔽为 0（完全不遮）。
     // 不特判的话反解出来的位置在无穷远，采样全落空，结果是随机噪声。
     if (depth >= 1.0) {
-        return 1.0;
+        return vec4<f32>(1.0);
     }
 
     let origin = world_position_at(coord, uv);
@@ -159,5 +161,5 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) f32 {
     let strength = params.settings.y;
     // 输出的是「透光率」：1 = 完全不遮，0 = 全黑。
     // 主着色器直接乘进 `occlusion`，所以这个方向省掉一次取反。
-    return clamp(1.0 - occlusion / f32(max(count, 1)) * strength, 0.0, 1.0);
+    return vec4<f32>(clamp(1.0 - occlusion / f32(max(count, 1)) * strength, 0.0, 1.0));
 }

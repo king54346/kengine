@@ -1,0 +1,16 @@
+[package]
+name = "kvideo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+klog = { path = "../klog" }
+ktexture = { path = "../ktexture" }
+# MP4 容器：按帧取出 H.264 样本（长度前缀的 NAL 单元）和 avcC 里的 SPS / PPS。
+mp4 = "0.14"
+# H.264 解码：OpenH264 的源码随 crate 一起编译，不依赖系统里的 ffmpeg / 编解码器。
+# 它是 C++，要本机有 C/C++ 编译器，所以放在 `h264` 特性后面、默认关（见 lib.rs「特性」一节）。
+openh264 = { version = "0.9", optional = true }
+
+[features]
+h264 = ["dep:openh264"]

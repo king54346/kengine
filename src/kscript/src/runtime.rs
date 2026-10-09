@@ -28,11 +28,16 @@ use crate::{
     host::{Host, HostGuard, with_host, with_scene},
     script::Script,
 };
-use boa_engine::{Context, JsObject, JsResult, JsValue, Source, js_string};
+use boa_engine::{
+    Context, JsObject, JsResult, JsValue, Source,
+    job::{Job, JobExecutor, SimpleJobExecutor},
+    js_string,
+};
 use kasset::ResourceManager;
 use kcore::pool::Handle;
 use kinput::Input;
 use kscene::{Node, Scene, ScriptSlot};
+use std::{cell::Cell, rc::Rc};
 /// 脚本抛给游戏侧的一个信号。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Signal {
@@ -42,6 +47,28 @@ pub struct Signal {
     pub value: f64,
     /// 发出它的节点。**在发出的那一刻**记下，不是事后猜的。
     pub source: Handle<Node>,
+}
+
+/// `console.*` 的级别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConsoleLevel {
+    /// `console.debug`。
+    Debug,
+    /// `console.log` / `console.info`。
+    Info,
+    /// `console.warn`。
+    Warn,
+    /// `console.error`、失败的 `console.assert`。
+    Error,
+}
+
+/// 脚本用 `console.*` 写下的一行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsoleMessage {
+    /// 级别。
+    pub level: ConsoleLevel,
+    /// 文本（参数已经展开、用空格连好）。
+    pub text: String,
 }
 
 /// 一个脚本实例的编号。
@@ -60,6 +87,8 @@ struct Instance {
     ready: bool,
     /// 出过错就停掉，不再调用任何方法。
     failed: bool,
+    /// 停掉之后它的计时器和信号订阅清过了没有。
+    forgotten: bool,
     name: String,
     /// 停用它的那次错误。
     ///
@@ -118,6 +147,8 @@ pub struct ScriptRuntime {
     /// 详见 [`HostGuard::park`]。
     spare: Option<Scene>,
     stats: ScriptStats,
+    /// 第几次 `_process`。计时器靠它保证「最早下一帧才触发」。
+    tick: u64,
 }
 
 impl std::fmt::Debug for ScriptRuntime {
@@ -150,7 +181,17 @@ impl ScriptRuntime {
 
     /// 建一个装好引擎 API 的运行时。
     pub fn new() -> Self {
-        let mut context = Context::default();
+        // 任务队列包一层计数：每次回调之后都要清队列（`await` 的后续在那里跑），
+        // 而 boa 自带的执行器空跑一次也要搭一整套 future 组——实测让空回调
+        // 慢了四成。计数为零时直接跳过。
+        let executor = Rc::new(CountingExecutor {
+            inner: Rc::new(SimpleJobExecutor::new()),
+            pending: Cell::new(0),
+        });
+        let mut context = Context::builder()
+            .job_executor(executor)
+            .build()
+            .expect("默认配置建上下文不会失败");
 
         let mut limits = context.runtime_limits();
         limits.set_loop_iteration_limit(Self::DEFAULT_LOOP_LIMIT);
@@ -158,12 +199,20 @@ impl ScriptRuntime {
         context.set_runtime_limits(limits);
 
         bridge::register(&mut context);
+        crate::bridge_ext::register(&mut context);
 
         // 前奏把扁平的桥包成 Node / Vector3 那套手感。
-        if let Err(error) = context.eval(Source::from_bytes(include_str!("prelude.js"))) {
-            // 前奏是编译期就固定的代码，跑不起来说明引擎自己坏了，
-            // 早失败早暴露，比让每个脚本都莫名其妙地报错强。
-            panic!("kscript 前奏脚本执行失败：{error}");
+        for (name, source) in [
+            ("prelude.js", include_str!("prelude.js")),
+            ("prelude_ext.js", include_str!("prelude_ext.js")),
+        ] {
+            if let Err(error) =
+                context.eval(Source::from_bytes(source).with_path(std::path::Path::new(name)))
+            {
+                // 前奏是编译期就固定的代码，跑不起来说明引擎自己坏了，
+                // 早失败早暴露，比让每个脚本都莫名其妙地报错强。
+                panic!("kscript 前奏脚本 {name} 执行失败：{error}");
+            }
         }
 
         Self {
@@ -172,6 +221,7 @@ impl ScriptRuntime {
             host: Host::default(),
             spare: Some(Scene::new()),
             stats: ScriptStats::default(),
+            tick: 0,
         }
     }
 
@@ -517,7 +567,13 @@ impl ScriptRuntime {
     /// 源码有语法错误、或者返回的不是对象时返回 [`None`] 并记一条日志——
     /// 一个坏脚本不该让整个场景起不来。
     pub fn instantiate(&mut self, script: &Script, node: Handle<Node>) -> Option<InstanceId> {
-        let factory = match self.context.eval(Source::from_bytes(&script.as_factory())) {
+        // 带上文件名：调用栈里显示的是 `spin.js:12:5`，而不是 `unknown at :12:5`。
+        let source = script.as_factory();
+        let path = std::path::PathBuf::from(script.name());
+        let factory = match self
+            .context
+            .eval(Source::from_bytes(&source).with_path(&path))
+        {
             Ok(value) => value,
             Err(error) => {
                 klog::error!("脚本「{}」解析失败：{error}", script.name());
@@ -530,7 +586,14 @@ impl ScriptRuntime {
             return None;
         };
 
-        let produced = match callable.call(&JsValue::undefined(), &[], &mut self.context) {
+        // 登记处此刻没被寄存出去，直接问它要下标。走 `host::id_of` 的话
+        // 会因为不在 tick 里而拿到 -1。
+        let node_id = self.host.registry.id_of(node);
+        // `self` 作为工厂参数传进去，绑定到这个实例自己的节点——
+        // `await` 之后、计时器和信号回调里它都不会变成别人。
+        let self_node = call_global(&mut self.context, "__makeNode", &[JsValue::from(node_id)])
+            .unwrap_or_else(|_| JsValue::undefined());
+        let produced = match callable.call(&JsValue::undefined(), &[self_node], &mut self.context) {
             Ok(value) => value,
             Err(error) => {
                 klog::error!("脚本「{}」初始化时抛异常：{error}", script.name());
@@ -546,16 +609,13 @@ impl ScriptRuntime {
             return None;
         };
 
-        // 登记处此刻没被寄存出去，直接问它要下标。走 `host::id_of` 的话
-        // 会因为不在 tick 里而拿到 -1。
-        let node_id = self.host.registry.id_of(node);
-
         let instance = Instance {
             object: object.clone(),
             node,
             node_id,
             ready: false,
             failed: false,
+            forgotten: false,
             name: script.name().to_string(),
             error: None,
         };
@@ -704,6 +764,16 @@ impl ScriptRuntime {
         // `&mut Scene`。
         let guard = HostGuard::park(scene, input, &mut self.host, &mut self.spare, dt, elapsed);
 
+        let frame = method == "_process";
+        if frame {
+            self.tick += 1;
+            let _ = call_global(
+                &mut self.context,
+                "__beginTick",
+                &[JsValue::from(self.tick as f64)],
+            );
+        }
+
         for index in 0..self.instances.len() {
             let Some(instance) = self.instances[index].as_ref() else {
                 continue;
@@ -728,13 +798,22 @@ impl ScriptRuntime {
                 // 「借用**期间**不碰 VM」）。不注销的话别的脚本还能通过
                 // `node.script` 摸到一个挂在死节点上的对象。
                 unregister_instance(&mut self.context, node_id);
+                let _ = call_global(
+                    &mut self.context,
+                    "__forgetOwner",
+                    &[JsValue::from(node_id)],
+                );
                 continue;
             }
 
             with_host(|host| host.current = node);
+            // 剖析面板里按脚本文件名分开记（同名的多个实例累加、计次数）。
+            let _profile = klog::profile!(profile_label(&name));
 
             if !ready {
-                if let Err(error) = call_method(&mut self.context, &object, "_ready", &[]) {
+                let result = call_method(&mut self.context, &object, "_ready", &[]);
+                settle(&mut self.context, &result, node_id);
+                if let Err(error) = result {
                     fail(
                         &mut self.instances,
                         &mut self.stats,
@@ -751,7 +830,9 @@ impl ScriptRuntime {
             }
 
             let args = [JsValue::from(dt as f64)];
-            if let Err(error) = call_method(&mut self.context, &object, method, &args) {
+            let result = call_method(&mut self.context, &object, method, &args);
+            settle(&mut self.context, &result, node_id);
+            if let Err(error) = result {
                 fail(
                     &mut self.instances,
                     &mut self.stats,
@@ -765,12 +846,90 @@ impl ScriptRuntime {
             self.stats.ran += 1;
         }
 
+        if frame {
+            // 到点的计时器。每跑一个清一次 Promise 队列：`await wait()` 后面的
+            // 代码在 `self` 还指着它自己的时候就跑完。上限防的是回调里不停
+            // 登记零延迟计时器——那些按约定要到下一帧才触发，正常不会撞上。
+            for _ in 0..MAX_TIMERS_PER_TICK {
+                match call_global(
+                    &mut self.context,
+                    "__fireNextTimer",
+                    &[JsValue::from(elapsed as f64)],
+                ) {
+                    Ok(value) if value.to_boolean() => drain_jobs(&mut self.context),
+                    Ok(_) => break,
+                    Err(error) => {
+                        klog::error!("计时器调度出错：{error}");
+                        break;
+                    }
+                }
+            }
+        }
+        // 异步回调里抛的异常：算到出错的那个脚本头上。宿主此刻还寄存着，
+        // 从线程局部里取。
+        let async_errors =
+            with_host(|host| std::mem::take(&mut host.async_errors)).unwrap_or_default();
+
         drop(guard);
+
+        for (node, message) in async_errors {
+            let found = self
+                .instances
+                .iter()
+                .position(|slot| slot.as_ref().is_some_and(|i| i.node == node && !i.failed));
+            match found {
+                Some(index) => {
+                    let name = self.instances[index]
+                        .as_ref()
+                        .map(|i| i.name.clone())
+                        .unwrap_or_default();
+                    fail_with(
+                        &mut self.instances,
+                        &mut self.stats,
+                        index,
+                        &name,
+                        "异步回调",
+                        &message,
+                    );
+                }
+                None => klog::error!("[脚本] 异步回调抛异常：{message}"),
+            }
+        }
+        // 停掉的脚本：它登记的计时器、信号订阅一并作废，不然它停了回调还在跑。
+        for slot in self.instances.iter_mut().flatten() {
+            if slot.failed && !slot.forgotten {
+                slot.forgotten = true;
+                let _ = call_global(
+                    &mut self.context,
+                    "__forgetOwner",
+                    &[JsValue::from(slot.node_id)],
+                );
+            }
+        }
 
         // guard 落下时宿主状态（含这一轮攒的信号）已经还回 `self.host`。
         let signals = std::mem::take(&mut self.host.signals);
         self.stats.signals = signals.len();
         signals
+    }
+
+    /// 取走自上次以来脚本用 `console.*` 写下的日志（调试面板、测试用）。
+    ///
+    /// klog 那边已经同时打过了；这里是给想在游戏里显示控制台的人留的口子。
+    /// 每次 tick 最多攒 1024 行，取走才清。
+    pub fn take_console(&mut self) -> Vec<ConsoleMessage> {
+        std::mem::take(&mut self.host.log)
+            .into_iter()
+            .map(|(level, text)| ConsoleMessage {
+                level: match level {
+                    0 => ConsoleLevel::Debug,
+                    2 => ConsoleLevel::Warn,
+                    3 => ConsoleLevel::Error,
+                    _ => ConsoleLevel::Info,
+                },
+                text,
+            })
+            .collect()
     }
 
     /// 某个脚本文件重新加载了：把用它的实例全部作废，下一帧重建。
@@ -779,8 +938,9 @@ impl ScriptRuntime {
     /// 「运行时手里那个旧实例得扔掉」——不扔的话文件改了也没反应，
     /// 看起来像热重载坏了。
     ///
-    /// **脚本内部的状态会丢**：新实例从头开始，闭包变量回到初值。
-    /// 要保住得让脚本自己实现存取接口，那是另一件事（见 PLAN 的未做项）。
+    /// **状态靠 `_save` / `_load` 带过去**：实现了 `_save()` 的脚本，重载前先存一份，
+    /// 新实例建好后用它调 `_load()`——和读档同一条路。没实现的从头开始，
+    /// 闭包变量回到初值。旧实例登记的计时器和信号订阅一并作废。
     pub fn reload_path(&mut self, scene: &mut Scene, path: &std::path::Path) -> usize {
         let wanted = normalize(&path.to_string_lossy());
         let mut reset = 0;
@@ -798,9 +958,22 @@ impl ScriptRuntime {
                 // 槽位记的下标就是实例数组的下标。
                 let mut stale = None;
                 if let Some(entry) = self.instances.get_mut(slot.instance as usize) {
-                    stale = entry.take().map(|instance| instance.node_id);
+                    stale = entry.take();
                 }
-                if let Some(node_id) = stale {
+                if let Some(instance) = stale {
+                    let node_id = instance.node_id;
+                    // 带着状态重载：旧实例有 `_save` 的话先存一份，新实例实例化时
+                    // 会拿它调 `_load`（和读档走同一条路）。改一行代码不用从头再玩一遍。
+                    if !instance.failed
+                        && let Some(state) = self.call_save(&instance.object, &instance.name)
+                    {
+                        slot.state = state;
+                    }
+                    let _ = call_global(
+                        &mut self.context,
+                        "__forgetOwner",
+                        &[JsValue::from(node_id)],
+                    );
                     // 旧对象要从 `__instances` 里拿掉：下一帧重建时会挂上新的，
                     // 中间这一帧别的脚本不该还能调到改文件之前的那个。
                     unregister_instance(&mut self.context, node_id);
@@ -823,6 +996,7 @@ impl ScriptRuntime {
         for instance in self.instances.drain(..).flatten() {
             unregister_instance(&mut self.context, instance.node_id);
         }
+        let _ = call_global(&mut self.context, "__resetAsync", &[]);
         let prototypes = std::mem::take(&mut self.host.prototypes);
         self.host = Host {
             prototypes,
@@ -845,6 +1019,18 @@ fn fail(
     name: &str,
     method: &str,
     error: &boa_engine::JsError,
+) {
+    fail_with(instances, stats, index, name, method, &error.to_string());
+}
+
+/// [`fail`] 的文本版：异步回调的错误在 JS 侧就已经变成了文本。
+fn fail_with(
+    instances: &mut [Option<Instance>],
+    stats: &mut ScriptStats,
+    index: usize,
+    name: &str,
+    method: &str,
+    error: &str,
 ) {
     klog::error!("脚本「{name}」的 {method} 抛异常，已停用该脚本：{error}");
     if let Some(instance) = instances[index].as_mut() {
@@ -896,6 +1082,84 @@ fn unregister_instance(context: &mut Context, node_id: u32) {
     };
     let key: boa_engine::property::PropertyKey = js_string!(node_id.to_string().as_str()).into();
     let _ = table.delete_property_or_throw(key, context);
+}
+
+/// 一次回调之后：返回了 Promise（`async` 方法）就盯着它的拒绝；
+/// 然后把 Promise 队列清空——`await` 之后的代码就是在这里接着跑的。
+///
+/// 写成自由函数：跑脚本期间 `self.host` 被寄存凭证借着，吃 `&mut self` 过不了借用检查。
+fn settle(context: &mut Context, result: &JsResult<JsValue>, node_id: u32) {
+    if let Ok(value) = result
+        && let Some(object) = value.as_object()
+        && boa_engine::object::builtins::JsPromise::from_object(object.clone()).is_ok()
+    {
+        let _ = call_global(
+            context,
+            "__watchPromise",
+            &[value.clone(), JsValue::from(node_id)],
+        );
+    }
+    drain_jobs(context);
+}
+
+/// 跑完 Promise 队列里所有排着的任务。
+fn drain_jobs(context: &mut Context) {
+    if let Err(error) = context.run_jobs() {
+        klog::error!("[脚本] Promise 任务出错：{error}");
+    }
+}
+
+/// boa 的 [`SimpleJobExecutor`] 外面包一层「排了几个」的计数。
+struct CountingExecutor {
+    inner: Rc<SimpleJobExecutor>,
+    pending: Cell<usize>,
+}
+
+impl JobExecutor for CountingExecutor {
+    fn enqueue_job(self: Rc<Self>, job: Job, context: &mut Context) {
+        self.pending.set(self.pending.get() + 1);
+        self.inner.clone().enqueue_job(job, context);
+    }
+
+    fn run_jobs(self: Rc<Self>, context: &mut Context) -> JsResult<()> {
+        if self.pending.get() == 0 {
+            return Ok(());
+        }
+        let result = self.inner.clone().run_jobs(context);
+        // 跑的过程中新排进来的任务，内层那一轮已经一并跑完了。
+        self.pending.set(0);
+        result
+    }
+}
+
+/// 剖析用的标签要 `&'static str`。脚本名是运行时才知道的字符串，每个不同的名字
+/// 只泄漏一次（脚本文件就那么几十个），之后都查表。剖析关着时不调用。
+fn profile_label(name: &str) -> &'static str {
+    if !klog::profile::is_enabled() {
+        return "脚本";
+    }
+    static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let Ok(mut names) = NAMES.lock() else {
+        return "脚本";
+    };
+    if let Some(found) = names.iter().find(|n| **n == name) {
+        return found;
+    }
+    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+    names.push(leaked);
+    leaked
+}
+
+/// 一次 tick 最多跑多少个计时器回调。
+const MAX_TIMERS_PER_TICK: usize = 10_000;
+
+/// 调一个前奏里定义的全局函数。
+fn call_global(context: &mut Context, name: &str, args: &[JsValue]) -> JsResult<JsValue> {
+    let function = context.global_object().get(js_string!(name), context)?;
+    match function.as_callable() {
+        Some(callable) => callable.call(&JsValue::undefined(), args, context),
+        None => Ok(JsValue::undefined()),
+    }
 }
 
 /// 调用实例上的一个方法。方法不存在时安静跳过——生命周期方法都是可选的。

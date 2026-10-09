@@ -29,6 +29,8 @@ impl PointMaterial {
     ///
     /// 配套的几何必须由 [`kmesh::Mesh::point_sprites`] 生成——顶点的
     /// `uv` 编码了四个角的位置，普通网格挂上这个材质会整个塌成一个点。
+    // 这几个材质模型是「拼一份 `Material`」的工厂，不是自己的类型——`new` 返回 `Material` 是有意的。
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(radius: f32) -> Material {
         static SHADER: OnceLock<Resource<Shader>> = OnceLock::new();
         Material::standard()
@@ -50,6 +52,16 @@ impl PointMaterial {
             .with_param(1, Vec4::new(0.0, 0.0, 1e4, 0.0))
     }
 
+    /// 圆点：把 [`new`](Self::new) 建的材质改成圆的（three.js 的 `shapeCircle()`）。
+    pub fn round(mut material: Material) -> Material {
+        let radius = material
+            .param(0)
+            .and_then(|v| v.as_vec4())
+            .map_or(0.0, |v| v.x);
+        material.set_param(0, Vec4::new(radius, 1.0, 0.0, 0.0));
+        material
+    }
+
     /// 每帧把相机位置换算到点云节点的局部空间写进材质。
     ///
     /// `node_world` 是点云那个节点的世界变换矩阵。矩阵不可逆时（缩放为零）
@@ -68,7 +80,10 @@ impl PointMaterial {
             .param(0)
             .and_then(|value| value.as_vec4())
             .unwrap_or(Vec4::ZERO);
-        material.set_param(0, Vec4::new(radius.max(0.0), existing.y, existing.z, existing.w));
+        material.set_param(
+            0,
+            Vec4::new(radius.max(0.0), existing.y, existing.z, existing.w),
+        );
     }
 }
 

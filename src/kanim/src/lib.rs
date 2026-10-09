@@ -52,6 +52,7 @@ mod curve;
 mod ik;
 mod machine;
 mod player;
+mod tween;
 
 pub use clip::{
     AnimationClip, Channel, MaterialProperty, MorphSample, Pose, PoseEntry, PropertySample, Track,
@@ -59,12 +60,13 @@ pub use clip::{
 pub use curve::{Animatable, Curve, Interpolation};
 pub use ik::{IkChain, solve_two_bone};
 pub use machine::{BlendTree, Condition, Parameter, Parameters, State, StateMachine, Transition};
-pub use player::{AnimationState, Animator};
+pub use player::{AnimationEvent, AnimationState, Animator, RootMotion};
+pub use tween::{Ease, Tween};
 
 /// 常用类型的集中导出。
 pub mod prelude {
     pub use crate::{
-        AnimationClip, Animator, BlendTree, Channel, Curve, Interpolation, Pose, StateMachine,
-        Track,
+        AnimationClip, Animator, BlendTree, Channel, Curve, Ease, Interpolation, Pose,
+        StateMachine, Track, Tween,
     };
 }

@@ -18,8 +18,8 @@
 //!
 //! 参数表本身是通用的——可以放任意名字的值。渲染器消费的是
 //! [`standard`] 里列出的那些名字：几个标准 PBR 参数，外加
-//! [`PARAMS`](standard::PARAMS)（4 个 `vec4` 槽位）与
-//! [`CUSTOM_TEXTURES`](standard::CUSTOM_TEXTURES)（2 张贴图），
+//! [`PARAMS`](standard::PARAMS)（8 个 `vec4` 槽位）与
+//! [`CUSTOM_TEXTURES`](standard::CUSTOM_TEXTURES)（4 张贴图），
 //! 后两组是给自定义着色器钩子用的。
 //!
 //! **不认识的名字会被静默忽略**。让每个材质按 naga 反射出的绑定布局
@@ -58,7 +58,7 @@ pub mod standard {
     /// 粗糙度，`Float`，取值 `[0, 1]`。
     pub const ROUGHNESS: &str = "roughness";
 
-    /// 自定义材质参数的槽位名：`param0` … `param3`。
+    /// 自定义材质参数的槽位名：`param0` … `param15`。
     ///
     /// 着色器钩子里读 `surface.params[i]`，i 就是这里的下标。
     ///
@@ -66,20 +66,36 @@ pub mod standard {
     /// 前提下知道该把哪个值放到哪个偏移上。按名字排序去分配槽位看着更
     /// 自由，但加一个参数就会把已有参数全部挪位——着色器那边不会报错，
     /// 只是颜色突然变成了速度。
-    pub const PARAMS: [&str; PARAM_SLOTS] = ["param0", "param1", "param2", "param3"];
+    pub const PARAMS: [&str; PARAM_SLOTS] = [
+        "param0", "param1", "param2", "param3", "param4", "param5", "param6", "param7", "param8",
+        "param9", "param10", "param11", "param12", "param13", "param14", "param15",
+    ];
 
     /// 参数槽位的数量。
-    pub const PARAM_SLOTS: usize = 4;
+    ///
+    /// 逐对象存（见渲染器的 `ObjectUniforms`），每多一个槽位每个物体多 16 字节。
+    /// 4 个曾经不够：海面把常量编进一张 16×1 的「调色板」贴图才放下。8 个也不够：程序化木纹
+    /// （`kpbr::wood`）自己要 7 个，还得叠在占了 5 个的物理材质上。
+    /// WGSL 里用 `MaterialParams` 这个别名，别写死数组长度。
+    pub const PARAM_SLOTS: usize = 16;
 
-    /// 自定义材质贴图的槽位名：`custom_texture0` / `custom_texture1`。
+    /// 自定义材质贴图的槽位名：`custom_texture0` … `custom_texture3`。
     ///
     /// 着色器钩子里的变量名与这里同名，采样器复用 `base_color_sampler`
     /// ——一个材质的各张贴图共享同一套 UV，过滤与平铺方式理应一致。
-    pub const CUSTOM_TEXTURES: [&str; CUSTOM_TEXTURE_SLOTS] =
-        ["custom_texture0", "custom_texture1"];
+    pub const CUSTOM_TEXTURES: [&str; CUSTOM_TEXTURE_SLOTS] = [
+        "custom_texture0",
+        "custom_texture1",
+        "custom_texture2",
+        "custom_texture3",
+    ];
 
     /// 自定义贴图槽位的数量。
-    pub const CUSTOM_TEXTURE_SLOTS: usize = 2;
+    ///
+    /// 主着色器一个阶段里的采样纹理数受设备限制（WebGPU 基线 16），标准贴图、
+    /// 环境 / 阴影 / 场景颜色这些全局贴图已经占了 14 张，4 个自定义槽位要 20。
+    /// 渲染器建设备时按这个数要上限，桌面后端（Vulkan / DX12 / Metal）都远高于它。
+    pub const CUSTOM_TEXTURE_SLOTS: usize = 4;
 
     /// 自定义**纹理数组**的槽位名。
     ///
@@ -89,6 +105,12 @@ pub mod standard {
     /// 只有一个槽位而上面的二维贴图有两个，是因为纹理数组本身就是
     /// 「一个槽位装很多张图」——真需要更多张就多加几层，不必多开槽位。
     pub const CUSTOM_TEXTURE_ARRAY: &str = "custom_texture_array";
+
+    /// 自定义三维纹理的槽位名（`ktexture::Texture::volume`）。
+    ///
+    /// 钩子里：`textureSample(custom_texture_3d, base_color_sampler, uvw)`，uvw 三个分量都是 0..1，层间三线性插值。
+    /// 没设的时候绑一张 1×1×1 的白图。
+    pub const CUSTOM_TEXTURE_3D: &str = "custom_texture_3d";
 }
 
 /// 一个材质参数值。
@@ -200,6 +222,17 @@ pub struct Material {
     /// 默认关着，因为它是有代价的——背面剔除本来能省掉一半的片元着色，
     /// 而绝大多数模型是闭合的实体，背面本来就看不见。
     double_sided: bool,
+    /// 半透明 / 叠加时也写深度（three.js 的 `depthWrite`，它对半透明材质默认是开的）。
+    ///
+    /// 默认关：互相重叠的半透明物体写了深度，后画的会被先画的整块挡掉。开它的场合是
+    /// 「一层半透明壳子包着另一层」这种：外壳背面那一半在里层后面，写深度才能被里层挡住，
+    /// 不然背面会盖在里层前面（龙卷风的黑烟层盖住发光层）。不透明材质本来就写，这项不管它。
+    depth_write: bool,
+    /// 半透明 / 叠加时也投影（不透明材质本来就投）。
+    ///
+    /// 默认关：玻璃、贴花、水面这类东西多数不该挡光。开它的场合是「半透明但实心」的东西——
+    /// 透明的鸭子、冰块：阴影 pass 把它当不透明的画（影子是实的，颜色交给接收面，见 `Surface.transmitted`）。
+    blended_shadows: bool,
     /// 内容版本号，每次改动 +1。
     ///
     /// 用版本号而不是「改动就换新 id」：换 id 会让渲染器把管线、绑定组
@@ -223,6 +256,24 @@ pub enum BlendMode {
     /// 代价是半透明物体之间的前后顺序只能靠排序保证，而排序是按
     /// 物体中心算的，两个互相穿插的半透明物体仍然会画错。
     Alpha,
+    /// 叠加：颜色 × alpha 直接加到后面的画面上（three.js 的 `AdditiveBlending`），**不写深度**。
+    ///
+    /// 火焰、辉光、星系、魔法粒子：越叠越亮，永远不会挡住后面的东西。加法可交换，所以和
+    /// [`Alpha`](Self::Alpha) 不同，**顺序无关**，互相穿插也不会画错。
+    Additive,
+    /// 着色器输出的颜色**已经预乘过**：(rgb, a) 原样进 `src·1 + dst·(1 − a)`，引擎不再乘 a。
+    ///
+    /// 体积渲染要它（光线步进的火焰、烟、雾）：积分出来的是「发了多少光」和「挡了多少」两件独立的事——
+    /// 稀薄的火焰几乎不挡（a ≈ 0）却很亮。走 [`Alpha`](Self::Alpha) 的话引擎会把颜色乘上 a，薄的地方就没了；
+    /// 在着色器里先除以 a 再让引擎乘回去，a 接近 0 时又会炸。和 `Alpha` 共用一条管线，不多编。
+    Premultiplied,
+}
+
+impl BlendMode {
+    /// 是不是要和后面的画面混合（半透明那一趟画、不写深度）。
+    pub fn is_blended(self) -> bool {
+        self != Self::Opaque
+    }
 }
 
 /// 材质的内容缓存键：同一份内容必然相等，内容一变必然不等。
@@ -242,6 +293,8 @@ impl Material {
             name: None,
             blend_mode: BlendMode::Opaque,
             double_sided: false,
+            depth_write: false,
+            blended_shadows: false,
             version: 0,
             shader: None,
             values: FxHashMap::default(),
@@ -307,7 +360,10 @@ impl Material {
     /// 通过 [`values_mut`](Self::values_mut) 之类的途径绕过常规 setter 改了内容时，
     /// 必须自己调一次，否则渲染器会继续用缓存里的旧值。
     pub fn touch(&mut self) {
-        self.version = self.version.wrapping_add(1);
+        // 全局递增，不是 +1：一个材质克隆成两份、各改各的，两份都 +1 的话键一样、内容不同，
+        // 渲染器按键缓存的解析结果就会张冠李戴（第二只龙用了第一只的颜色）。
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        self.version = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// 指定着色器。为 [`None`] 时使用引擎内置的标准着色器。
@@ -351,10 +407,8 @@ impl Material {
 
     /// 设置是否两面都画。
     ///
-    /// 开了之后**法线不会自动翻转**：背面用的仍是几何法线，所以从背面看
-    /// 光照是反的（该亮的地方暗）。布料这类薄片通常可以接受，
-    /// 要更准就得在材质钩子里按 `@builtin(front_facing)` 翻一下——
-    /// 而那个内置量目前没有传进 `Surface`。
+    /// 背面画的时候标准着色器会按 `@builtin(front_facing)` 把法线翻过来，
+    /// 所以两面的光照都是对的（`Surface::normal` 拿到的已经是翻过的）。
     pub fn set_double_sided(&mut self, double_sided: bool) {
         if self.double_sided != double_sided {
             self.double_sided = double_sided;
@@ -365,6 +419,44 @@ impl Material {
     /// 建造式：两面都画。
     pub fn with_double_sided(mut self) -> Self {
         self.double_sided = true;
+        self
+    }
+
+    /// 半透明 / 叠加的材质也写深度吗（见字段文档）。
+    pub fn depth_write(&self) -> bool {
+        self.depth_write
+    }
+
+    /// 设置半透明 / 叠加时是否写深度。
+    pub fn set_depth_write(&mut self, depth_write: bool) {
+        if self.depth_write != depth_write {
+            self.depth_write = depth_write;
+            self.touch();
+        }
+    }
+
+    /// 半透明 / 叠加的材质投不投影（见字段文档）。
+    pub fn blended_shadows(&self) -> bool {
+        self.blended_shadows
+    }
+
+    /// 设置半透明 / 叠加时是否投影。
+    pub fn set_blended_shadows(&mut self, casts: bool) {
+        if self.blended_shadows != casts {
+            self.blended_shadows = casts;
+            self.touch();
+        }
+    }
+
+    /// 建造式：半透明 / 叠加时也投影。
+    pub fn with_blended_shadows(mut self, casts: bool) -> Self {
+        self.set_blended_shadows(casts);
+        self
+    }
+
+    /// 建造式：半透明 / 叠加时也写深度。
+    pub fn with_depth_write(mut self, depth_write: bool) -> Self {
+        self.set_depth_write(depth_write);
         self
     }
 
@@ -424,7 +516,7 @@ impl Material {
         self.get(standard::PARAMS.get(slot)?)
     }
 
-    /// 设置一张自定义材质贴图（着色器钩子里的 `custom_texture0` / `1`）。
+    /// 设置一张自定义材质贴图（着色器钩子里的 `custom_texture0` … `custom_texture3`）。
     ///
     /// # Panics
     ///
@@ -466,6 +558,17 @@ impl Material {
     /// 链式设置自定义纹理数组。
     pub fn with_texture_array(mut self, texture: Resource<Texture>) -> Self {
         self.set_texture_array(texture);
+        self
+    }
+
+    /// 设置自定义三维纹理（着色器钩子里的 `custom_texture_3d`）。
+    pub fn set_texture_3d(&mut self, texture: Resource<Texture>) {
+        self.set(standard::CUSTOM_TEXTURE_3D, texture);
+    }
+
+    /// 链式设置自定义三维纹理。
+    pub fn with_texture_3d(mut self, texture: Resource<Texture>) -> Self {
+        self.set_texture_3d(texture);
         self
     }
 
@@ -667,6 +770,8 @@ impl Visit for Material {
         // 后加的字段，放在最后当可选区域：老存档里没有，读不到就当
         // 「只画正面」——和加这个字段之前的行为一致。
         let _ = self.double_sided.visit("DoubleSided", &mut region);
+        let _ = self.depth_write.visit("DepthWrite", &mut region);
+        let _ = self.blended_shadows.visit("BlendedShadows", &mut region);
 
         Ok(())
     }
@@ -788,6 +893,24 @@ mod test {
     fn an_untouched_clone_keeps_the_same_cache_key() {
         let original = Material::standard();
         assert_eq!(original.clone().cache_key(), original.cache_key());
+    }
+
+    #[test]
+    fn diverging_clones_get_different_cache_keys() {
+        let original = Material::standard().with_param(0, 1.0f32);
+        let (mut a, mut b) = (original.clone(), original.clone());
+        assert_eq!(
+            a.cache_key(),
+            b.cache_key(),
+            "刚克隆出来、内容一样，键可以一样（合批靠这个）"
+        );
+        a.set_param(0, 2.0f32);
+        b.set_param(0, 3.0f32);
+        assert_ne!(
+            a.cache_key(),
+            b.cache_key(),
+            "各改各的之后内容不同，键必须不同"
+        );
     }
 
     #[test]

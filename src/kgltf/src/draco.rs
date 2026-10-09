@@ -104,9 +104,16 @@ pub fn decode(bytes: &[u8]) -> Result<DracoMesh, String> {
         if attribute.normalized()
             && let Some(range) = normalized_range(attribute.data_type())
         {
-            let signed = matches!(attribute.data_type(), DataType::Int8 | DataType::Int16 | DataType::Int32);
+            let signed = matches!(
+                attribute.data_type(),
+                DataType::Int8 | DataType::Int16 | DataType::Int32
+            );
             for v in &mut values {
-                *v = if signed { (*v / range).max(-1.0) } else { *v / range };
+                *v = if signed {
+                    (*v / range).max(-1.0)
+                } else {
+                    *v / range
+                };
             }
         }
         attributes.push(DracoAttribute {

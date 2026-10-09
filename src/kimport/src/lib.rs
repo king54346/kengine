@@ -44,6 +44,9 @@ pub mod fbx;
 pub mod gcode;
 pub mod ifc;
 pub mod kmz;
+pub mod ldraw;
+pub mod lottie;
+pub mod materialx;
 pub mod md2;
 pub mod mdd;
 pub mod nrrd;
@@ -53,11 +56,15 @@ pub mod path;
 pub mod pcd;
 pub mod pdb;
 pub mod ply;
+pub mod raster;
 pub mod stl;
+pub mod svg;
 pub mod tds;
+pub mod text;
 pub mod threedm;
 pub mod threemf;
 pub mod tiles;
+pub mod usd;
 pub mod vox;
 pub mod vrml;
 pub mod xml;
@@ -81,6 +88,7 @@ pub use fbx::{FbxLoader, FbxSceneLoader};
 pub use gcode::GCodeLoader;
 pub use ifc::IfcLoader;
 pub use kmz::KmzLoader;
+pub use ldraw::LDrawLoader;
 pub use md2::Md2Loader;
 pub use mdd::MddLoader;
 pub use nrrd::NrrdLoader;
@@ -93,6 +101,7 @@ pub use tds::TdsLoader;
 pub use threedm::{Rhino3dmLoader, Rhino3dmSceneLoader};
 pub use threemf::ThreeMfLoader;
 pub use tiles::{B3dmLoader, TilesetLoader};
+pub use usd::UsdLoader;
 pub use vox::VoxLoader;
 pub use vrml::VrmlLoader;
 pub use xyz::XyzLoader;
@@ -100,8 +109,9 @@ pub use xyz::XyzLoader;
 /// 常用类型的集中导出。
 pub mod prelude {
     pub use crate::{
-        Md2Loader, MddLoader, NrrdLoader, ObjLoader, PcdLoader, PdbLoader, PlyLoader, StlLoader,
-        VoxLoader, VrmlLoader, XyzLoader, md2::Md2, mdd::PointCache, nrrd::Volume, pcd::PointCloud, pdb::Molecule,
+        LDrawLoader, Md2Loader, MddLoader, NrrdLoader, ObjLoader, PcdLoader, PdbLoader, PlyLoader,
+        StlLoader, UsdLoader, VoxLoader, VrmlLoader, XyzLoader, add_model_loaders, md2::Md2,
+        mdd::PointCache, nrrd::Volume, pcd::PointCloud, pdb::Molecule,
     };
 }
 
@@ -117,6 +127,39 @@ pub mod limits {
     pub const NODES: usize = 1_000_000;
     /// 文本格式允许的最大行数，防止病态文件把解析卡死。
     pub const LINES: usize = 40_000_000;
+}
+
+/// 一次注册本 crate 里所有产出 [`Model`] 的加载器，外加 glTF。
+///
+/// 只想「把这个文件拖进来看看」的时候，不必记住每种格式对应哪个加载器：
+///
+/// ```no_run
+/// let manager = kasset::ResourceManager::new();
+/// kimport::add_model_loaders(&manager);
+/// let model = manager.request::<kgltf::Model>("models/ldraw/car.mpd");
+/// ```
+///
+/// 不含产出别的类型的加载器（点云、分子、体数据、MD2、VRML、G-code……）——
+/// 它们各有自己的数据类型，用的时候单独注册。
+pub fn add_model_loaders(manager: &kasset::ResourceManager) {
+    manager.add_loader(kgltf::GltfLoader);
+    manager.add_loader(AmfLoader);
+    manager.add_loader(BvhLoader);
+    manager.add_loader(ColladaLoader);
+    manager.add_loader(DracoLoader);
+    manager.add_loader(FbxLoader);
+    manager.add_loader(IfcLoader);
+    manager.add_loader(KmzLoader);
+    manager.add_loader(LDrawLoader);
+    manager.add_loader(ObjLoader);
+    manager.add_loader(PlyLoader);
+    manager.add_loader(StlLoader);
+    manager.add_loader(TdsLoader);
+    manager.add_loader(Rhino3dmLoader);
+    manager.add_loader(ThreeMfLoader);
+    manager.add_loader(B3dmLoader);
+    manager.add_loader(UsdLoader);
+    manager.add_loader(VoxLoader);
 }
 
 /// 构造一条「格式不对」的错误。各模块用得太频繁，抽出来省一行。

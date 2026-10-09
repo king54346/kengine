@@ -21,9 +21,10 @@ use std::{
 };
 use symphonia::core::{
     codecs::audio::AudioDecoderOptions,
-    formats::{FormatOptions, TrackType, probe::Hint},
+    formats::{FormatOptions, SeekMode, SeekTo, TrackType, probe::Hint},
     io::MediaSourceStream,
     meta::MetadataOptions,
+    units::Time,
 };
 
 // ── trait ──────────────────────────────────────────────────────────────
@@ -289,7 +290,6 @@ impl AudioSource for StreamingSource {
             can_write
         };
 
-
         // ring 里不够用静音填充。
         out[written * ch..].fill(0.0);
         self.position += written as u64;
@@ -326,8 +326,7 @@ fn frames_written_available(available: usize, requested: usize) -> usize {
 
 /// 快速 probe：只读元数据，不启动解码器。
 fn probe_format(bytes: &[u8], extension: &str) -> Result<(u32, u16), String> {
-    let source =
-        MediaSourceStream::new(Box::new(Cursor::new(bytes.to_vec())), Default::default());
+    let source = MediaSourceStream::new(Box::new(Cursor::new(bytes.to_vec())), Default::default());
     let mut hint = Hint::new();
     if !extension.is_empty() {
         hint.with_extension(extension);
@@ -402,12 +401,8 @@ fn decode_thread(bytes: Vec<u8>, extension: &str, channels: u16, shared: Arc<Mut
         }
     };
     let track_id = track.id;
-    let params = match track
-        .codec_params
-        .as_ref()
-        .and_then(|p| p.audio())
-        .cloned()
-    {
+    let time_base = track.time_base;
+    let params = match track.codec_params.as_ref().and_then(|p| p.audio()).cloned() {
         Some(p) => p,
         None => {
             if let Ok(mut g) = shared.lock() {
@@ -432,6 +427,9 @@ fn decode_thread(bytes: Vec<u8>, extension: &str, channels: u16, shared: Arc<Mut
 
     let mut chunk: Vec<f32> = Vec::new();
     let ch = channels as usize;
+    let sample_rate = params.sample_rate.unwrap_or(48_000).max(1);
+    // seek 之后还要丢掉多少个样本（帧数 × 声道数）才到目标帧。
+    let mut skip: usize = 0;
 
     loop {
         // ① 检查停止信号。
@@ -452,27 +450,50 @@ fn decode_thread(bytes: Vec<u8>, extension: &str, channels: u16, shared: Arc<Mut
             }
         }
 
-        // ③ 处理 seek 信号（目前实现：symphonia 不支持帧级 seek，
-        //    所以 seek_to != 0 时只能重置解码器从头重新解。
-        //    未来可以用 symphonia 的 seek_track 近似到关键帧。）
+        // ③ 处理 seek 信号：让容器跳到目标时间附近（`Accurate` 模式落在目标之前
+        //    最近的那个包），再把目标帧之前多解出来的那几帧丢掉——这样落点是
+        //    逐帧精确的，而不只是「附近的关键帧」。
+        //
+        //    以前这里只重建了解码器、**没有让读包器回到开头**，所以哪怕是 seek
+        //    到 0 也只是接着往下读——循环播放靠的正是这条路，于是循环形同虚设。
         let seek_to = {
             let mut g = shared.lock().unwrap();
             g.seek_to.take()
         };
-        if let Some(_frame) = seek_to {
-            // 重新打开解码器，从头解直到目标帧（暂时简单实现：只支持 seek 到 0）。
-            // 后续可以用 reader.seek() 精确跳帧。
+        if let Some(frame) = seek_to {
+            let seconds = frame / sample_rate as u64;
+            let nanos = ((frame % sample_rate as u64) * 1_000_000_000 / sample_rate as u64) as u32;
+            let time = Time::try_new(seconds as i64, nanos).unwrap_or(Time::ZERO);
+            let seeked = reader.seek(
+                SeekMode::Accurate,
+                SeekTo::Time {
+                    time,
+                    track_id: Some(track_id),
+                },
+            );
+            decoder.reset();
+            skip = match seeked {
+                // 时间戳以轨道的时基为单位，换成帧：帧 = 刻度 × 分子 / 分母 × 采样率。
+                Ok(to) => {
+                    let ticks = (to.required_ts.get() - to.actual_ts.get()).max(0) as u64;
+                    match time_base {
+                        Some(tb) => {
+                            ticks * tb.numer.get() as u64 * sample_rate as u64
+                                / tb.denom.get() as u64
+                        }
+                        None => ticks,
+                    }
+                }
+                Err(e) => {
+                    klog::warn!("流式解码：seek 到第 {frame} 帧失败：{e}");
+                    0
+                }
+            } as usize
+                * ch;
             if let Ok(mut g) = shared.lock() {
                 g.ring.clear();
                 g.finished = false;
             }
-            // 重置解码器状态（symphonia 暂无 reset，重建一个）。
-            decoder = match symphonia::default::get_codecs()
-                .make_audio_decoder(&params, &AudioDecoderOptions::default())
-            {
-                Ok(d) => d,
-                Err(_) => return,
-            };
             continue;
         }
 
@@ -480,11 +501,23 @@ fn decode_thread(bytes: Vec<u8>, extension: &str, channels: u16, shared: Arc<Mut
         let packet = match reader.next_packet() {
             Ok(Some(p)) => p,
             Ok(None) => {
-                // 正常到达文件末尾。
+                // 到了文件末尾：标记播完，但**不退出**——循环播放和 seek 还要
+                // 回来找这条线程。以前在这里 `return`，循环要求的「回到开头」
+                // 就再也没人处理，BGM 放完一遍便没了声音。
                 if let Ok(mut g) = shared.lock() {
                     g.finished = true;
                 }
-                return;
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    let g = shared.lock().unwrap();
+                    if g.stop {
+                        return;
+                    }
+                    if g.seek_to.is_some() {
+                        break;
+                    }
+                }
+                continue;
             }
             Err(e) => {
                 if let Ok(mut g) = shared.lock() {
@@ -503,8 +536,11 @@ fn decode_thread(bytes: Vec<u8>, extension: &str, channels: u16, shared: Arc<Mut
             Ok(decoded) => {
                 chunk.clear();
                 decoded.copy_to_vec_interleaved(&mut chunk);
+                // seek 之后先把目标帧之前的样本吃掉。
+                let dropped = skip.min(chunk.len());
+                skip -= dropped;
                 let mut g = shared.lock().unwrap();
-                g.ring.extend(chunk.iter().copied());
+                g.ring.extend(chunk[dropped..].iter().copied());
             }
             Err(e) => {
                 klog::warn!("流式解码：跳过一个解不开的包：{e}");
@@ -556,7 +592,10 @@ mod tests {
         let written = src.fill(&mut out);
 
         assert_eq!(written, 300, "循环模式应填满整个 out");
-        assert!(out.iter().all(|s| (*s - 1.0).abs() < 1e-6), "循环值应全是 1.0");
+        assert!(
+            out.iter().all(|s| (*s - 1.0).abs() < 1e-6),
+            "循环值应全是 1.0"
+        );
     }
 
     #[test]
@@ -610,5 +649,65 @@ mod tests {
 
         // 至少应当解到了一点数据（可能少于 4800，取决于解码速度）。
         assert!(written > 0, "流式源应当写出了至少一帧");
+    }
+}
+
+#[cfg(test)]
+mod streaming_seek_tests {
+    use super::*;
+    use crate::{buffer::AudioBuffer, decode::encode_wav};
+
+    /// 单声道的「斜坡」：第 i 帧的值是 i / 总帧数。读到哪个值就知道在哪一帧。
+    fn ramp_wav(frames: usize, sample_rate: u32) -> Vec<u8> {
+        let samples = (0..frames).map(|i| i as f32 / frames as f32).collect();
+        encode_wav(&AudioBuffer::new(samples, 1, sample_rate))
+    }
+
+    /// 拉满 `frames` 帧（后台线程在预读，没到的部分会是静音，所以多等几轮）。
+    fn pull(src: &mut StreamingSource, frames: usize) -> Vec<f32> {
+        let mut out = Vec::with_capacity(frames);
+        let mut tries = 0;
+        while out.len() < frames && tries < 2000 {
+            let mut chunk = vec![0.0f32; (frames - out.len()).min(512)];
+            let written = src.fill(&mut chunk);
+            out.extend_from_slice(&chunk[..written]);
+            if written == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                tries += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_looping_stream_keeps_playing_after_the_end() {
+        // 以前解码线程读到文件尾就退出，循环要求的「seek 到 0」没人处理——BGM 放完一遍就没声了。
+        let frames = 4_800;
+        let mut src = StreamingSource::new(ramp_wav(frames, 48_000), "wav", true).unwrap();
+        let out = pull(&mut src, frames * 3);
+        assert_eq!(out.len(), frames * 3, "循环流拉不满，说明放完一遍就停了");
+        // 第二遍的开头又是斜坡的起点。
+        assert!(out[frames] < 0.01, "第二遍应从头开始，实际 {}", out[frames]);
+        assert!(out[frames + 2400] > 0.45 && out[frames + 2400] < 0.55);
+    }
+
+    #[test]
+    fn seeking_lands_on_the_requested_frame() {
+        let frames = 48_000;
+        let mut src = StreamingSource::new(ramp_wav(frames, 48_000), "wav", false).unwrap();
+        let _ = pull(&mut src, 1000);
+        src.seek(36_000);
+        let out = pull(&mut src, 10);
+        let expected = 36_000.0 / frames as f32;
+        assert!(
+            (out[0] - expected).abs() < 1e-3,
+            "seek 到 36000 帧，读到的是 {}（应为 {expected}）",
+            out[0]
+        );
+        assert_eq!(src.position(), 36_010);
+        // 往回 seek 也一样。
+        src.seek(12_000);
+        let out = pull(&mut src, 10);
+        assert!((out[0] - 0.25).abs() < 1e-3, "往回 seek 读到 {}", out[0]);
     }
 }

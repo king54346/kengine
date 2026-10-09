@@ -19,9 +19,14 @@ pub(crate) fn de_boor(degree: usize, knots: &[f64], points: &[[f64; 4]], u: f64)
             let i = span + j - degree;
             let left = knots[i];
             let right = knots.get(i + degree + 1 - r).copied().unwrap_or(left);
-            let alpha = if right > left { (u - left) / (right - left) } else { 0.0 };
-            for c in 0..4 {
-                d[j][c] = (1.0 - alpha) * d[j - 1][c] + alpha * d[j][c];
+            let alpha = if right > left {
+                (u - left) / (right - left)
+            } else {
+                0.0
+            };
+            let previous = d[j - 1];
+            for (value, before) in d[j].iter_mut().zip(previous) {
+                *value = (1.0 - alpha) * before + alpha * *value;
             }
         }
     }
@@ -29,4 +34,3 @@ pub(crate) fn de_boor(degree: usize, knots: &[f64], points: &[[f64; 4]], u: f64)
     let w = if p[3].abs() > 1e-12 { p[3] } else { 1.0 };
     [p[0] / w, p[1] / w, p[2] / w]
 }
-

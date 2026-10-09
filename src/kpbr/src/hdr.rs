@@ -190,7 +190,13 @@ impl HdrImage {
         let pixels = image
             .into_raw()
             .into_iter()
-            .map(|value| if value.is_finite() { value.max(0.0) } else { 0.0 })
+            .map(|value| {
+                if value.is_finite() {
+                    value.max(0.0)
+                } else {
+                    0.0
+                }
+            })
             .collect();
         Ok(Self::from_pixels(width, height, pixels))
     }

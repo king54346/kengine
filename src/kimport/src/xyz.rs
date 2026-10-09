@@ -108,7 +108,10 @@ mod tests {
     #[test]
     fn reads_positions_and_skips_comments() {
         let cloud = parse(b"# helix\n#\n  1 2 3\n\n4.5 -5 6e-1\n").unwrap();
-        assert_eq!(cloud.positions, vec![Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.5, -5.0, 0.6)]);
+        assert_eq!(
+            cloud.positions,
+            vec![Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.5, -5.0, 0.6)]
+        );
         assert!(!cloud.has_color);
     }
 

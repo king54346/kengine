@@ -107,6 +107,82 @@ impl Font {
             advance,
         }
     }
+
+    /// 字形的矢量轮廓，**字体单位**、y 朝上（TrueType 的原始坐标）。
+    ///
+    /// 立体文字（拉伸、倒角）和 SVG 式的矢量渲染要的是轮廓而不是位图。
+    /// 曲线按书写顺序排，一段的终点不等于下一段的起点时就是开始了新的
+    /// 一条闭合轮廓。缺字或空白字符返回空列表。
+    pub fn glyph_outline(&self, c: char) -> Vec<OutlineCurve> {
+        let id = self.inner.glyph_id(c);
+        let Some(outline) = self.inner.outline(id) else {
+            return Vec::new();
+        };
+        let p = |point: ab_glyph::Point| [point.x, point.y];
+        outline
+            .curves
+            .iter()
+            .map(|curve| match *curve {
+                ab_glyph::OutlineCurve::Line(a, b) => OutlineCurve::Line(p(a), p(b)),
+                ab_glyph::OutlineCurve::Quad(a, b, c) => OutlineCurve::Quad(p(a), p(b), p(c)),
+                ab_glyph::OutlineCurve::Cubic(a, b, c, d) => {
+                    OutlineCurve::Cubic(p(a), p(b), p(c), p(d))
+                }
+            })
+            .collect()
+    }
+
+    /// 每 em 多少字体单位（常见 1000 或 2048）。字体没写时按 1000。
+    pub fn units_per_em(&self) -> f32 {
+        self.inner.units_per_em().unwrap_or(1000.0)
+    }
+
+    /// 字符的水平步进（字体单位）。
+    pub fn advance_unscaled(&self, c: char) -> f32 {
+        self.inner.h_advance_unscaled(self.inner.glyph_id(c))
+    }
+
+    /// 两个字符之间的字距调整（字体单位，通常是负数）。
+    pub fn kern_unscaled(&self, first: char, second: char) -> f32 {
+        self.inner
+            .kern_unscaled(self.inner.glyph_id(first), self.inner.glyph_id(second))
+    }
+
+    /// 行高相关的三个量（字体单位）：上伸、下伸（负数）、行距。
+    pub fn line_metrics_unscaled(&self) -> (f32, f32, f32) {
+        (
+            self.inner.ascent_unscaled(),
+            self.inner.descent_unscaled(),
+            self.inner.line_gap_unscaled(),
+        )
+    }
+}
+
+/// 轮廓里的一段曲线，点是 `[x, y]`（字体单位，y 朝上）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OutlineCurve {
+    /// 直线：起点、终点。
+    Line([f32; 2], [f32; 2]),
+    /// 二次贝塞尔：起点、控制点、终点（TrueType 字体都是这种）。
+    Quad([f32; 2], [f32; 2], [f32; 2]),
+    /// 三次贝塞尔：起点、两个控制点、终点（CFF / OpenType 字体）。
+    Cubic([f32; 2], [f32; 2], [f32; 2], [f32; 2]),
+}
+
+impl OutlineCurve {
+    /// 起点。
+    pub fn start(&self) -> [f32; 2] {
+        match *self {
+            Self::Line(a, _) | Self::Quad(a, _, _) | Self::Cubic(a, _, _, _) => a,
+        }
+    }
+
+    /// 终点。
+    pub fn end(&self) -> [f32; 2] {
+        match *self {
+            Self::Line(_, b) | Self::Quad(_, _, b) | Self::Cubic(_, _, _, b) => b,
+        }
+    }
 }
 
 /// 一组字体，按顺序回退。
@@ -143,6 +219,34 @@ impl FontStack {
         self.fonts.is_empty()
     }
 
+    /// 实际要画的字符：栈里没有一个字体认识 `c`、而它有个常见的替身时换成替身。
+    ///
+    /// 界面里常用的几何符号（`▸` `✓` `▾`）很多中文字体都没有，画出来是一个
+    /// 豆腐块，看着像乱码。替身取字体里几乎都有的近似字形：`›` `√` `▼`。
+    /// 字体本身认识的字符原样返回——替换只兜底，不改变有字形时的样子。
+    pub fn displayed(&self, c: char) -> char {
+        if self.fonts.is_empty() || self.fonts.iter().any(|f| f.has_glyph(c)) {
+            return c;
+        }
+        let substitute = match c {
+            '▸' | '▶' | '►' | '⯈' | '⏵' => '›',
+            '◂' | '◀' | '◄' | '⯇' | '⏴' => '‹',
+            '▾' | '⯆' | '⏷' => '▼',
+            '▴' | '⯅' | '⏶' => '▲',
+            '✓' | '✔' | '🗸' => '√',
+            '✗' | '✘' | '✕' | '✖' => '×',
+            '⟩' | '〉' => '〉',
+            '⟨' | '〈' => '〈',
+            '•' => '·',
+            _ => return c,
+        };
+        if self.fonts.iter().any(|f| f.has_glyph(substitute)) {
+            substitute
+        } else {
+            c
+        }
+    }
+
     /// 挑出该用哪个字体画这个字符。
     pub fn resolve(&self, c: char) -> Option<&Font> {
         self.fonts
@@ -157,6 +261,7 @@ impl FontStack {
     /// 唯一的桥。绕过它自己拿 `c as u16` 当字形号的话，取到的是别的字，
     /// 画出来是一片乱码，而且不报任何错。
     pub fn glyph_key(&self, c: char, size_px: f32) -> Option<GlyphKey> {
+        let c = self.displayed(c);
         let font = self.resolve(c)?;
         Some(GlyphKey::new(font.id, font.inner.glyph_id(c).0, size_px))
     }
@@ -178,6 +283,7 @@ impl FontStack {
         c: char,
         size_px: f32,
     ) -> Result<(GlyphKey, GlyphEntry), AtlasError> {
+        let c = self.displayed(c);
         let font = self.resolve(c).ok_or(AtlasError::Full)?;
         let key = GlyphKey::new(font.id, font.inner.glyph_id(c).0, size_px);
 
@@ -198,6 +304,7 @@ pub struct StackMetrics<'a> {
 
 impl Metrics for StackMetrics<'_> {
     fn advance(&self, c: char) -> f32 {
+        let c = self.stack.displayed(c);
         let Some(font) = self.stack.resolve(c) else {
             return 0.0;
         };
@@ -230,6 +337,7 @@ impl Metrics for StackMetrics<'_> {
 
     fn kern(&self, left: char, right: char) -> f32 {
         // 跨字体不做紧排：两个字体的紧排表互不相干，硬凑只会更难看。
+        let (left, right) = (self.stack.displayed(left), self.stack.displayed(right));
         let Some(font) = self.stack.resolve(left) else {
             return 0.0;
         };
@@ -276,6 +384,27 @@ pub fn system_font() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_ui_symbols_fall_back_to_a_look_alike() {
+        let Some(path) = system_font() else { return };
+        let Ok(font) = Font::from_file(&path) else {
+            return;
+        };
+        let mut stack = FontStack::new();
+        stack.push(font);
+        // 字体认识的字符原样不动。
+        assert_eq!(stack.displayed('a'), 'a');
+        assert_eq!(stack.displayed('中'), '中');
+        // 不认识的常见符号换成一个它认识的替身（替身本身也得认识）。
+        for c in ['▸', '✓', '▾'] {
+            let shown = stack.displayed(c);
+            assert!(
+                stack.fonts.iter().any(|f| f.has_glyph(shown)),
+                "{c} → {shown} 仍然没有字形"
+            );
+        }
+    }
 
     /// 加载一个系统字体。找不到就返回 `None`，调用方自行决定跳过。
     ///

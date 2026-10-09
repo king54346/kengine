@@ -233,14 +233,24 @@ impl Ui {
         //
         // 插不进去（图集满了且无可驱逐）时只是这个字形画不出来，
         // 不影响别的字——所以忽略错误，而不是整段文字放弃。
+        //
+        // 按**物理像素**的字号光栅化：排版用的是逻辑像素，而整个界面最后会按
+        // DPI 缩放画到屏幕上。按逻辑字号光栅化的话，150% 缩放下每个字形位图
+        // 都被拉大 1.5 倍——字发虚、笔画发胖，小字号尤其明显。
+        let physical = style.size * self.scale;
         for glyph in &layout.glyphs {
-            let _ = self
-                .fonts
-                .ensure_glyph(&mut self.atlas, glyph.c, style.size);
+            let _ = self.fonts.ensure_glyph(&mut self.atlas, glyph.c, physical);
         }
 
-        self.list
-            .text(origin, &layout, &self.fonts, &self.atlas, style.size, color);
+        self.list.text(
+            origin,
+            &layout,
+            &self.fonts,
+            &self.atlas,
+            physical,
+            self.scale,
+            color,
+        );
         layout
     }
 
@@ -553,6 +563,6 @@ mod tests {
 
         assert_eq!(ui.draw_list().vertices().len(), 4);
         // 贴图会另起一批：换纹理就得换绑定组，合不进纯色那一批。
-        assert!(ui.draw_list().batches().len() >= 1);
+        assert!(!ui.draw_list().batches().is_empty());
     }
 }

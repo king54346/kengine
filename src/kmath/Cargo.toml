@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-glam = "0.29"
+# bytemuck：实例数据（kscene::Instance）要整块直接拷进显存，矩阵、向量得是 Pod。
+glam = { version = "0.29", features = ["bytemuck"] }
 kcore = { path = "../kcore" }

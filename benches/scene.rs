@@ -99,6 +99,14 @@ fn culling(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("partial", size), &size, |b, _| {
             b.iter(|| black_box(scene.cull(black_box(&frustum))).len());
         });
+        // 渲染器的用法：两块缓冲跨帧复用。和上面那条的差就是每帧分配（大了还有缺页）的代价。
+        group.bench_with_input(BenchmarkId::new("reuse", size), &size, |b, _| {
+            let (mut indices, mut items) = (Vec::new(), Vec::new());
+            b.iter(|| {
+                scene.cull_into(black_box(&frustum), &mut indices, &mut items);
+                black_box(items.len())
+            });
+        });
     }
 
     // 全部可见：量的是「剔除结构不帮忙时」的下界，也就是收集与建项的成本。

@@ -297,6 +297,8 @@ impl DrawList {
     ///
     /// 字形必须**先**通过 [`FontStack::ensure_glyph`] 进过图集；这里只查不建，
     /// 查不到的字形直接跳过（画不出来好过画错）。
+    // 参数都是一次绘制各自独立的输入，打包成结构体只是把同样多的字段挪个地方。
+    #[allow(clippy::too_many_arguments)]
     pub fn text(
         &mut self,
         origin: Vec2,
@@ -304,8 +306,13 @@ impl DrawList {
         fonts: &FontStack,
         atlas: &GlyphAtlas,
         size_px: f32,
+        scale: f32,
         color: Vec4,
     ) {
+        // `size_px` 是**物理**字号（字形按它光栅化），`scale` 是 DPI 缩放；
+        // 排版结果和 `origin` 都是逻辑像素。字形的左上角对齐到物理像素格上：
+        // 落在半个像素上的话双线性采样会把每一笔都糊成两个像素宽。
+        let scale = scale.max(0.01);
         let atlas_size = atlas.size();
         for glyph in &layout.glyphs {
             // 字符到字形号的映射只能问字体要。自己拿 `c as u16` 当字形号
@@ -322,13 +329,12 @@ impl DrawList {
 
             // 字形位图挂在基线上：左上角 = 笔位置 + 左偏移，基线 - 上偏移。
             // bearing_y 的符号搞反的话整行字会掉到基线下面。
-            let min = Vec2::new(
-                origin.x + glyph.x + entry.bearing_x,
-                origin.y + glyph.y - entry.bearing_y,
-            );
+            let pen = (origin + Vec2::new(glyph.x, glyph.y)) * scale;
+            let min = Vec2::new(pen.x + entry.bearing_x, pen.y - entry.bearing_y).round();
+            let size = Vec2::new(entry.rect[2] as f32, entry.rect[3] as f32);
             let rect = Rect {
-                min,
-                max: min + Vec2::new(entry.rect[2] as f32, entry.rect[3] as f32),
+                min: min / scale,
+                max: (min + size) / scale,
             };
             let uv = entry.uv(atlas_size);
             self.quad(

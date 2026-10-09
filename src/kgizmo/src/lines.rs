@@ -150,7 +150,10 @@ mod tests {
         let b = a.clone();
         assert_eq!(a.id(), b.id(), "克隆是同一份数据");
         assert_ne!(a.id(), LineSet::new(Vec::new()).id());
-        assert_eq!(a.bounds(), (Vec3::new(0.0, 0.0, -3.0), Vec3::new(1.0, 2.0, 0.0)));
+        assert_eq!(
+            a.bounds(),
+            (Vec3::new(0.0, 0.0, -3.0), Vec3::new(1.0, 2.0, 0.0))
+        );
         assert_eq!(a.segment_count(), 1);
     }
 

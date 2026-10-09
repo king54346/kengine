@@ -35,12 +35,8 @@ macro_rules! import {
         };
         let io: std::sync::Arc<dyn kengine::kasset::ResourceIo> =
             std::sync::Arc::new(kengine::kasset::FsResourceIo);
-        ktask::block_on($parse(
-            bytes,
-            assets().unwrap().join($relative),
-            io,
-        ))
-        .unwrap_or_else(|error| panic!("{} 导入失败：{error}", $relative))
+        ktask::block_on($parse(bytes, assets().unwrap().join($relative), io))
+            .unwrap_or_else(|error| panic!("{} 导入失败：{error}", $relative))
     }};
 }
 
@@ -137,7 +133,10 @@ fn vox_greedy_meshing_is_worth_it() {
     let triangles = model.triangle_count();
     assert!(triangles > 1_000, "合并得太狠了，只剩 {triangles} 个三角形");
     // 不合并的话这个模型是几十万个三角形。合并之后应当低一个数量级以上。
-    assert!(triangles < 200_000, "合并没起作用，仍有 {triangles} 个三角形");
+    assert!(
+        triangles < 200_000,
+        "合并没起作用，仍有 {triangles} 个三角形"
+    );
 }
 
 #[test]
@@ -189,7 +188,8 @@ fn nrrd_reads_a_gzipped_volume() {
 
 #[test]
 fn the_extended_material_shader_still_validates() {
-    kengine::krender::validate_material_hook(include_str!("../src/kpbr/src/physical.wgsl")).unwrap();
+    kengine::krender::validate_material_hook(include_str!("../src/kpbr/src/physical.wgsl"))
+        .unwrap();
 }
 
 #[test]
@@ -204,7 +204,8 @@ fn the_unlit_shader_still_validates() {
 
 #[test]
 fn the_wireframe_shader_still_validates() {
-    kengine::krender::validate_material_hook(include_str!("../src/kpbr/src/wireframe.wgsl")).unwrap();
+    kengine::krender::validate_material_hook(include_str!("../src/kpbr/src/wireframe.wgsl"))
+        .unwrap();
 }
 
 /// 把 three.js 仓库里所有压缩纹理样本都过一遍。
@@ -302,7 +303,10 @@ fn ultrahdr_recovers_more_range_than_the_base_jpeg() {
 }
 #[test]
 fn gltf_extension_samples_load() {
-    let Some(root) = assets() else { eprintln!("跳过"); return; };
+    let Some(root) = assets() else {
+        eprintln!("跳过");
+        return;
+    };
     let io: std::sync::Arc<dyn kengine::kasset::ResourceIo> =
         std::sync::Arc::new(kengine::kasset::FsResourceIo);
     let manager = kengine::kasset::ResourceManager::with_io(io);
@@ -319,12 +323,20 @@ fn gltf_extension_samples_load() {
         "models/gltf/coffeemat.glb",
     ] {
         let path = root.join(name);
-        if !path.exists() { eprintln!("缺样本 {name}"); continue; }
+        if !path.exists() {
+            eprintln!("缺样本 {name}");
+            continue;
+        }
         match manager.request_blocking::<kengine::kgltf::Model>(&path) {
             Ok(model) => {
                 let model = model.data_ref().unwrap();
-                eprintln!("{name}: {} 网格 / {} 材质 / {} 节点 / {} 三角形",
-                    model.meshes().len(), model.materials().len(), model.nodes().len(), model.triangle_count());
+                eprintln!(
+                    "{name}: {} 网格 / {} 材质 / {} 节点 / {} 三角形",
+                    model.meshes().len(),
+                    model.materials().len(),
+                    model.nodes().len(),
+                    model.triangle_count()
+                );
             }
             Err(error) => eprintln!("{name}: 失败 {error}"),
         }
@@ -337,18 +349,35 @@ fn every_vrml_sample_imports() {
         eprintln!("跳过：没有 examples/threejs 资源");
         return;
     };
-    let io: std::sync::Arc<dyn kengine::kasset::ResourceIo> = std::sync::Arc::new(kengine::kasset::FsResourceIo);
+    let io: std::sync::Arc<dyn kengine::kasset::ResourceIo> =
+        std::sync::Arc::new(kengine::kasset::FsResourceIo);
     for name in [
-        "camera", "creaseAngle", "crystal", "elevationGrid1", "elevationGrid2", "extrusion1", "extrusion2",
-        "extrusion3", "house", "lines", "linesTransparent", "meshWithLines", "meshWithTexture", "multilineString",
-        "pixelTexture", "points",
+        "camera",
+        "creaseAngle",
+        "crystal",
+        "elevationGrid1",
+        "elevationGrid2",
+        "extrusion1",
+        "extrusion2",
+        "extrusion3",
+        "house",
+        "lines",
+        "linesTransparent",
+        "meshWithLines",
+        "meshWithTexture",
+        "multilineString",
+        "pixelTexture",
+        "points",
     ] {
         let path = root.join(format!("models/vrml/{name}.wrl"));
         let bytes = std::fs::read(&path).unwrap();
         let scene = ktask::block_on(kimport::vrml::load(bytes, path, io.clone()))
             .unwrap_or_else(|error| panic!("{name}.wrl 导入失败：{error}"));
         let (min, max) = scene.bounds;
-        assert!(min.is_finite() && max.is_finite() && min.cmple(max).all(), "{name}：包围盒不对 {min:?} {max:?}");
+        assert!(
+            min.is_finite() && max.is_finite() && min.cmple(max).all(),
+            "{name}：包围盒不对 {min:?} {max:?}"
+        );
         let has_content =
             scene.model.triangle_count() > 0 || scene.lines.is_some() || scene.points.is_some();
         assert!(has_content, "{name}：什么都没读出来");
@@ -371,7 +400,11 @@ fn every_vrml_sample_imports() {
 fn vrml_house_has_its_textures_and_mesh_with_texture_reads_the_gif() {
     let scene = import!(kimport::vrml::load, "models/vrml/meshWithTexture.wrl");
     assert!(
-        scene.model.materials().iter().any(|m| m.base_color_texture().is_some()),
+        scene
+            .model
+            .materials()
+            .iter()
+            .any(|m| m.base_color_texture().is_some()),
         "map.gif 该被解码并挂上"
     );
     let house = import!(kimport::vrml::load, "models/vrml/house.wrl");

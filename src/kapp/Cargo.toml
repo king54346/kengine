@@ -13,7 +13,10 @@ kmath = { path = "../kmath" }
 # 环境捕获的产物是一张 HDR 全景图。
 kpbr = { path = "../kpbr" }
 kscene = { path = "../kscene" }
+kmaterial = { path = "../kmaterial" }
 kui = { path = "../kui" }
+# 剖析面板第一次打开时找一个系统字体。
+kfont = { path = "../kfont" }
 kscript = { path = "../kscript" }
 kwinit = { path = "../kwinit" }
 pollster = "1.0.1"

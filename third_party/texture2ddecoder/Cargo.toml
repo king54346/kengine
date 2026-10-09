@@ -1,0 +1,26 @@
+# texture2ddecoder 0.1.2 的本地副本，经根目录 Cargo.toml 的 [patch.crates-io] 替换 crates.io 版本。
+# 相对上游唯一的改动：src/bcn/bc6.rs 里 BC6H 端点掩码的移位溢出（见那里的注释）。
+# 上游修好后删掉这个目录和 [patch] 即可。dev-dependencies 已去掉，免得把 image/ktx2 等拉进锁文件。
+[package]
+edition = "2021"
+name = "texture2ddecoder"
+version = "0.1.2"
+authors = ["Rudolf Kolbe <rkolbe96@gmail.com>"]
+description = "pure Rust no-std texture decoder"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/UniversalGameExtraction/texture2ddecoder"
+
+[features]
+alloc = []
+default = ["alloc"]
+
+[lib]
+name = "texture2ddecoder"
+path = "src/lib.rs"
+
+[dependencies]
+paste = "1.0.12"
+
+# 第三方代码，不是我们要改的；path 依赖的警告 cargo 不会自动屏蔽。
+[lints.rust]
+warnings = "allow"

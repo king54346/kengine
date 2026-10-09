@@ -20,6 +20,16 @@
 //! 预滤波时假设**观察方向 = 法线 = 反射方向**。这在掠射角下不成立，
 //! 表现为掠射角的反射会偏模糊。这是分裂求和法公认的代价，
 //! UE4 到现在也是这么做的。
+//!
+//! # 过滤的重要性采样（太阳不会变成一团亮斑）
+//!
+//! 户外 HDR 里太阳只占几个像素，亮度却是天空的几万倍（`spruit_sunrise.hdr` 最亮处 33 万）。
+//! 每个像素只打 128 条采样线：有的像素恰好有一条打中太阳，邻居没打中——粗糙那几级就成了
+//! 一块块的亮斑，铺在粗糙地面上是一大团颜色（在 VFX 沙盒里是一团红光）。
+//!
+//! 办法是 Křivánek & Colbert 2008 的过滤重要性采样：先给源图做一串 2×2 平均的 mip，
+//! 每条采样线按它的概率密度算出它「代表」多大一块立体角，到对应粗细的那级 mip 去采。
+//! 太阳的能量被摊到这条线覆盖的整片区域上，能量不丢、没有斑。
 
 use crate::hdr::HdrImage;
 use kmath::Vec3;
@@ -87,6 +97,7 @@ impl Default for PrefilterSettings {
 pub fn prefilter(image: &HdrImage, settings: PrefilterSettings) -> Vec<PrefilteredLevel> {
     let levels = settings.levels.max(1).min(max_levels(settings.base_width));
     let mut out = Vec::with_capacity(levels);
+    let mips = source_mips(image);
 
     for level in 0..levels {
         // 每级尺寸严格减半。级数已经在上面夹过，这里不会低于 8。
@@ -107,7 +118,7 @@ pub fn prefilter(image: &HdrImage, settings: PrefilterSettings) -> Vec<Prefilter
                     // 走通用路径的话，重要性采样在 a=0 时会除以零。
                     image.sample_direction(normal)
                 } else {
-                    convolve(image, normal, roughness, settings.samples)
+                    convolve(&mips, normal, roughness, settings.samples)
                 };
                 let index = (y * width + x) * 3;
                 pixels[index] = color.x;
@@ -152,9 +163,12 @@ fn direction_of(x: usize, y: usize, width: usize, height: usize) -> Vec3 {
 }
 
 /// 对一个方向做 GGX 重要性采样的卷积。
-fn convolve(image: &HdrImage, normal: Vec3, roughness: f32, samples: u32) -> Vec3 {
+fn convolve(mips: &[HdrImage], normal: Vec3, roughness: f32, samples: u32) -> Vec3 {
     let (tangent, bitangent) = orthonormal_basis(normal);
     let alpha = (roughness * roughness).max(1e-4);
+    let source = &mips[0];
+    // 源图一个像素平均占的立体角（等距柱状投影按全球面均分算，极点附近偏大，不影响选级）。
+    let texel = 4.0 * std::f32::consts::PI / (source.width() * source.height()).max(1) as f32;
 
     let mut sum = Vec3::ZERO;
     let mut weight = 0.0f32;
@@ -169,17 +183,63 @@ fn convolve(image: &HdrImage, normal: Vec3, roughness: f32, samples: u32) -> Vec
         if n_dot_l <= 0.0 {
             continue;
         }
+        // 这条线代表的立体角：1 / (N · pdf)，pdf = D(h)·(n·h) / (4·v·h)，v = n 时就是 D / 4。
+        let n_dot_h = normal.dot(half).max(0.0);
+        let d = alpha * alpha
+            / (std::f32::consts::PI * ((n_dot_h * n_dot_h) * (alpha * alpha - 1.0) + 1.0).powi(2));
+        let pdf = (d * 0.25).max(1e-6);
+        let footprint = 1.0 / (samples as f32 * pdf);
+        // 往粗了偏一级：多一点模糊比留斑好（原论文也加了这一级）。
+        let level = (0.5 * (footprint / texel).log2() + 1.0).max(0.0);
         // 按 n·l 加权：背向法线的采样对结果没有贡献，
         // 不加权的话粗糙表面的反射会整体偏亮。
-        sum += image.sample_direction(light) * n_dot_l;
+        sum += sample_mips(mips, light, level) * n_dot_l;
         weight += n_dot_l;
     }
 
     if weight > 0.0 {
         sum / weight
     } else {
-        image.sample_direction(normal)
+        source.sample_direction(normal)
     }
+}
+
+/// 源图的 mip 链：每级 2×2 平均、宽高减半，一直到宽 8。第 0 级就是源图。
+fn source_mips(image: &HdrImage) -> Vec<HdrImage> {
+    let mut mips = vec![image.clone()];
+    while let Some(last) = mips.last()
+        && last.width() >= 16
+        && last.height() >= 8
+    {
+        let (width, height) = (last.width() / 2, last.height() / 2);
+        let mut pixels = Vec::with_capacity(width * height * 3);
+        for y in 0..height {
+            for x in 0..width {
+                let sum = last.pixel(x * 2, y * 2)
+                    + last.pixel(x * 2 + 1, y * 2)
+                    + last.pixel(x * 2, y * 2 + 1)
+                    + last.pixel(x * 2 + 1, y * 2 + 1);
+                let average = sum * 0.25;
+                pixels.extend_from_slice(&[average.x, average.y, average.z]);
+            }
+        }
+        mips.push(HdrImage::from_pixels(width, height, pixels));
+    }
+    mips
+}
+
+/// 在 mip 链的 `level` 级（可以是小数，两级之间线性插）按方向采样。
+fn sample_mips(mips: &[HdrImage], direction: Vec3, level: f32) -> Vec3 {
+    let max = (mips.len() - 1) as f32;
+    let level = level.min(max);
+    let lower = level.floor() as usize;
+    let upper = (lower + 1).min(mips.len() - 1);
+    let t = level - lower as f32;
+    let a = mips[lower].sample_direction(direction);
+    if t <= 0.0 || upper == lower {
+        return a;
+    }
+    a.lerp(mips[upper].sample_direction(direction), t)
 }
 
 /// 低差异序列。比随机数收敛快得多——同样的采样数下噪点明显更少。
@@ -385,6 +445,48 @@ mod tests {
             blurry < sharp,
             "最粗糙那级该更均匀：集中度 {sharp} → {blurry}"
         );
+    }
+
+    #[test]
+    fn a_tiny_blinding_sun_does_not_leave_hot_spots() {
+        // 128×64 的暗天空里一个 2×2 的太阳，亮度是天空的十万倍。不做过滤的话，粗糙那几级上
+        // 打中太阳的像素和没打中的邻居差几个数量级：一块块的斑。
+        let (width, height) = (128, 64);
+        let mut pixels = vec![0.2f32; width * height * 3];
+        for (x, y) in [(40, 20), (41, 20), (40, 21), (41, 21)] {
+            let i = (y * width + x) * 3;
+            pixels[i..i + 3].copy_from_slice(&[2.0e4, 1.2e4, 0.6e4]);
+        }
+        let image = HdrImage::from_pixels(width, height, pixels);
+        let levels = prefilter(
+            &image,
+            PrefilterSettings {
+                base_width: 64,
+                levels: 4,
+                samples: 64,
+            },
+        );
+        let level = &levels[2];
+        // 相邻像素的亮度比：太阳边上本来就陡，过滤后最多七八倍；不过滤时实测差两千倍。
+        let mut worst = 1.0f32;
+        for y in 1..level.height - 1 {
+            for x in 0..level.width - 1 {
+                let (a, b) = (level.pixel(x, y).x, level.pixel(x + 1, y).x);
+                worst = worst.max(a.max(b) / a.min(b).max(1e-3));
+            }
+        }
+        assert!(worst < 20.0, "相邻像素差了 {worst} 倍：有亮斑");
+        // 能量还在：太阳那边比对面亮得多。
+        let toward = level
+            .pixel(level.width * 40 / 128, level.height * 20 / 64)
+            .x;
+        let away = level
+            .pixel(
+                (level.width * 40 / 128 + level.width / 2) % level.width,
+                level.height - 1 - level.height * 20 / 64,
+            )
+            .x;
+        assert!(toward > away * 5.0, "{toward} vs {away}");
     }
 
     #[test]

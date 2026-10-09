@@ -88,7 +88,8 @@ pub fn decode(bytes: &[u8]) -> Result<HdrImage, HdrError> {
         for x in 0..width {
             // 增益图通常比主图小，按双线性取值。最近邻会让高光边缘出现
             // 块状的台阶——增益是**指数**上的量，一档之差就是两倍亮度。
-            let recovery = sample_bilinear(&gain, x as f32 / width as f32, y as f32 / height as f32);
+            let recovery =
+                sample_bilinear(&gain, x as f32 / width as f32, y as f32 / height as f32);
             let level = recovery.powf(1.0 / parameters.gamma.max(1e-3));
             let log_gain = parameters.min + (parameters.max - parameters.min) * level;
             let gain = log_gain.exp2();
@@ -205,7 +206,9 @@ pub struct UltraHdrLoader;
 
 impl ResourceLoader for UltraHdrLoader {
     fn extensions(&self) -> &[&str] {
-        &["jpg", "jpeg"]
+        // 只认复合扩展名：资源管理器先按 `hdr.jpg` 找，普通 `.jpg` 贴图照旧走贴图加载器，
+        // 两个加载器可以同时注册。别的文件名的 Ultra HDR 直接调 [`decode`]。
+        &["hdr.jpg", "hdr.jpeg"]
     }
 
     fn data_type_uuid(&self) -> Uuid {

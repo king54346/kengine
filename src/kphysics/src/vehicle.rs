@@ -346,6 +346,30 @@ impl PhysicsWorld {
     /// 射线会**排除车身自己**：不排除的话每个轮子第一个打到的就是车身
     /// 底盘，悬挂长度永远是 0，车会直接瘫在地上。
     pub fn update_vehicle(&mut self, vehicle: &mut VehicleController, dt: f32) {
+        // ── 休眠 ──
+        //
+        // rapier 只在 `engine_force > 0` 时叫醒车身。于是停稳睡着之后
+        // **倒车（负的驱动力）和转向都叫不醒它**——按 S 车一动不动。
+        //
+        // 更糟的是睡着时它照样每帧往车身上加悬挂冲量（`wake_up = false`）：
+        // 冲量攒进速度里却不积分，停着的车带着一个凭空的 1.5 m/s 向上的
+        // 速度，一醒就往上一跳，速度表也一直显示着这个数。
+        //
+        // 所以：有任何驱动或转向输入就叫醒；没输入又已经睡着就整个跳过——
+        // 停着的车本来也不需要算悬挂。
+        let wants_to_move = vehicle
+            .inner
+            .wheels()
+            .iter()
+            .any(|wheel| wheel.engine_force != 0.0 || wheel.steering != 0.0);
+        if let Some(body) = self.inner.bodies.get_mut(vehicle.chassis.0) {
+            if wants_to_move {
+                body.wake_up(true);
+            } else if body.is_sleeping() {
+                return;
+            }
+        }
+
         // 查询结构必须是新的。刚加完刚体就跑载具的话，射线会打不到
         // 那些还没进广相的东西——表现是车从新生成的地面上穿过去。
         self.update_query_structures();
@@ -652,5 +676,28 @@ mod tests {
         let after = vehicle.wheel(0).unwrap().rotation;
 
         assert!(before.angle_between(after) > 0.2, "开了一秒轮子几乎没转");
+    }
+
+    #[test]
+    fn a_parked_car_that_fell_asleep_still_reverses() {
+        // rapier 只在驱动力为正时叫醒车身：停稳睡着之后倒车没反应，
+        // 而且睡着时悬挂冲量会攒进速度里却不积分。
+        let (mut world, mut vehicle) = car();
+        drive(&mut world, &mut vehicle, 6.0);
+        assert!(
+            world.body(vehicle.chassis()).unwrap().is_sleeping(),
+            "停了六秒车身还没睡——这条测试的前提不成立"
+        );
+        let resting = world.body(vehicle.chassis()).unwrap().linvel().length();
+        assert!(resting < 0.05, "睡着的车带着 {resting} m/s 的速度");
+
+        let start = world.body(vehicle.chassis()).unwrap().position();
+        for wheel in 2..4 {
+            vehicle.set_engine_force(wheel, -400.0);
+        }
+        drive(&mut world, &mut vehicle, 1.0);
+        let moved = world.body(vehicle.chassis()).unwrap().position() - start;
+        // 倒车 = 朝 +Z（车头朝 -Z）。
+        assert!(moved.z > 0.1, "倒车一秒只挪了 {moved:?}");
     }
 }

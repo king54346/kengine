@@ -629,5 +629,48 @@ fn the_texture_array_name_matches_the_material_slot() {
 /// （而且只表现为「这个材质退回了标准管线」），所以在这里钉住。
 #[test]
 fn the_physical_material_hook_compiles() {
-    compile(include_str!("../../kpbr/src/physical.wgsl")).expect("physical.wgsl 应当通过校验");
+    let source = format!(
+        "{}
+fn material_surface(s: Surface) -> Surface {{ return physical_surface(s); }}
+",
+        include_str!("../../kpbr/src/physical.wgsl")
+    );
+    compile(&source).expect("physical.wgsl 应当通过校验");
+}
+
+/// Phong / Lambert 的钩子要能和标准着色器拼起来（它读 `custom_texture0` 当高光贴图）。
+#[test]
+fn the_phong_material_hook_compiles() {
+    compile(include_str!("../../kpbr/src/phong.wgsl")).expect("phong.wgsl 应当通过校验");
+}
+
+#[test]
+fn a_vertex_hook_also_compiles_into_the_depth_passes() {
+    // 写了顶点钩子的材质，渲染器把预通道和阴影的入口拼在它自己的着色器后面编（同一个模块）。
+    // 入口名、结构体名、绑定号有一处和主着色器撞了，这里先响。
+    let hook = "fn material_vertex(v: VertexSurface) -> VertexSurface { var out = v; out.position += v.normal * v.params[1].x; return out; }";
+    let source = format!(
+        "{}\n{}\n{}",
+        crate::material_shader_source(hook),
+        include_str!("prepass.wgsl"),
+        include_str!("shadow_hooked.wgsl")
+    );
+    let shader = kshader::Shader::from_wgsl(source)
+        .expect("带顶点钩子的材质 + 深度类 pass 的入口应当能编译");
+    let entries: Vec<&str> = shader
+        .entry_points()
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    for name in [
+        "vs_main",
+        "fs_main",
+        "prepass_vs",
+        "prepass_vs_skinned",
+        "prepass_fs",
+        "shadow_hooked_vs",
+        "shadow_hooked_skinned_vs",
+    ] {
+        assert!(entries.contains(&name), "缺入口 {name}：{entries:?}");
+    }
 }

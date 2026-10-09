@@ -59,7 +59,9 @@
 
 #![warn(missing_docs)]
 
+pub mod glsl;
 mod loader;
+pub mod noise;
 mod preprocess;
 
 pub use loader::ShaderLoader;
@@ -299,6 +301,36 @@ impl Shader {
         self.entry_point(ShaderStage::Vertex)
     }
 
+    /// 入口 `entry` 实际引用到的第 `group` 组绑定号（升序）。
+    ///
+    /// wgpu 自动推导管线布局时只收**用到的**绑定；同一份源码里好几个入口共用一套绑定声明时，
+    /// 各入口的布局并不一样，拿它挑出该绑的那几个。源码解析不了或者没有这个入口时返回 `None`。
+    pub fn used_bindings(&self, entry: &str, group: u32) -> Option<Vec<u32>> {
+        let module = naga::front::wgsl::parse_str(&self.source).ok()?;
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .ok()?;
+        let index = module.entry_points.iter().position(|ep| ep.name == entry)?;
+        let uses = info.get_entry_point(index);
+        let mut used: Vec<u32> = module
+            .global_variables
+            .iter()
+            .filter(|(handle, _)| !uses[*handle].is_empty())
+            .filter_map(|(_, global)| {
+                global
+                    .binding
+                    .as_ref()
+                    .filter(|b| b.group == group)
+                    .map(|b| b.binding)
+            })
+            .collect();
+        used.sort_unstable();
+        Some(used)
+    }
+
     /// 片元着色器入口点名称。
     pub fn fragment_entry(&self) -> Option<&str> {
         self.entry_point(ShaderStage::Fragment)
@@ -314,6 +346,20 @@ impl ResourceData for Shader {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn used_bindings_are_per_entry_point() {
+        let shader = Shader::from_wgsl(
+            "@group(0) @binding(0) var<storage, read_write> a: array<f32>;
+             @group(0) @binding(1) var<storage, read_write> b: array<f32>;
+             @compute @workgroup_size(1) fn first() { a[0] = 1.0; }
+             @compute @workgroup_size(1) fn second() { a[0] = b[0]; }",
+        )
+        .unwrap();
+        assert_eq!(shader.used_bindings("first", 0), Some(vec![0]));
+        assert_eq!(shader.used_bindings("second", 0), Some(vec![0, 1]));
+        assert_eq!(shader.used_bindings("missing", 0), None);
+    }
 
     const VALID: &str = r#"
         @vertex

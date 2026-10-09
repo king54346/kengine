@@ -39,12 +39,64 @@ mod gpu_tests;
 /// `[0,1]` 再解开，8 位精度下半球采样会在平面上抖出一圈圈条纹。
 const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-/// 遮蔽图的格式。
+/// 遮蔽图的格式：r = SSAO，g = 接触阴影。
 ///
-/// `R32Float` 而不是 `R16Float`：前者在 WebGPU 里是**不可过滤**的，
+/// 32 位浮点而不是 16 位：前者在 WebGPU 里是**不可过滤**的，
 /// 和绑定布局里写的 `filterable: false` 严格对得上。着色器那边用
 /// `textureLoad`，本来就不需要过滤。
-const OCCLUSION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
+///
+/// 两样东西挤一张图：它们都是「逐像素、和帧缓冲 1:1、主 pass 按像素
+/// 坐标取」的一个标量，分两张图就要在 group(3) 里多占一个绑定。
+const OCCLUSION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Float;
+
+/// 运动向量的格式。NDC 差值，有正有负，范围很小——16 位浮点正合适。
+const VELOCITY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
+
+/// 材质缓冲的格式：rgb = 基础色，a = 粗糙度。都在 `[0,1]`，8 位够了。
+const MATERIAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+/// 接触阴影（屏幕空间阴影）的调节项。
+///
+/// 补阴影贴图够不着的那一圈：小物件的影子、以及偏移让影子「离开」物体
+/// 底部的那条缝。只作用在阴影投射者（0 号光源）上。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContactShadows {
+    /// 开不开。开了会顺带打开深度／法线预通道。
+    pub enabled: bool,
+    /// 沿光线走多远（世界单位）。接触阴影只该管贴着的那一圈，
+    /// 给大了会和阴影贴图的影子叠出一道重影。
+    pub length: f32,
+    /// 挡光物的假定厚度（世界单位）。深度缓冲只知道表面在哪、不知道
+    /// 背面在哪，太大会让细杆子投出一堵墙的影子，太小则漏光。
+    pub thickness: f32,
+    /// 步数。
+    pub steps: u32,
+    /// 强度，`[0,1]`。
+    pub intensity: f32,
+}
+
+impl Default for ContactShadows {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            length: 0.15,
+            thickness: 0.05,
+            steps: 16,
+            intensity: 1.0,
+        }
+    }
+}
+
+/// 接触阴影 pass 的 uniform，对应 `contact.wgsl` 的 `ContactParams`。
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ContactParams {
+    view_proj: [[f32; 4]; 4],
+    inverse_view_proj: [[f32; 4]; 4],
+    light: [f32; 4],
+    settings: [f32; 4],
+    texel: [f32; 4],
+}
 
 /// SSAO 的调节项。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -69,6 +121,8 @@ pub struct SsaoSettings {
     /// 防自遮挡：不加的话平坦表面会因为浮点误差把自己判成被挡住，
     /// 整个画面浮起一层均匀的灰。给太大则接触阴影会离开接缝。
     pub bias: f32,
+    /// 接触阴影。和 SSAO 共用预通道与遮蔽图，所以挂在这里。
+    pub contact: ContactShadows,
 }
 
 impl Default for SsaoSettings {
@@ -81,6 +135,7 @@ impl Default for SsaoSettings {
             strength: 1.0,
             samples: 16,
             bias: 0.02,
+            contact: ContactShadows::default(),
         }
     }
 }
@@ -101,11 +156,16 @@ struct SsaoParams {
     texel: [f32; 4],
 }
 
-/// 尺寸相关的三张纹理。窗口一变就整体重建。
+/// 尺寸相关的几张纹理。窗口一变就整体重建。
 struct Targets {
     /// 预通道自己的深度。理由见模块文档。
     depth: wgpu::TextureView,
+    /// xyz = 世界法线，w = 金属度。
     normal: wgpu::TextureView,
+    /// 运动向量。
+    velocity: wgpu::TextureView,
+    /// rgb = 基础色，a = 粗糙度。
+    material: wgpu::TextureView,
     occlusion: wgpu::TextureView,
     width: u32,
     height: u32,
@@ -124,6 +184,11 @@ pub(crate) struct Ssao {
     params_buffer: wgpu::Buffer,
     /// 采深度和法线的绑定组。重建目标时要跟着重建。
     ssao_bind_group: wgpu::BindGroup,
+
+    contact_pipeline: wgpu::RenderPipeline,
+    contact_layout: wgpu::BindGroupLayout,
+    contact_params: wgpu::Buffer,
+    contact_bind_group: wgpu::BindGroup,
 
     targets: Targets,
     /// 关着 SSAO 时绑给主 pass 的那张 1×1 白图。
@@ -157,7 +222,7 @@ impl Ssao {
                 // `geometry.wgsl`——和主着色器、阴影 pass 是同一份声明。
                 // 前缀里还带着 klight 和 kpbr：`Globals` 引用了
                 // `Light` 和 `Environment`，少了它们编不过。
-                format!("{geometry_prelude}\n{}", include_str!("prepass.wgsl")).into(),
+                prepass_source(geometry_prelude).into(),
             ),
         });
 
@@ -165,20 +230,22 @@ impl Ssao {
             device,
             &prepass_layout,
             &prepass_module,
-            "vs_main",
+            "prepass_vs",
             &[Option::from(crate::vertex_layout())],
             "kengine prepass pipeline",
+            &[],
         );
         let prepass_skinned_pipeline = create_prepass_pipeline(
             device,
             &prepass_layout,
             &prepass_module,
-            "vs_skinned",
+            "prepass_vs_skinned",
             &[
                 Option::from(crate::vertex_layout()),
                 Option::from(crate::skin_layout()),
             ],
             "kengine prepass skinned pipeline",
+            &[],
         );
 
         // ── SSAO ──
@@ -196,6 +263,18 @@ impl Ssao {
             create_ssao_bind_group(device, &ssao_layout, &params_buffer, &targets);
         let white = create_white(device, queue);
 
+        // ── 接触阴影 ──
+        let contact_layout = create_contact_layout(device);
+        let contact_pipeline = create_contact_pipeline(device, &contact_layout);
+        let contact_params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kengine contact shadow params"),
+            size: size_of::<ContactParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let contact_bind_group =
+            create_contact_bind_group(device, &contact_layout, &contact_params, &targets);
+
         Self {
             settings: SsaoSettings::default(),
             prepass_pipeline,
@@ -204,9 +283,101 @@ impl Ssao {
             ssao_layout,
             params_buffer,
             ssao_bind_group,
+            contact_pipeline,
+            contact_layout,
+            contact_params,
+            contact_bind_group,
             targets,
             white,
         }
+    }
+
+    /// 遮蔽图有没有真的在算（SSAO 或接触阴影任一开着）。
+    pub(crate) fn occlusion_active(&self) -> bool {
+        self.settings.enabled || self.settings.contact.enabled
+    }
+
+    /// 预通道的世界法线（w = 金属度）。
+    pub(crate) fn normal_view(&self) -> &wgpu::TextureView {
+        &self.targets.normal
+    }
+
+    /// 预通道的运动向量。
+    pub(crate) fn velocity_view(&self) -> &wgpu::TextureView {
+        &self.targets.velocity
+    }
+
+    /// 预通道的材质缓冲（rgb = 基础色，a = 粗糙度）。
+    pub(crate) fn material_view(&self) -> &wgpu::TextureView {
+        &self.targets.material
+    }
+
+    /// 真正的遮蔽图，不管开没开。后处理想看 AO 时用。
+    pub(crate) fn raw_occlusion_view(&self) -> &wgpu::TextureView {
+        &self.targets.occlusion
+    }
+
+    /// 跑接触阴影：读预通道深度，写遮蔽图的绿通道。
+    ///
+    /// `ssao_ran` 为真时接着 SSAO 的结果写（`Load`），否则先清成全白——
+    /// 红通道是 SSAO，没人写它就必须是 1，不然环境光被乘成零。
+    pub(crate) fn run_contact(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        view_proj: Mat4,
+        light: [f32; 4],
+        has_light: bool,
+        ssao_ran: bool,
+    ) {
+        let contact = self.settings.contact;
+        // 没有能投影的光：强度 0，整张绿通道就是 1。
+        let intensity = if has_light {
+            contact.intensity.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let (width, height) = (self.targets.width as f32, self.targets.height as f32);
+        queue.write_buffer(
+            &self.contact_params,
+            0,
+            bytemuck::bytes_of(&ContactParams {
+                view_proj: view_proj.to_cols_array_2d(),
+                inverse_view_proj: view_proj.inverse().to_cols_array_2d(),
+                light,
+                settings: [
+                    contact.length.max(1e-4),
+                    contact.thickness.max(1e-4),
+                    contact.steps.clamp(1, 64) as f32,
+                    intensity,
+                ],
+                texel: [1.0 / width, 1.0 / height, width, height],
+            }),
+        );
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("kengine contact shadow pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.targets.occlusion,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: if ssao_ran {
+                        wgpu::LoadOp::Load
+                    } else {
+                        wgpu::LoadOp::Clear(wgpu::Color::WHITE)
+                    },
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.contact_pipeline);
+        pass.set_bind_group(0, &self.contact_bind_group, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     /// 窗口尺寸变了。
@@ -221,13 +392,19 @@ impl Ssao {
             &self.params_buffer,
             &self.targets,
         );
+        self.contact_bind_group = create_contact_bind_group(
+            device,
+            &self.contact_layout,
+            &self.contact_params,
+            &self.targets,
+        );
     }
 
     /// 主 pass 该绑哪张遮蔽图。
     ///
-    /// 关着 SSAO 时是那张 1×1 白图——「没有 SSAO」等价于「乘 1」。
+    /// 关着 SSAO 和接触阴影时是那张 1×1 白图——「没有」等价于「乘 1」。
     pub(crate) fn occlusion_view(&self) -> &wgpu::TextureView {
-        if self.settings.enabled {
+        if self.occlusion_active() {
             &self.targets.occlusion
         } else {
             &self.white
@@ -245,22 +422,30 @@ impl Ssao {
 
     /// 开一个预通道。返回的 pass 由调用方填绘制命令。
     ///
-    /// 深度和法线都 `Clear`：这两张图每帧从头算，没有需要保留的历史。
+    /// 全部 `Clear`：这几张图每帧从头算，没有需要保留的历史。
+    /// 背景处法线为零、速度为零——后处理据法线长度认出天空。
     pub(crate) fn begin_prepass<'a>(
         &'a self,
         encoder: &'a mut wgpu::CommandEncoder,
     ) -> wgpu::RenderPass<'a> {
-        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("kengine prepass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &self.targets.normal,
+        let clear = |view: &'a wgpu::TextureView| {
+            Some(wgpu::RenderPassColorAttachment {
+                view,
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     store: wgpu::StoreOp::Store,
                 },
-            })],
+            })
+        };
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("kengine prepass"),
+            color_attachments: &[
+                clear(&self.targets.normal),
+                clear(&self.targets.velocity),
+                clear(&self.targets.material),
+            ],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &self.targets.depth,
                 depth_ops: Some(wgpu::Operations {
@@ -436,6 +621,8 @@ fn create_targets(device: &wgpu::Device, width: u32, height: u32) -> Targets {
     Targets {
         depth: make("kengine prepass depth", wgpu::TextureFormat::Depth32Float),
         normal: make("kengine prepass normal", NORMAL_FORMAT),
+        velocity: make("kengine prepass velocity", VELOCITY_FORMAT),
+        material: make("kengine prepass material", MATERIAL_FORMAT),
         occlusion: make("kengine ssao occlusion", OCCLUSION_FORMAT),
         width,
         height,
@@ -492,10 +679,11 @@ fn create_white(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView
             aspect: wgpu::TextureAspect::All,
         },
         // 1.0：完全不遮。写 0 的话关掉 SSAO 反而让整个画面的环境光归零。
-        &1.0f32.to_le_bytes(),
+        // 两个通道都是 1：绿通道是接触阴影，同理。
+        bytemuck::cast_slice(&[1.0f32, 1.0f32]),
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(4),
+            bytes_per_row: Some(8),
             rows_per_image: Some(1),
         },
         wgpu::Extent3d {
@@ -507,33 +695,156 @@ fn create_white(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView
     texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
+/// 接触阴影 pass 的绑定组布局：参数 + 预通道深度。
+fn create_contact_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("kengine contact shadow layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: std::num::NonZeroU64::new(size_of::<ContactParams>() as u64),
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+fn create_contact_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    params: &wgpu::Buffer,
+    targets: &Targets,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("kengine contact shadow bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: params.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&targets.depth),
+            },
+        ],
+    })
+}
+
+/// 接触阴影的全屏管线。只写绿通道：红通道是 SSAO 的。
+fn create_contact_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("kengine contact shadow shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("contact.wgsl").into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("kengine contact shadow pipeline layout"),
+        bind_group_layouts: &[Option::from(layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("kengine contact shadow pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("fullscreen_vs"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: OCCLUSION_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::GREEN,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 /// 建一条预通道管线。
-fn create_prepass_pipeline(
+/// 普通预通道的完整源码：几何前缀 + 钩子用的结构体 + 恒等的默认顶点钩子 + 预通道本身。
+///
+/// 顶点入口和主 pass 一样过 `material_vertex`；写了顶点钩子的材质另有一套
+/// （`Renderer::build_hooked_passes`，拼在那个材质自己的着色器后面）。
+pub(crate) fn prepass_source(geometry_prelude: &str) -> String {
+    format!(
+        "{geometry_prelude}\n{}\n{}\n{}",
+        include_str!("surface.wgsl"),
+        crate::DEFAULT_VERTEX_HOOK,
+        include_str!("prepass.wgsl")
+    )
+}
+
+/// `constants` 是材质着色器的 `override` 取值（带顶点钩子的材质用；普通预通道给空）。
+pub(crate) fn create_prepass_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     module: &wgpu::ShaderModule,
     entry_point: &str,
     buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
     label: &str,
+    constants: &[(&str, f64)],
 ) -> wgpu::RenderPipeline {
+    let compilation_options = wgpu::PipelineCompilationOptions {
+        constants,
+        ..Default::default()
+    };
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module,
             entry_point: Some(entry_point),
-            compilation_options: Default::default(),
+            compilation_options: compilation_options.clone(),
             buffers,
         },
         fragment: Some(wgpu::FragmentState {
             module,
-            entry_point: Some("fs_main"),
-            compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: NORMAL_FORMAT,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            entry_point: Some("prepass_fs"),
+            compilation_options,
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: NORMAL_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                Some(wgpu::ColorTargetState {
+                    format: VELOCITY_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                Some(wgpu::ColorTargetState {
+                    format: MATERIAL_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+            ],
         }),
         // 和主 pass 完全一致的光栅化状态。不一致的话预通道看到的轮廓
         // 和主 pass 画出来的对不上，AO 会沿着边缘错开一圈。
@@ -565,6 +876,22 @@ mod tests {
     use kshader::Shader;
 
     #[test]
+    fn the_contact_shadow_shader_passes_validation() {
+        Shader::from_wgsl(include_str!("contact.wgsl")).expect("接触阴影着色器应当通过校验");
+    }
+
+    #[test]
+    fn the_contact_params_struct_is_sixteen_byte_aligned() {
+        // 两个 mat4（128）+ 三个 vec4（48）。对不上的话字段全部错位。
+        assert_eq!(size_of::<ContactParams>(), 176);
+    }
+
+    #[test]
+    fn contact_shadows_are_off_by_default() {
+        assert!(!SsaoSettings::default().contact.enabled);
+    }
+
+    #[test]
     fn the_ssao_shader_passes_validation() {
         Shader::from_wgsl(include_str!("ssao.wgsl")).expect("SSAO 着色器应当通过校验");
     }
@@ -574,25 +901,21 @@ mod tests {
         // 预通道用的 `Globals` / `ObjectUniforms` / 蒙皮 / 形变来自
         // `geometry.wgsl`——和主着色器、阴影 pass 是同一份。
         // 这一条挂了通常说明 `geometry.wgsl` 改了而预通道没跟上。
-        let source = format!(
-            "{}\n{}\n{}\n{}\n{}",
-            klight::LIGHT_WGSL,
-            kpbr::PBR_WGSL,
-            kpbr::IBL_WGSL,
-            crate::geometry_source(),
-            include_str!("prepass.wgsl"),
-        );
-        Shader::from_wgsl(source).expect("预通道着色器应当通过校验");
+        Shader::from_wgsl(prepass_source(&crate::geometry_prelude()))
+            .expect("预通道着色器应当通过校验");
     }
 
     #[test]
     fn the_prepass_declares_both_entry_points() {
         // 名字硬编码在建管线的代码里。改了名字这里先响，
         // 而不是等到运行时 wgpu 报「找不到入口点」。
+        // 带 `prepass_` 前缀：这段也会拼进材质自己的着色器（顶点钩子那一套），
+        // 不能和主着色器的 `vs_main` / `fs_main` 撞名。
         let source = include_str!("prepass.wgsl");
-        assert!(source.contains("fn vs_main"));
-        assert!(source.contains("fn vs_skinned"));
-        assert!(source.contains("fn fs_main"));
+        assert!(source.contains("fn prepass_vs("));
+        assert!(source.contains("fn prepass_vs_skinned("));
+        assert!(source.contains("fn prepass_fs("));
+        assert!(!source.contains("fn vs_main") && !source.contains("fn fs_main"));
     }
 
     #[test]

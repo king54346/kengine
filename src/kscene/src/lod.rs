@@ -92,11 +92,19 @@ impl Lod {
     /// 对应位置。**级别下标就是子节点下标**，所以乱序加的时候，
     /// 子节点也得按排好之后的顺序挂。返回这一级最终的下标。
     pub fn add_level(&mut self, distance: f32, hysteresis: f32) -> usize {
-        let distance = if distance.is_finite() { distance.abs() } else { f32::MAX };
+        let distance = if distance.is_finite() {
+            distance.abs()
+        } else {
+            f32::MAX
+        };
         let level = LodLevel {
             distance,
             // `NaN.clamp()` 还是 NaN，得单独挡。
-            hysteresis: if hysteresis.is_nan() { 0.0 } else { hysteresis.clamp(0.0, 1.0) },
+            hysteresis: if hysteresis.is_nan() {
+                0.0
+            } else {
+                hysteresis.clamp(0.0, 1.0)
+            },
         };
         let index = self.levels.partition_point(|l| l.distance <= distance);
         self.levels.insert(index, level);
@@ -177,7 +185,10 @@ mod tests {
     use super::*;
 
     fn three_levels() -> Lod {
-        Lod::new().with_level(0.0).with_level(50.0).with_level(300.0)
+        Lod::new()
+            .with_level(0.0)
+            .with_level(50.0)
+            .with_level(300.0)
     }
 
     #[test]
@@ -226,7 +237,10 @@ mod tests {
         assert!(!lod.shows_child(0));
         assert!(lod.shows_child(1));
         assert!(!lod.shows_child(2));
-        assert!(lod.shows_child(3), "不对应级别的子节点（比如挂在上面的标签）照常显示");
+        assert!(
+            lod.shows_child(3),
+            "不对应级别的子节点（比如挂在上面的标签）照常显示"
+        );
     }
 
     #[test]
@@ -236,7 +250,11 @@ mod tests {
         lod.add_level(10.0, -1.0);
         lod.add_level(20.0, f32::NAN);
         assert_eq!(lod.select(f32::NAN), 0);
-        assert!(lod.levels().iter().all(|l| (0.0..=1.0).contains(&l.hysteresis)));
+        assert!(
+            lod.levels()
+                .iter()
+                .all(|l| (0.0..=1.0).contains(&l.hysteresis))
+        );
     }
 }
 
@@ -256,7 +274,12 @@ mod scene_tests {
                 .with_position(Vec3::new(0.0, 0.0, distance)),
         );
         let lod = scene.add_node(
-            Node::new("Lod").with_lod(Lod::new().with_level(0.0).with_level(50.0).with_level(300.0)),
+            Node::new("Lod").with_lod(
+                Lod::new()
+                    .with_level(0.0)
+                    .with_level(50.0)
+                    .with_level(300.0),
+            ),
         );
         let levels = (0..3)
             .map(|detail| {
@@ -280,7 +303,11 @@ mod scene_tests {
         let (scene, lod, levels, _) = scene_at(100.0);
         assert_eq!(scene[lod].lod().unwrap().current(), 1);
         assert_eq!(shown(&scene, &levels), vec![false, true, false]);
-        assert_eq!(scene.visible_meshes().count(), 1, "没选中的级别不该进绘制列表");
+        assert_eq!(
+            scene.visible_meshes().count(),
+            1,
+            "没选中的级别不该进绘制列表"
+        );
     }
 
     #[test]
@@ -319,8 +346,13 @@ mod scene_tests {
         let (mut scene, lod, _, _) = scene_at(100.0);
         let bytes = scene.save_to_vec().expect("存得下来");
         let restored = Scene::load_from_slice(&bytes, None).expect("读得回来");
-        let levels: Vec<f32> =
-            restored[lod].lod().expect("LOD 该原样回来").levels().iter().map(|l| l.distance).collect();
+        let levels: Vec<f32> = restored[lod]
+            .lod()
+            .expect("LOD 该原样回来")
+            .levels()
+            .iter()
+            .map(|l| l.distance)
+            .collect();
         assert_eq!(levels, vec![0.0, 50.0, 300.0]);
     }
 }

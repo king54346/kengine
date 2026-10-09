@@ -22,7 +22,11 @@ loader! {
 }
 
 /// 解析 `.drc`。
-pub async fn parse(bytes: Vec<u8>, path: PathBuf, _io: Arc<dyn ResourceIo>) -> Result<Model, LoadError> {
+pub async fn parse(
+    bytes: Vec<u8>,
+    path: PathBuf,
+    _io: Arc<dyn ResourceIo>,
+) -> Result<Model, LoadError> {
     let name = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -47,8 +51,14 @@ pub async fn parse(bytes: Vec<u8>, path: PathBuf, _io: Arc<dyn ResourceIo>) -> R
 
     let vertices = (0..decoded.points)
         .map(|p| Vertex {
-            position: [get(position, p, 0), get(position, p, 1), get(position, p, 2)],
-            normal: normal.map_or([0.0, 1.0, 0.0], |n| [get(n, p, 0), get(n, p, 1), get(n, p, 2)]),
+            position: [
+                get(position, p, 0),
+                get(position, p, 1),
+                get(position, p, 2),
+            ],
+            normal: normal.map_or([0.0, 1.0, 0.0], |n| {
+                [get(n, p, 0), get(n, p, 1), get(n, p, 2)]
+            }),
             // Draco 的 UV 和 glTF 一样，原点在左上。
             uv: uv.map_or([0.0, 0.0], |t| [get(t, p, 0), get(t, p, 1)]),
             color: color.map_or([1.0; 3], |c| [get(c, p, 0), get(c, p, 1), get(c, p, 2)]),
@@ -62,7 +72,13 @@ pub async fn parse(bytes: Vec<u8>, path: PathBuf, _io: Arc<dyn ResourceIo>) -> R
     if normal.is_none() {
         mesh.recompute_normals();
     }
-    let base = if color.is_some() { Vec4::ONE } else { Vec4::new(0.72, 0.72, 0.72, 1.0) };
-    let material = Material::standard().with_base_color(base).with_roughness(0.55);
+    let base = if color.is_some() {
+        Vec4::ONE
+    } else {
+        Vec4::new(0.72, 0.72, 0.72, 1.0)
+    };
+    let material = Material::standard()
+        .with_base_color(base)
+        .with_roughness(0.55);
     Ok(single_mesh_model(&name, mesh, material))
 }

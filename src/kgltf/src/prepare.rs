@@ -67,12 +67,17 @@ pub(crate) fn split(bytes: &[u8]) -> Result<(Value, Option<Vec<u8>>), LoadError>
         let json = serde_json::from_slice(&glb.json).map_err(LoadError::custom)?;
         Ok((json, glb.bin.map(|b| b.into_owned())))
     } else {
-        Ok((serde_json::from_slice(bytes).map_err(LoadError::custom)?, None))
+        Ok((
+            serde_json::from_slice(bytes).map_err(LoadError::custom)?,
+            None,
+        ))
     }
 }
 
 fn array<'a>(json: &'a Value, key: &str) -> &'a [Value] {
-    json.get(key).and_then(Value::as_array).map_or(&[], Vec::as_slice)
+    json.get(key)
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice)
 }
 
 fn usize_of(value: &Value, key: &str) -> Option<usize> {
@@ -106,12 +111,14 @@ pub(crate) async fn load_buffers(
     let mut buffers = Vec::new();
     for (index, buffer) in array(json, "buffers").iter().enumerate() {
         let length = usize_of(buffer, "byteLength").unwrap_or(0);
-        let fallback = ["EXT_meshopt_compression", "KHR_meshopt_compression"].iter().any(|name| {
-            extension(buffer, name)
-                .and_then(|e| e.get("fallback"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        });
+        let fallback = ["EXT_meshopt_compression", "KHR_meshopt_compression"]
+            .iter()
+            .any(|name| {
+                extension(buffer, name)
+                    .and_then(|e| e.get("fallback"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            });
         let data = if fallback {
             vec![0; length.min(1 << 30)]
         } else if let Some(source) = buffer.get("uri").and_then(Value::as_str) {
@@ -150,7 +157,7 @@ impl Synthetic {
     /// 追加一段数据，返回新 bufferView 的序号。
     fn view(&mut self, bytes: &[u8], stride: Option<usize>) -> usize {
         // accessor 要求按分量大小对齐；统一按 4 对齐最省事。
-        while self.data.len() % 4 != 0 {
+        while !self.data.len().is_multiple_of(4) {
             self.data.push(0);
         }
         let mut view = json!({
@@ -212,7 +219,10 @@ impl Synthetic {
     /// 追加一个整数 accessor（索引用 u32，关节号用 u16）。
     fn integers(&mut self, values: &[u32], components: usize, component_type: u32) -> usize {
         let bytes: Vec<u8> = match component_type {
-            5123 => values.iter().flat_map(|v| (*v as u16).to_le_bytes()).collect(),
+            5123 => values
+                .iter()
+                .flat_map(|v| (*v as u16).to_le_bytes())
+                .collect(),
             _ => values.iter().flat_map(|v| v.to_le_bytes()).collect(),
         };
         let view = self.view(&bytes, None);
@@ -259,15 +269,24 @@ fn component_size(component_type: u64) -> usize {
 }
 
 /// 执行全部前处理，返回摘出来的动画指针通道。
-pub(crate) fn run(json: &mut Value, buffers: &mut Vec<Vec<u8>>) -> Result<Vec<PointerChannel>, LoadError> {
+pub(crate) fn run(
+    json: &mut Value,
+    buffers: &mut Vec<Vec<u8>>,
+) -> Result<Vec<PointerChannel>, LoadError> {
     redirect_texture_sources(json);
 
     // meshopt 先解、先落成一块独立的缓冲：量化反解和 Draco 要从解压后的
     // bufferView 里读数据（`coffeemat.glb` 就是 meshopt + 量化叠在一起）。
     let unpacked = decompress_meshopt(json, buffers, buffers.len())?;
     if !unpacked.is_empty() {
-        let object = json.as_object_mut().ok_or_else(|| LoadError::message("glTF 顶层不是对象"))?;
-        push_all(object, "buffers", vec![json!({ "byteLength": unpacked.len() })]);
+        let object = json
+            .as_object_mut()
+            .ok_or_else(|| LoadError::message("glTF 顶层不是对象"))?;
+        push_all(
+            object,
+            "buffers",
+            vec![json!({ "byteLength": unpacked.len() })],
+        );
         buffers.push(unpacked);
     }
 
@@ -288,10 +307,16 @@ pub(crate) fn run(json: &mut Value, buffers: &mut Vec<Vec<u8>>) -> Result<Vec<Po
     dequantize(json, buffers, &mut synthetic);
 
     if !synthetic.data.is_empty() {
-        let object = json.as_object_mut().ok_or_else(|| LoadError::message("glTF 顶层不是对象"))?;
+        let object = json
+            .as_object_mut()
+            .ok_or_else(|| LoadError::message("glTF 顶层不是对象"))?;
         push_all(object, "bufferViews", synthetic.views);
         push_all(object, "accessors", synthetic.accessors);
-        push_all(object, "buffers", vec![json!({ "byteLength": synthetic.data.len() })]);
+        push_all(
+            object,
+            "buffers",
+            vec![json!({ "byteLength": synthetic.data.len() })],
+        );
         buffers.push(synthetic.data);
     }
     Ok(extract_pointer_channels(json, buffers))
@@ -303,7 +328,10 @@ fn extract_pointer_channels(json: &mut Value, buffers: &[Vec<u8>]) -> Vec<Pointe
     let animation_count = array(json, "animations").len();
     for animation in 0..animation_count {
         let samplers = array(&json["animations"][animation], "samplers").to_vec();
-        let Some(channels) = json["animations"][animation].get_mut("channels").and_then(Value::as_array_mut) else {
+        let Some(channels) = json["animations"][animation]
+            .get_mut("channels")
+            .and_then(Value::as_array_mut)
+        else {
             continue;
         };
         let mut kept = Vec::with_capacity(channels.len());
@@ -355,7 +383,9 @@ fn extract_pointer_channels(json: &mut Value, buffers: &[Vec<u8>]) -> Vec<Pointe
 }
 
 fn push_all(object: &mut Map<String, Value>, key: &str, items: Vec<Value>) {
-    let entry = object.entry(key).or_insert_with(|| Value::Array(Vec::new()));
+    let entry = object
+        .entry(key)
+        .or_insert_with(|| Value::Array(Vec::new()));
     if let Some(list) = entry.as_array_mut() {
         list.extend(items);
     }
@@ -372,7 +402,10 @@ fn redirect_texture_sources(json: &mut Value) {
     };
     for texture in textures {
         for name in ["KHR_texture_basisu", "EXT_texture_avif", "EXT_texture_webp"] {
-            if let Some(source) = extension(texture, name).and_then(|e| e.get("source")).cloned() {
+            if let Some(source) = extension(texture, name)
+                .and_then(|e| e.get("source"))
+                .cloned()
+            {
                 texture["source"] = source;
                 remove_extension(texture, name);
                 break;
@@ -381,7 +414,11 @@ fn redirect_texture_sources(json: &mut Value) {
     }
 }
 
-fn view_bytes<'a>(json: &Value, buffers: &'a [Vec<u8>], view: usize) -> Result<(&'a [u8], Option<usize>), LoadError> {
+fn view_bytes<'a>(
+    json: &Value,
+    buffers: &'a [Vec<u8>],
+    view: usize,
+) -> Result<(&'a [u8], Option<usize>), LoadError> {
     let view = array(json, "bufferViews")
         .get(view)
         .ok_or_else(|| LoadError::message("bufferView 序号越界"))?;
@@ -396,7 +433,11 @@ fn view_bytes<'a>(json: &Value, buffers: &'a [Vec<u8>], view: usize) -> Result<(
 }
 
 /// 解压所有 meshopt 压缩的 bufferView，返回要作为第 `target` 块缓冲追加的数据。
-fn decompress_meshopt(json: &mut Value, buffers: &[Vec<u8>], target: usize) -> Result<Vec<u8>, LoadError> {
+fn decompress_meshopt(
+    json: &mut Value,
+    buffers: &[Vec<u8>],
+    target: usize,
+) -> Result<Vec<u8>, LoadError> {
     let mut out = Vec::new();
     let count = array(json, "bufferViews").len();
     for index in 0..count {
@@ -430,7 +471,8 @@ fn decompress_meshopt(json: &mut Value, buffers: &[Vec<u8>], target: usize) -> R
             "COLOR" => meshopt::Filter::Color,
             other => return Err(LoadError::message(format!("未知的 meshopt 滤波器 {other}"))),
         };
-        let decoded = meshopt::decode(source, elements, stride, mode, filter).map_err(LoadError::custom)?;
+        let decoded =
+            meshopt::decode(source, elements, stride, mode, filter).map_err(LoadError::custom)?;
 
         // 原地改写这个 bufferView：指向解压缓冲，去掉扩展。
         while out.len() % 4 != 0 {
@@ -447,7 +489,11 @@ fn decompress_meshopt(json: &mut Value, buffers: &[Vec<u8>], target: usize) -> R
     Ok(out)
 }
 
-fn decompress_draco(json: &mut Value, buffers: &[Vec<u8>], synthetic: &mut Synthetic) -> Result<(), LoadError> {
+fn decompress_draco(
+    json: &mut Value,
+    buffers: &[Vec<u8>],
+    synthetic: &mut Synthetic,
+) -> Result<(), LoadError> {
     let mesh_count = array(json, "meshes").len();
     for mesh in 0..mesh_count {
         let primitive_count = array(&json["meshes"][mesh], "primitives").len();
@@ -457,13 +503,20 @@ fn decompress_draco(json: &mut Value, buffers: &[Vec<u8>], synthetic: &mut Synth
             let Some(ext) = extension(source, "KHR_draco_mesh_compression").cloned() else {
                 continue;
             };
-            let view = usize_of(&ext, "bufferView").ok_or_else(|| LoadError::message("Draco 扩展缺少 bufferView"))?;
+            let view = usize_of(&ext, "bufferView")
+                .ok_or_else(|| LoadError::message("Draco 扩展缺少 bufferView"))?;
             let (bytes, _) = view_bytes(json, buffers, view)?;
             let decoded = draco::decode(bytes).map_err(LoadError::message)?;
 
-            let mut attributes = source.get("attributes").cloned().unwrap_or_else(|| json!({}));
+            let mut attributes = source
+                .get("attributes")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             let empty = Map::new();
-            let mapping = ext.get("attributes").and_then(Value::as_object).unwrap_or(&empty);
+            let mapping = ext
+                .get("attributes")
+                .and_then(Value::as_object)
+                .unwrap_or(&empty);
             for (semantic, id) in mapping {
                 let Some(attribute) = id.as_u64().and_then(|id| decoded.by_id(id as u32)) else {
                     klog::warn!("Draco 扩展声明了 {semantic}，但解码结果里没有这个属性");
@@ -473,9 +526,16 @@ fn decompress_draco(json: &mut Value, buffers: &[Vec<u8>], synthetic: &mut Synth
                     let values: Vec<u32> = attribute.values.iter().map(|v| *v as u32).collect();
                     synthetic.integers(&values, attribute.components, 5123)
                 } else {
-                    synthetic.floats(&attribute.values, attribute.components, semantic == "POSITION")
+                    synthetic.floats(
+                        &attribute.values,
+                        attribute.components,
+                        semantic == "POSITION",
+                    )
                 };
-                let original = attributes.get(semantic).and_then(Value::as_u64).map(|v| v as usize);
+                let original = attributes
+                    .get(semantic)
+                    .and_then(Value::as_u64)
+                    .map(|v| v as usize);
                 attributes[semantic] = json!(synthetic.adopt(accessor, original));
             }
             let original_indices = usize_of(source, "indices");
@@ -502,7 +562,10 @@ fn read_accessor(json: &Value, buffers: &[Vec<u8>], index: usize) -> Option<(Vec
     let component_type = accessor.get("componentType")?.as_u64()?;
     let components = components_of(accessor.get("type")?.as_str()?);
     let count = usize_of(accessor, "count")?;
-    let normalized = accessor.get("normalized").and_then(Value::as_bool).unwrap_or(false);
+    let normalized = accessor
+        .get("normalized")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let (data, stride) = view_bytes(json, buffers, usize_of(accessor, "bufferView")?).ok()?;
     let offset = usize_of(accessor, "byteOffset").unwrap_or(0);
     let size = component_size(component_type);
@@ -523,7 +586,11 @@ fn read_accessor(json: &Value, buffers: &[Vec<u8>], index: usize) -> Option<(Vec
                 }
                 5122 => {
                     let v = i16::from_le_bytes([raw[0], raw[1]]) as f32;
-                    if normalized { (v / 32767.0).max(-1.0) } else { v }
+                    if normalized {
+                        (v / 32767.0).max(-1.0)
+                    } else {
+                        v
+                    }
                 }
                 5123 => {
                     let v = u16::from_le_bytes([raw[0], raw[1]]) as f32;
@@ -563,7 +630,8 @@ fn dequantize(json: &mut Value, buffers: &[Vec<u8>], synthetic: &mut Synthetic) 
         for primitive in 0..primitive_count {
             // 属性表本身 + 每个形变目标的属性表。
             let mut tables = vec![vec!["attributes".to_string()]];
-            let target_count = array(&json["meshes"][mesh]["primitives"][primitive], "targets").len();
+            let target_count =
+                array(&json["meshes"][mesh]["primitives"][primitive], "targets").len();
             for target in 0..target_count {
                 tables.push(vec!["targets".into(), target.to_string()]);
             }
@@ -579,19 +647,26 @@ fn dequantize(json: &mut Value, buffers: &[Vec<u8>], synthetic: &mut Synthetic) 
                     node.as_object().cloned().unwrap_or_default()
                 };
                 for (semantic, value) in table {
-                    let Some(accessor) = value.as_u64().map(|v| v as usize) else { continue };
+                    let Some(accessor) = value.as_u64().map(|v| v as usize) else {
+                        continue;
+                    };
                     if !wanted(&semantic) || is_float(json, accessor) {
                         continue;
                     }
                     let replacement = match converted.get(&accessor) {
                         Some(&done) => done,
                         None => {
-                            let Some((values, components)) = read_accessor(json, buffers, accessor) else {
+                            let Some((values, components)) = read_accessor(json, buffers, accessor)
+                            else {
                                 klog::warn!("量化属性 {semantic} 读不出来（稀疏或越界），保持原样");
                                 continue;
                             };
                             // 切线的 w 是手性符号，归一化后是 ±1，不需要特殊处理。
-                            let done = synthetic.floats(&values, components, semantic == "POSITION" && path.len() == 1);
+                            let done = synthetic.floats(
+                                &values,
+                                components,
+                                semantic == "POSITION" && path.len() == 1,
+                            );
                             converted.insert(accessor, done);
                             done
                         }
@@ -617,7 +692,10 @@ mod tests {
     #[test]
     fn quantized_positions_become_floats() {
         // 一个三角形，位置用 i16 存（非归一化）。
-        let raw: Vec<u8> = [1i16, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let raw: Vec<u8> = [1i16, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
         let mut json = json!({
             "asset": {"version": "2.0"},
             "buffers": [{"byteLength": raw.len()}],
@@ -627,7 +705,9 @@ mod tests {
         });
         let mut buffers = vec![raw];
         run(&mut json, &mut buffers).unwrap();
-        let accessor = json["meshes"][0]["primitives"][0]["attributes"]["POSITION"].as_u64().unwrap() as usize;
+        let accessor = json["meshes"][0]["primitives"][0]["attributes"]["POSITION"]
+            .as_u64()
+            .unwrap() as usize;
         let (values, components) = read_accessor(&json, &buffers, accessor).unwrap();
         assert_eq!(components, 3);
         assert_eq!(values, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);

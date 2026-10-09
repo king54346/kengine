@@ -544,3 +544,39 @@ fn collision_groups_let_the_character_pass_through() {
         movement.translation.x
     );
 }
+
+#[test]
+fn walking_on_flat_ground_never_stalls() {
+    // 贴地之后角色离地正好 `offset`，水平扫掠在地面法线恰好竖直的那一帧会
+    // 判成零距离命中。第一版在「零位移解穿透」那一趟里也贴了一次地，
+    // 于是每帧都停在那个退化的距离上：平地走了不到三米就彻底卡死。
+    // 修掉那一处之后 rapier 自己仍会偶尔卡一帧，这条连一帧都不许。
+    let mut world = world_with_ground();
+    let body = add_character(&mut world, Vec3::new(0.0, 2.0, 0.0));
+    world.update_query_structures();
+    let controller = CharacterController::default();
+
+    let dt = 1.0 / 60.0;
+    let mut vertical = 0.0_f32;
+    let mut stalls = Vec::new();
+    for frame in 0..240 {
+        vertical -= 9.81 * dt;
+        let movement = world.move_character(
+            &controller,
+            body,
+            Vec3::new(2.0 * dt, vertical * dt, 0.0),
+            dt,
+        );
+        if movement.grounded {
+            vertical = 0.0;
+            if movement.translation.x < 2.0 * dt * 0.5 {
+                stalls.push(frame);
+            }
+        }
+        world.step(dt);
+    }
+
+    let x = world.body(body).unwrap().position().x;
+    assert!(stalls.is_empty(), "踩在平地上却走不动的帧：{stalls:?}");
+    assert!(x > 7.5, "2 米/秒走四秒只到 x = {x}");
+}

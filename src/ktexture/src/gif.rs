@@ -126,17 +126,28 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), TextureError> 
                     return Err(error("LZW 码长不合法"));
                 }
                 let compressed = r.sub_blocks()?;
-                let indices = lzw(&compressed, min_code_size.max(2), frame_width * frame_height);
+                let indices = lzw(
+                    &compressed,
+                    min_code_size.max(2),
+                    frame_width * frame_height,
+                );
 
                 let mut rgba = vec![0u8; width * height * 4];
-                for (position, &index) in indices.iter().enumerate().take(frame_width * frame_height) {
+                for (position, &index) in
+                    indices.iter().enumerate().take(frame_width * frame_height)
+                {
                     let (column, row) = (position % frame_width, position / frame_width);
-                    let row = if interlaced { deinterlace(row, frame_height) } else { row };
+                    let row = if interlaced {
+                        deinterlace(row, frame_height)
+                    } else {
+                        row
+                    };
                     let (x, y) = (left + column, top + row);
                     if x >= width || y >= height || Some(index) == transparent {
                         continue;
                     }
-                    let Some(color) = palette.get(index as usize * 3..index as usize * 3 + 3) else {
+                    let Some(color) = palette.get(index as usize * 3..index as usize * 3 + 3)
+                    else {
                         continue;
                     };
                     let at = (y * width + x) * 4;
@@ -167,7 +178,11 @@ fn deinterlace(row: usize, height: usize) -> usize {
     let passes = [(0, 8), (4, 8), (2, 4), (1, 2)];
     let mut remaining = row;
     for (start, step) in passes {
-        let count = if height > start { (height - start).div_ceil(step) } else { 0 };
+        let count = if height > start {
+            (height - start).div_ceil(step)
+        } else {
+            0
+        };
         if remaining < count {
             return start + remaining * step;
         }
@@ -213,7 +228,10 @@ mod tests {
     #[test]
     fn interlaced_rows_are_put_back_in_order() {
         // 两行的图：隔行顺序是第 0 行（第一趟）、第 1 行（第四趟），与原顺序相同。
-        assert_eq!(decode(&tiny_gif(true)).unwrap().2, decode(&tiny_gif(false)).unwrap().2);
+        assert_eq!(
+            decode(&tiny_gif(true)).unwrap().2,
+            decode(&tiny_gif(false)).unwrap().2
+        );
         // 8 行的图：存储顺序 0..8 → 图中行 0,4,2,6,1,3,5,7。
         let order: Vec<usize> = (0..8).map(|row| deinterlace(row, 8)).collect();
         assert_eq!(order, vec![0, 4, 2, 6, 1, 3, 5, 7]);

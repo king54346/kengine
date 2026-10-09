@@ -183,6 +183,25 @@ impl Visit for Node {
         } else if region.is_reading() {
             self.light_mask = u32::MAX;
         }
+        // 渲染层与后处理遮罩也是后加的，老存档读不到就按默认。
+        let mut render_layers = self.render_layers;
+        if render_layers.visit("RenderLayers", &mut region).is_ok() {
+            self.render_layers = render_layers;
+        } else if region.is_reading() {
+            self.render_layers = 1;
+        }
+        let mut post_mask = self.post_mask;
+        if post_mask.visit("PostMask", &mut region).is_ok() {
+            self.post_mask = post_mask;
+        } else if region.is_reading() {
+            self.post_mask = 0;
+        }
+        let mut casts_shadows = self.casts_shadows;
+        if casts_shadows.visit("CastsShadows", &mut region).is_ok() {
+            self.casts_shadows = casts_shadows;
+        } else if region.is_reading() {
+            self.casts_shadows = true;
+        }
 
         visit_optional("Camera", &mut self.camera, &mut region, Default::default)?;
         visit_optional("Light", &mut self.light, &mut region, Default::default)?;
@@ -772,6 +791,7 @@ mod test {
             cast_shadows: true,
             mask: 0b1010,
             cookie: 0,
+            shadow_radius: 3.5,
         }));
         let masked = scene.add_node(
             Node::new("only_hero")
@@ -805,6 +825,7 @@ mod test {
         // 掩码是美术调出来的数据。丢了之后「这盏灯只照角色」会变成
         // 「照亮一切」，读档之后画面就不一样了——而且不报任何错。
         assert_eq!(sun.mask, 0b1010, "光照分层的掩码没存下来");
+        assert_eq!(sun.shadow_radius, 3.5, "阴影模糊半径没存下来");
         // 物体那一半也要存。两边同进同退才行——只存一半的话读档之后
         // 「这盏灯只照角色」会悄悄变成「照亮一切」。
         assert_eq!(restored[masked].light_mask, 0b0110, "节点的光照层没存下来");
@@ -851,7 +872,16 @@ mod test {
             z_far: 250.0,
             enabled: true,
             frustum_culling: false,
+            layers: 0b101,
+            target: kcamera::CameraTarget::Screen,
+            background: Some(kmath::Vec3::new(0.1, 0.2, 0.3)),
         }));
+        let view = scene.add_node(
+            Node::new("view")
+                .with_camera(Camera::default().with_target(kcamera::CameraTarget::View(1)))
+                .with_render_layers(0b10)
+                .with_post_mask(0b1),
+        );
 
         let restored = roundtrip(&mut scene);
         let camera = restored[node].camera().unwrap();
@@ -860,7 +890,18 @@ mod test {
         assert_eq!(camera.z_near, 0.5);
         assert_eq!(camera.z_far, 250.0);
         assert!(!camera.frustum_culling);
+        assert_eq!(camera.layers, 0b101);
+        assert_eq!(camera.background, Some(kmath::Vec3::new(0.1, 0.2, 0.3)));
         assert!(restored.active_camera().is_some());
+
+        // 离屏相机、渲染层、遮罩位都得存得下——丢了的话转场和描边读档后就没了。
+        assert_eq!(
+            restored[view].camera().unwrap().target,
+            kcamera::CameraTarget::View(1)
+        );
+        assert_eq!(restored[view].render_layers, 0b10);
+        assert_eq!(restored[view].post_mask, 0b1);
+        assert_eq!(restored.view_cameras().len(), 1);
     }
 
     #[test]

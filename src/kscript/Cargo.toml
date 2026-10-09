@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+kanim = { path = "../kanim" }
 kasset = { path = "../kasset" }
 kcore = { path = "../kcore" }
 kinput = { path = "../kinput" }
+klocale = { path = "../klocale" }
 klog = { path = "../klog" }
 kmath = { path = "../kmath" }
 kscene = { path = "../kscene" }

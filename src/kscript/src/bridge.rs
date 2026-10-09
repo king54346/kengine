@@ -9,13 +9,15 @@
 //! 取参数可能触发用户的 `toString()`，那会回调进 JS；此时若还持着场景借用，
 //! 就是重入。顺序反过来就结构上不可能发生（见 [`crate::host`]）。
 
-use crate::host::{MAX_SIGNALS, MAX_SPAWNS, handle_of, id_of, with_host, with_input, with_scene};
+use crate::host::{
+    MAX_SIGNALS, MAX_SPAWNS, handle_of, id_of, with_host, with_input, with_input_mut, with_scene,
+};
 use boa_engine::{
     Context, JsResult, JsValue, NativeFunction, js_string, object::ObjectInitializer,
     property::Attribute,
 };
 use kcore::pool::Handle;
-use kinput::MouseButton;
+use kinput::{Input, MouseButton};
 use kmath::{Quat, Vec3};
 use kphysics::RayCastOptions;
 use kscene::Node;
@@ -266,9 +268,12 @@ pub(crate) fn register(context: &mut Context) {
                 let position = handle
                     .and_then(|handle| {
                         with_scene(|scene| {
+                            // 现算而不是读 `global_transform()`：后者是上一次 `scene.update()`
+                            // 的结果，这一帧里刚改过的位置在那里还没体现——脚本写完
+                            // `self.position.x += 1` 紧接着读 `globalPosition` 会拿到旧值。
                             scene
                                 .try_get(handle)
-                                .map(|node| node.global_transform().w_axis.truncate())
+                                .map(|_| scene.world_matrix(handle).w_axis.truncate())
                         })
                     })
                     .flatten()
@@ -286,8 +291,9 @@ pub(crate) fn register(context: &mut Context) {
                 let forward = handle
                     .and_then(|handle| {
                         with_scene(|scene| {
-                            scene.try_get(handle).map(|node| {
-                                (-node.global_transform().z_axis.truncate()).normalize_or_zero()
+                            // 同 getGlobalPosition：现算，刚转过的朝向当帧就能读到。
+                            scene.try_get(handle).map(|_| {
+                                (-scene.world_matrix(handle).z_axis.truncate()).normalize_or_zero()
                             })
                         })
                     })
@@ -851,6 +857,59 @@ pub(crate) fn register(context: &mut Context) {
                 Ok(array2(delta, context))
             }),
             js_string!("scrollDelta"),
+            0,
+        )
+        // `Input.lockCursor(true)`：第一人称锁定光标。失焦自动放开、回来自动恢复。
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, _| {
+                let locked = args.first().is_none_or(JsValue::to_boolean);
+                with_input_mut(|input| input.set_cursor_locked(locked));
+                Ok(JsValue::undefined())
+            }),
+            js_string!("lockCursor"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| {
+                Ok(JsValue::from(
+                    with_input(Input::cursor_locked).unwrap_or(false),
+                ))
+            }),
+            js_string!("cursorLocked"),
+            0,
+        )
+        // ── 本地化 ──
+        // `tr("greeting", { name: "小明" })`：和 Rust 侧 `klocale::tr` 同一份全局状态。
+        // 参数对象的每个属性值先转成字符串（可能跑用户的 toString，所以不碰场景）。
+        .function(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let key = text(args, 0, context)?;
+                let mut values: Vec<(String, String)> = Vec::new();
+                if let Some(object) = args.get(1).and_then(JsValue::as_object) {
+                    for property in object.own_property_keys(context)? {
+                        let value = object
+                            .get(property.clone(), context)?
+                            .to_string(context)?
+                            .to_std_string_escaped();
+                        values.push((property.to_string(), value));
+                    }
+                }
+                let arguments: Vec<(&str, &dyn std::fmt::Display)> = values
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value as &dyn std::fmt::Display))
+                    .collect();
+                Ok(JsValue::from(js_string!(
+                    klocale::tr_with(&key, &arguments).as_str()
+                )))
+            }),
+            js_string!("tr"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| {
+                Ok(JsValue::from(js_string!(klocale::language().as_str())))
+            }),
+            js_string!("language"),
             0,
         )
         // ── 生成 ──

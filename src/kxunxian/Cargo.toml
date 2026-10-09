@@ -1,0 +1,15 @@
+[package]
+name = "kxunxian"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kasset = { path = "../kasset" }
+kanim = { path = "../kanim" }
+kgltf = { path = "../kgltf" }
+klog = { path = "../klog" }
+kmaterial = { path = "../kmaterial" }
+kmath = { path = "../kmath" }
+kmesh = { path = "../kmesh" }
+kpbr = { path = "../kpbr" }
+ktexture = { path = "../ktexture" }

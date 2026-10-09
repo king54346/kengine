@@ -207,8 +207,8 @@ impl Header {
                             count: Some(count),
                         });
                     } else {
-                        let scalar =
-                            Scalar::parse(first).ok_or_else(|| bad(format!("未知属性类型 {first}")))?;
+                        let scalar = Scalar::parse(first)
+                            .ok_or_else(|| bad(format!("未知属性类型 {first}")))?;
                         element.properties.push(Property {
                             name: tokens.next().unwrap_or("").to_string(),
                             scalar,
@@ -286,7 +286,11 @@ fn assemble(properties: &[Property], values: &[f64]) -> Vertex {
 }
 
 /// 多边形扇形三角化，顺带把索引范围校验掉。
-fn push_face(indices: &mut Vec<u32>, corners: &[u32], vertex_count: usize) -> Result<(), LoadError> {
+fn push_face(
+    indices: &mut Vec<u32>,
+    corners: &[u32],
+    vertex_count: usize,
+) -> Result<(), LoadError> {
     if corners.iter().any(|&i| i as usize >= vertex_count) {
         return Err(bad("PLY 的面索引越界"));
     }
@@ -369,11 +373,18 @@ fn read_binary(
                     corners.clear();
                     for _ in 0..count {
                         corners.push(
-                            property.scalar.read(take(property.scalar.size())?, big_endian) as u32,
+                            property
+                                .scalar
+                                .read(take(property.scalar.size())?, big_endian)
+                                as u32,
                         );
                     }
                 } else {
-                    scalars.push(property.scalar.read(take(property.scalar.size())?, big_endian));
+                    scalars.push(
+                        property
+                            .scalar
+                            .read(take(property.scalar.size())?, big_endian),
+                    );
                 }
             }
             match element.name.as_str() {

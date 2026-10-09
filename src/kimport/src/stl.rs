@@ -65,7 +65,10 @@ pub async fn parse(
     let mut lookup: HashMap<([u32; 3], [u32; 3]), u32> = HashMap::new();
     for triangle in &triangles {
         for corner in &triangle.corners {
-            let key = (corner.map(f32::to_bits), triangle.color.to_array().map(f32::to_bits));
+            let key = (
+                corner.map(f32::to_bits),
+                triangle.color.to_array().map(f32::to_bits),
+            );
             let index = match lookup.get(&key) {
                 Some(&existing) => existing,
                 None => {
@@ -134,7 +137,11 @@ fn parse_binary(bytes: &[u8]) -> Result<(Vec<Triangle>, bool), LoadError> {
     for index in 0..count {
         let start = 84 + index * 50;
         let float = |offset: usize| {
-            f32::from_le_bytes(bytes[start + offset..start + offset + 4].try_into().unwrap())
+            f32::from_le_bytes(
+                bytes[start + offset..start + offset + 4]
+                    .try_into()
+                    .unwrap(),
+            )
         };
         let corners = [
             [float(12), float(16), float(20)],

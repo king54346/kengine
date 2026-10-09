@@ -26,12 +26,21 @@ loader! {
 
 /// sRGB 分量转线性。
 pub(crate) fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 fn read_color(element: &xml::Element) -> Option<Vec4> {
     let color = element.child("color")?;
-    let channel = |name: &str, default: f32| color.child(name).and_then(|c| c.text.trim().parse().ok()).unwrap_or(default);
+    let channel = |name: &str, default: f32| {
+        color
+            .child(name)
+            .and_then(|c| c.text.trim().parse().ok())
+            .unwrap_or(default)
+    };
     Some(Vec4::new(
         srgb_to_linear(channel("r", 1.0)),
         srgb_to_linear(channel("g", 1.0)),
@@ -41,7 +50,11 @@ fn read_color(element: &xml::Element) -> Option<Vec4> {
 }
 
 /// 解析 AMF。
-pub async fn parse(bytes: Vec<u8>, path: PathBuf, _io: Arc<dyn ResourceIo>) -> Result<Model, LoadError> {
+pub async fn parse(
+    bytes: Vec<u8>,
+    path: PathBuf,
+    _io: Arc<dyn ResourceIo>,
+) -> Result<Model, LoadError> {
     let text = if zip::is_zip(&bytes) {
         let archive = zip::Archive::open(&bytes)?;
         let entry = archive
@@ -52,7 +65,10 @@ pub async fn parse(bytes: Vec<u8>, path: PathBuf, _io: Arc<dyn ResourceIo>) -> R
     } else {
         bytes
     };
-    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "AMF".into());
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "AMF".into());
     parse_document(&xml::parse(&text)?, &name)
 }
 
@@ -61,12 +77,21 @@ pub fn parse_document(root: &xml::Element, name: &str) -> Result<Model, LoadErro
     if root.name != "amf" {
         return Err(bad("不是 AMF 文档（根元素不是 <amf>）"));
     }
-    let mut materials = vec![Material::standard().with_base_color(Vec4::new(0.8, 0.8, 0.8, 1.0)).with_roughness(0.5)];
+    let mut materials = vec![
+        Material::standard()
+            .with_base_color(Vec4::new(0.8, 0.8, 0.8, 1.0))
+            .with_roughness(0.5),
+    ];
     let mut material_ids: HashMap<String, usize> = HashMap::new();
     for element in root.children_named("material") {
         let color = read_color(element).unwrap_or(Vec4::new(0.8, 0.8, 0.8, 1.0));
-        let mut material = Material::standard().with_base_color(color).with_roughness(0.5);
-        if let Some(name) = element.children_named("metadata").find(|m| m.attr("type") == Some("name")) {
+        let mut material = Material::standard()
+            .with_base_color(color)
+            .with_roughness(0.5);
+        if let Some(name) = element
+            .children_named("metadata")
+            .find(|m| m.attr("type") == Some("name"))
+        {
             material.set_name(name.text.trim());
         }
         if color.w < 1.0 {
@@ -79,7 +104,11 @@ pub fn parse_document(root: &xml::Element, name: &str) -> Result<Model, LoadErro
     }
     // 顶点色专用的白材质：颜色全由顶点给。
     let white = materials.len();
-    materials.push(Material::standard().with_base_color(Vec4::ONE).with_roughness(0.5));
+    materials.push(
+        Material::standard()
+            .with_base_color(Vec4::ONE)
+            .with_roughness(0.5),
+    );
 
     let mut meshes = Vec::new();
     let mut nodes = vec![ModelNode {
@@ -90,14 +119,20 @@ pub fn parse_document(root: &xml::Element, name: &str) -> Result<Model, LoadErro
     let mut total = 0usize;
 
     for object in root.children_named("object") {
-        let Some(mesh) = object.child("mesh") else { continue };
+        let Some(mesh) = object.child("mesh") else {
+            continue;
+        };
         let object_color = read_color(object);
         let mut positions = Vec::new();
         let mut vertex_colors: Vec<Option<Vec4>> = Vec::new();
         if let Some(vertices) = mesh.child("vertices") {
             for vertex in vertices.children_named("vertex") {
                 let c = vertex.child("coordinates");
-                let axis = |n: &str| c.and_then(|c| c.child(n)).and_then(|v| v.text.trim().parse::<f32>().ok()).unwrap_or(0.0);
+                let axis = |n: &str| {
+                    c.and_then(|c| c.child(n))
+                        .and_then(|v| v.text.trim().parse::<f32>().ok())
+                        .unwrap_or(0.0)
+                };
                 positions.push(Vec3::new(axis("x"), axis("y"), axis("z")));
                 vertex_colors.push(read_color(vertex));
             }
@@ -107,25 +142,43 @@ pub fn parse_document(root: &xml::Element, name: &str) -> Result<Model, LoadErro
             name: object
                 .children_named("metadata")
                 .find(|m| m.attr("type") == Some("name"))
-                .map_or_else(|| format!("Object{}", object.attr("id").unwrap_or("")), |m| m.text.trim().to_string()),
+                .map_or_else(
+                    || format!("Object{}", object.attr("id").unwrap_or("")),
+                    |m| m.text.trim().to_string(),
+                ),
             ..Default::default()
         };
         for volume in mesh.children_named("volume") {
             let volume_color = read_color(volume);
-            let material_id = volume.attr("materialid").and_then(|id| material_ids.get(id)).copied();
+            let material_id = volume
+                .attr("materialid")
+                .and_then(|id| material_ids.get(id))
+                .copied();
             let per_vertex = vertex_colors.iter().any(Option::is_some);
             let mut vertices = Vec::new();
             let mut indices = Vec::new();
             let mut remap: HashMap<usize, u32> = HashMap::new();
             for triangle in volume.children_named("triangle") {
                 for key in ["v1", "v2", "v3"] {
-                    let index: usize = triangle.child_text(key).parse().map_err(|_| bad("AMF 三角形的顶点号不是整数"))?;
-                    let position = *positions.get(index).ok_or_else(|| bad("AMF 三角形引用了不存在的顶点"))?;
+                    let index: usize = triangle
+                        .child_text(key)
+                        .parse()
+                        .map_err(|_| bad("AMF 三角形的顶点号不是整数"))?;
+                    let position = *positions
+                        .get(index)
+                        .ok_or_else(|| bad("AMF 三角形引用了不存在的顶点"))?;
                     let slot = *remap.entry(index).or_insert_with(|| {
-                        let color = vertex_colors[index].or(volume_color).or(object_color).unwrap_or(Vec4::ONE);
+                        let color = vertex_colors[index]
+                            .or(volume_color)
+                            .or(object_color)
+                            .unwrap_or(Vec4::ONE);
                         vertices.push(Vertex {
                             position: position.to_array(),
-                            color: if per_vertex { color.truncate().to_array() } else { [1.0; 3] },
+                            color: if per_vertex {
+                                color.truncate().to_array()
+                            } else {
+                                [1.0; 3]
+                            },
                             ..Default::default()
                         });
                         vertices.len() as u32 - 1
@@ -146,7 +199,11 @@ pub fn parse_document(root: &xml::Element, name: &str) -> Result<Model, LoadErro
             let material = if per_vertex {
                 white
             } else if let Some(color) = volume_color.or(object_color) {
-                materials.push(Material::standard().with_base_color(color).with_roughness(0.5));
+                materials.push(
+                    Material::standard()
+                        .with_base_color(color)
+                        .with_roughness(0.5),
+                );
                 materials.len() - 1
             } else {
                 material_id.unwrap_or(0)
@@ -167,8 +224,18 @@ pub fn parse_document(root: &xml::Element, name: &str) -> Result<Model, LoadErro
     let mut children = Vec::new();
     for constellation in root.children_named("constellation") {
         for instance in constellation.children_named("instance") {
-            let Some(&source) = instance.attr("objectid").and_then(|id| object_nodes.get(id)) else { continue };
-            let number = |n: &str| instance.child(n).and_then(|v| v.text.trim().parse::<f32>().ok()).unwrap_or(0.0);
+            let Some(&source) = instance
+                .attr("objectid")
+                .and_then(|id| object_nodes.get(id))
+            else {
+                continue;
+            };
+            let number = |n: &str| {
+                instance
+                    .child(n)
+                    .and_then(|v| v.text.trim().parse::<f32>().ok())
+                    .unwrap_or(0.0)
+            };
             let index = nodes.len();
             let parts = nodes[source].parts.clone();
             nodes.push(ModelNode {
@@ -216,6 +283,9 @@ mod tests {
         let model = parse_document(&doc, "t").unwrap();
         assert_eq!(model.triangle_count(), 1);
         let material = model.nodes()[1].parts[0].material.unwrap();
-        assert_eq!(model.materials()[material].base_color(), Vec4::new(1.0, 0.0, 0.0, 1.0));
+        assert_eq!(
+            model.materials()[material].base_color(),
+            Vec4::new(1.0, 0.0, 0.0, 1.0)
+        );
     }
 }

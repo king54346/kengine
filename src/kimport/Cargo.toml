@@ -28,3 +28,5 @@ quick-xml = "0.41"
 
 [dev-dependencies]
 ktask = { path = "../ktask" }
+# MaterialX 生成的钩子要能和引擎的标准着色器拼起来——只有渲染器知道那份源码。
+krender = { path = "../krender" }

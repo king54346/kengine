@@ -375,6 +375,12 @@ impl PhysicsWorld {
 
         self.inner.integration_parameters.dt = dt;
         self.inner.step_with_events(&(), &self.event_handler);
+        // rapier 的力是持续的，`BodyMut::add_force` 承诺的是「下一步生效」——用完就清，
+        // 和 3D 那边一样（见 `PhysicsWorld::step`）。
+        for (_, body) in self.inner.bodies.iter_mut() {
+            body.reset_forces(false);
+            body.reset_torques(false);
+        }
         self.query_structures_stale = false;
 
         self.drain_events();
@@ -541,5 +547,32 @@ impl PhysicsWorld {
         self.inner.step_with_events(&(), &self.event_handler);
         self.query_structures_stale = false;
         self.drain_events();
+    }
+}
+
+#[cfg(test)]
+mod force_tests {
+    use super::*;
+
+    #[test]
+    fn forces_only_last_one_step() {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(&RigidBodyDesc::dynamic().with_gravity_scale(0.0), 0);
+        world
+            .add_collider(&ColliderDesc::ball(0.5), Some(body), 0)
+            .unwrap();
+        world
+            .body_mut(body)
+            .unwrap()
+            .add_force(Vec2::X * 10.0, true);
+        world.step(1.0 / 60.0);
+        let after_one = world.body(body).unwrap().linvel().x;
+        world.step(1.0 / 60.0);
+        let after_two = world.body(body).unwrap().linvel().x;
+        assert!(after_one > 0.0);
+        assert!(
+            (after_two - after_one).abs() < 1e-5,
+            "力该在一步之后清掉：{after_one} → {after_two}"
+        );
     }
 }

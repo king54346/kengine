@@ -1,0 +1,22 @@
+[package]
+name = "kcomponents"
+version = "0.1.0"
+edition = "2024"
+
+# 可复用的场景组件：海洋（FFT 波浪）、程序化天空（大气散射 + 体积云）、
+# 焦散、水下后处理、环境预设。每个组件都是「一个结构体 + 往场景里放东西 + 每帧更新」，
+# 不依赖 kapp，任何应用都能用。
+[dependencies]
+kasset = { path = "../kasset" }
+kcore = { path = "../kcore" }
+klight = { path = "../klight" }
+klog = { path = "../klog" }
+kmaterial = { path = "../kmaterial" }
+kmath = { path = "../kmath" }
+kmesh = { path = "../kmesh" }
+kpbr = { path = "../kpbr" }
+kphysics = { path = "../kphysics" }
+krender = { path = "../krender" }
+kscene = { path = "../kscene" }
+kshader = { path = "../kshader" }
+ktexture = { path = "../ktexture" }

@@ -21,6 +21,8 @@ kphysics = { path = "../kphysics" }
 kpbr = { path = "../kpbr" }
 ksprite = { path = "../ksprite" }
 kterrain = { path = "../kterrain" }
+knav = { path = "../knav" }
+bytemuck = { version = "1.25.2", features = ["derive"] }
 ktexture = { path = "../ktexture" }
 # 剔除分片并行要用线程池，因此必须开多线程实现。
 ktask = { path = "../ktask", features = ["multi_threaded"] }

@@ -1,0 +1,8 @@
+[package]
+name = "klocale"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kasset = { path = "../kasset" }
+kcore = { path = "../kcore" }

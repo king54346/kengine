@@ -81,6 +81,8 @@ pub struct Context<'a> {
     pub script_events: &'a [Signal],
     /// 内置调试叠加层的开关，改了下一帧生效。
     pub debug: &'a mut DebugDraw,
+    /// 剖析器：最近一帧的 CPU / GPU 分段与帧时间历史。F3 开关，也可以在代码里开。
+    pub profiler: &'a mut crate::Profiler,
     /// 本帧的 UI。即时模式：每帧重新画，不画就没有。
     ///
     /// 引擎在 `update` 之前 `begin_frame`、渲染之前 `end_frame`，
@@ -122,6 +124,19 @@ pub struct Context<'a> {
     /// 缓冲里的结构必须和 [`kparticle::PARTICLE_STRUCT_WGSL`] 一致，
     /// 排序的限制见 [`krender::GpuParticles`]。
     pub gpu_particles: &'a mut Vec<krender::GpuParticles>,
+    /// 自定义后处理：一串全屏 pass，插在色调映射的前后。**保留模式**——
+    /// 挂上去就一直在，改参数按名字找回来改。
+    ///
+    /// ```ignore
+    /// ctx.post_effects.push(krender::effects::chromatic_aberration());
+    /// // 之后：
+    /// if let Some(ca) = ctx.post_effects.get_mut("chromatic_aberration") {
+    ///     ca.set("strength", 2.0);
+    /// }
+    /// ```
+    ///
+    /// 现成的效果在 [`krender::effects`]，自己写的见 [`krender::PostEffect`]。
+    pub post_effects: &'a mut krender::PostStack,
     /// 阴影级联的划分参数。改了下一帧生效。
     ///
     /// 场景尺度和默认那套差得远时一定要调：默认按几十米的户外场景配，
@@ -151,12 +166,24 @@ pub struct Context<'a> {
     /// 那些改动和引擎每帧自己的重建会互相覆盖，且不报错。
     ///
     /// 留这个字段是为了那些**必须真的用一次渲染器**的操作，
-    /// 目前只有 [`capture_environment`](Context::capture_environment)。
+    /// 目前是 [`capture_environment`](Context::capture_environment) 和
+    /// [`prepare_materials`](Context::prepare_materials)。
     pub(crate) renderer: &'a mut krender::Renderer,
     pub(crate) exit_requested: &'a mut bool,
 }
 
 impl Context<'_> {
+    /// 提前编译这些材质的管线，免得它们第一次出现在画面上时卡一帧。
+    ///
+    /// 在 `init` 里把之后才会生成的东西（子弹、特效、敌人）的材质传进来。
+    /// 自定义着色器的材质最值得这么做——编译一份要几十毫秒。
+    pub fn prepare_materials<'m>(
+        &mut self,
+        materials: impl IntoIterator<Item = &'m kmaterial::Material>,
+    ) {
+        self.renderer.prepare_materials(materials);
+    }
+
     /// 站在 `position` 把场景往六个方向各渲一遍，拼成一张等距柱状 HDR。
     ///
     /// 拿它去喂 [`Scene::set_environment_hdr`](kscene::Scene::set_environment_hdr)

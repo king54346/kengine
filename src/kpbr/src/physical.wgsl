@@ -2,6 +2,7 @@
 // and a grazing-angle sheen approximation. This is not a spectral path tracer.
 //
 // params[3] = (各向异性强度 [+2 表示有方向贴图], 各向异性旋转, 清漆强度, 清漆粗糙度)
+// params[4] = (体积衰减颜色 rgb, 衰减距离（0 = 不衰减）)
 
 // 各向异性的方向（世界空间）与强度。强度为 0 时返回的方向无意义。
 fn physical_anisotropy(s: ptr<function, Surface>) -> vec4<f32> {
@@ -57,7 +58,9 @@ fn material_lighting(surface: ptr<function, Surface>, input: LightingInput) -> v
     let n = (*surface).normal;
     let v = (*surface).view_direction;
     let l = input.light_direction;
-    let albedo = (*surface).base_color.rgb;
+    // 透射把漫反射换掉了（glTF 的定义：透射 = 1 时没有漫反射，光穿过去）。不乘的话透明的玻璃龙在灯下是白的，
+    // 透射和体积颜色只在环境光那一份里看得到。
+    let albedo = (*surface).base_color.rgb * (1.0 - clamp((*surface).params[0].x, 0.0, 1.0));
     let metallic = (*surface).metallic;
     let roughness = (*surface).roughness;
 
@@ -101,7 +104,9 @@ fn physical_environment(direction: vec3<f32>, roughness: f32) -> vec3<f32> {
     }
     return ibl_specular(globals.environment, direction, roughness, vec3<f32>(1.0), vec2<f32>(1.0, 0.0));
 }
-fn material_surface(s: Surface) -> Surface {
+// 表面钩子的本体。起了自己的名字，别的钩子（比如 MaterialX 节点图生成的）
+// 可以先改表面、再交给它；`material_surface` 本身在 `physical.rs` 里拼上。
+fn physical_surface(s: Surface) -> Surface {
     var out = s;
     if (s.base_color.a < s.params[1].w) { discard; }
     if (s.params[2].w > 0.5) {
@@ -134,7 +139,13 @@ fn material_ambient(s: ptr<function, Surface>, input: AmbientInput) -> vec3<f32>
         let behind = vec3<f32>(scene_color((*s).screen_uv + pr.xy * flip).r,
             scene_color((*s).screen_uv + pg.xy * flip).g,
             scene_color((*s).screen_uv + pb.xy * flip).b) * (*s).base_color.rgb;
-        diffuse = mix(diffuse, behind * (1.0 - f), (*s).params[0].x);
+        // 体积衰减（比尔-朗伯）：光在里面走了「厚度」那么远，剩下 颜色^(厚度 / 衰减距离)。
+        var absorbed = vec3<f32>(1.0);
+        let attenuation = (*s).params[4];
+        if (attenuation.w > 0.0) {
+            absorbed = pow(max(attenuation.rgb, vec3<f32>(1e-4)), vec3<f32>((*s).params[0].z / attenuation.w));
+        }
+        diffuse = mix(diffuse, behind * absorbed * (1.0 - f), (*s).params[0].x);
     }
     let film = (*s).params[1].x;
     let optical_path = 2.0 * 1.3 * (*s).params[1].y * sqrt(max(0.0, 1.0 - (1.0 - nv * nv) / (1.3 * 1.3)));

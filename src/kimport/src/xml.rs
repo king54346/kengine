@@ -60,7 +60,8 @@ impl Element {
 
     /// 沿路径往下找：`find("a/b/c")`。
     pub fn find(&self, path: &str) -> Option<&Element> {
-        path.split('/').try_fold(self, |node, name| node.child(name))
+        path.split('/')
+            .try_fold(self, |node, name| node.child(name))
     }
 
     /// 子树里第一个叫 `name` 的元素（深度优先，含自己）。
@@ -83,14 +84,21 @@ impl Element {
 
     /// 文本按空白切开后解析成一串 `f32`。解析不了的记号当 0。
     pub fn floats(&self) -> Vec<f32> {
-        self.text.split_ascii_whitespace().map(|t| t.parse().unwrap_or(0.0)).collect()
+        self.text
+            .split_ascii_whitespace()
+            .map(|t| t.parse().unwrap_or(0.0))
+            .collect()
     }
 
     /// 文本按空白切开后解析成一串整数。
     pub fn integers(&self) -> Vec<i64> {
         self.text
             .split_ascii_whitespace()
-            .map(|t| t.parse::<i64>().or_else(|_| t.parse::<f64>().map(|f| f as i64)).unwrap_or(0))
+            .map(|t| {
+                t.parse::<i64>()
+                    .or_else(|_| t.parse::<f64>().map(|f| f as i64))
+                    .unwrap_or(0)
+            })
             .collect()
     }
 
@@ -116,11 +124,12 @@ fn entity(name: &str) -> Option<char> {
         "quot" => '"',
         "apos" => '\'',
         _ => {
-            let code = if let Some(hex) = name.strip_prefix("#x").or_else(|| name.strip_prefix("#X")) {
-                u32::from_str_radix(hex, 16).ok()?
-            } else {
-                name.strip_prefix('#')?.parse().ok()?
-            };
+            let code =
+                if let Some(hex) = name.strip_prefix("#x").or_else(|| name.strip_prefix("#X")) {
+                    u32::from_str_radix(hex, 16).ok()?
+                } else {
+                    name.strip_prefix('#')?.parse().ok()?
+                };
             char::from_u32(code)?
         }
     })
@@ -144,15 +153,20 @@ pub fn parse(bytes: &[u8]) -> Result<Element, LoadError> {
             let value = quick_xml::escape::unescape(&raw)
                 .map(|v| v.into_owned())
                 .unwrap_or_else(|_| raw.clone().into_owned());
-            element.attributes.push((local(attribute.key.as_ref()), value));
+            element
+                .attributes
+                .push((local(attribute.key.as_ref()), value));
         }
         Ok(element)
     };
     let mut depth_guard = 0usize;
     loop {
-        let event = reader
-            .read_event()
-            .map_err(|e| bad(format!("XML 解析失败（第 {} 字节）：{e}", reader.buffer_position())))?;
+        let event = reader.read_event().map_err(|e| {
+            bad(format!(
+                "XML 解析失败（第 {} 字节）：{e}",
+                reader.buffer_position()
+            ))
+        })?;
         match event {
             Event::Start(e) => {
                 depth_guard += 1;
@@ -163,17 +177,27 @@ pub fn parse(bytes: &[u8]) -> Result<Element, LoadError> {
             }
             Event::Empty(e) => {
                 let element = open(&e)?;
-                stack.last_mut().expect("栈底是虚拟根").children.push(element);
+                stack
+                    .last_mut()
+                    .expect("栈底是虚拟根")
+                    .children
+                    .push(element);
             }
             Event::End(_) => {
                 depth_guard = depth_guard.saturating_sub(1);
                 if stack.len() > 1 {
                     let element = stack.pop().expect("刚检查过长度");
-                    stack.last_mut().expect("栈底是虚拟根").children.push(element);
+                    stack
+                        .last_mut()
+                        .expect("栈底是虚拟根")
+                        .children
+                        .push(element);
                 }
             }
             Event::Text(e) => {
-                let text = e.decode().map_err(|e| bad(format!("XML 文本编码错误：{e}")))?;
+                let text = e
+                    .decode()
+                    .map_err(|e| bad(format!("XML 文本编码错误：{e}")))?;
                 stack.last_mut().expect("栈底是虚拟根").text.push_str(&text);
             }
             Event::CData(e) => {
@@ -196,10 +220,18 @@ pub fn parse(bytes: &[u8]) -> Result<Element, LoadError> {
     // 没闭合的元素（写坏的文件）也收进树里，尽量多读出一点。
     while stack.len() > 1 {
         let element = stack.pop().expect("刚检查过长度");
-        stack.last_mut().expect("栈底是虚拟根").children.push(element);
+        stack
+            .last_mut()
+            .expect("栈底是虚拟根")
+            .children
+            .push(element);
     }
     let document = stack.pop().expect("栈底是虚拟根");
-    document.children.into_iter().next().ok_or_else(|| bad("XML 里没有任何元素"))
+    document
+        .children
+        .into_iter()
+        .next()
+        .ok_or_else(|| bad("XML 里没有任何元素"))
 }
 
 #[cfg(test)]

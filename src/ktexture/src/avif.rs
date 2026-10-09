@@ -155,31 +155,32 @@ unsafe fn copy_frame(picture: &Dav1dPicture) -> Result<Frame, TextureError> {
         // SAFETY：帧有效期间序列头指针有效。
         Some(header) => unsafe {
             let header = header.as_ref();
-            (header.mtrx as u32, header.color_range != 0)
+            (header.mtrx, header.color_range != 0)
         },
         None => (1, false),
     };
 
-    let read_plane = |index: usize, w: usize, h: usize, stride: isize| -> Result<Vec<u16>, TextureError> {
-        let Some(base) = picture.data[index] else {
-            return Err(err("AV1 帧缺少平面数据"));
-        };
-        let base = base.as_ptr() as *const u8;
-        let mut out = Vec::with_capacity(w * h);
-        for row in 0..h {
-            // SAFETY：dav1d 保证每个平面至少有 `h` 行、每行 `stride` 字节。
-            unsafe {
-                let line = base.offset(row as isize * stride);
-                if bits > 8 {
-                    let line = line as *const u16;
-                    out.extend((0..w).map(|x| line.add(x).read_unaligned()));
-                } else {
-                    out.extend((0..w).map(|x| *line.add(x) as u16));
+    let read_plane =
+        |index: usize, w: usize, h: usize, stride: isize| -> Result<Vec<u16>, TextureError> {
+            let Some(base) = picture.data[index] else {
+                return Err(err("AV1 帧缺少平面数据"));
+            };
+            let base = base.as_ptr() as *const u8;
+            let mut out = Vec::with_capacity(w * h);
+            for row in 0..h {
+                // SAFETY：dav1d 保证每个平面至少有 `h` 行、每行 `stride` 字节。
+                unsafe {
+                    let line = base.offset(row as isize * stride);
+                    if bits > 8 {
+                        let line = line as *const u16;
+                        out.extend((0..w).map(|x| line.add(x).read_unaligned()));
+                    } else {
+                        out.extend((0..w).map(|x| *line.add(x) as u16));
+                    }
                 }
             }
-        }
-        Ok(out)
-    };
+            Ok(out)
+        };
 
     let y = read_plane(0, width, height, picture.stride[0])?;
     let (u, v) = if chroma_width > 0 {
@@ -338,7 +339,10 @@ mod tests {
         assert!(width > 0 && height > 0);
         assert_eq!(rgba.len(), (width * height * 4) as usize);
         // 不是一张纯黑 / 纯白：解码错了的 AV1 最常见的样子是一片灰或一片黑。
-        let distinct = rgba.chunks(4).map(|p| p[0]).collect::<std::collections::HashSet<_>>();
+        let distinct = rgba
+            .chunks(4)
+            .map(|p| p[0])
+            .collect::<std::collections::HashSet<_>>();
         assert!(distinct.len() > 16, "只有 {} 种红色值", distinct.len());
     }
 }

@@ -48,7 +48,11 @@ struct Joint {
 }
 
 /// 解析 BVH。
-pub async fn parse(bytes: Vec<u8>, path: PathBuf, _io: Arc<dyn ResourceIo>) -> Result<Model, LoadError> {
+pub async fn parse(
+    bytes: Vec<u8>,
+    path: PathBuf,
+    _io: Arc<dyn ResourceIo>,
+) -> Result<Model, LoadError> {
     let name = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -96,7 +100,11 @@ pub fn parse_text(text: &str, clip_name: &str) -> Result<Model, LoadError> {
                 };
                 expect(tokens.next(), "{")?;
                 expect(tokens.next(), "OFFSET")?;
-                let offset = Vec3::new(number(tokens.next())?, number(tokens.next())?, number(tokens.next())?);
+                let offset = Vec3::new(
+                    number(tokens.next())?,
+                    number(tokens.next())?,
+                    number(tokens.next())?,
+                );
                 let mut channels = Vec::new();
                 if !end {
                     expect(tokens.next(), "CHANNELS")?;
@@ -105,15 +113,17 @@ pub fn parse_text(text: &str, clip_name: &str) -> Result<Model, LoadError> {
                         return Err(bad("BVH：一个关节最多 6 个通道"));
                     }
                     for _ in 0..count {
-                        channels.push(match tokens.next().unwrap_or("").to_ascii_lowercase().as_str() {
-                            "xposition" => Axis::PositionX,
-                            "yposition" => Axis::PositionY,
-                            "zposition" => Axis::PositionZ,
-                            "xrotation" => Axis::RotationX,
-                            "yrotation" => Axis::RotationY,
-                            "zrotation" => Axis::RotationZ,
-                            other => return Err(bad(format!("BVH：未知的通道 {other}"))),
-                        });
+                        channels.push(
+                            match tokens.next().unwrap_or("").to_ascii_lowercase().as_str() {
+                                "xposition" => Axis::PositionX,
+                                "yposition" => Axis::PositionY,
+                                "zposition" => Axis::PositionZ,
+                                "xrotation" => Axis::RotationX,
+                                "yrotation" => Axis::RotationY,
+                                "zrotation" => Axis::RotationZ,
+                                other => return Err(bad(format!("BVH：未知的通道 {other}"))),
+                            },
+                        );
                     }
                 }
                 let index = joints.len();
@@ -175,20 +185,40 @@ pub fn parse_text(text: &str, clip_name: &str) -> Result<Model, LoadError> {
     let times: Vec<f32> = (0..frames).map(|f| f as f32 * frame_time).collect();
     let mut tracks = Vec::new();
     for (index, joint) in joints.iter().enumerate() {
-        let has_position = joint.channels.iter().any(|a| matches!(a, Axis::PositionX | Axis::PositionY | Axis::PositionZ));
-        let has_rotation = joint.channels.iter().any(|a| matches!(a, Axis::RotationX | Axis::RotationY | Axis::RotationZ));
+        let has_position = joint
+            .channels
+            .iter()
+            .any(|a| matches!(a, Axis::PositionX | Axis::PositionY | Axis::PositionZ));
+        let has_rotation = joint
+            .channels
+            .iter()
+            .any(|a| matches!(a, Axis::RotationX | Axis::RotationY | Axis::RotationZ));
         if frames == 0 {
             continue;
         }
         if has_position
-            && let Some(curve) = Curve::new(times.clone(), std::mem::take(&mut positions[index]), Interpolation::Linear)
+            && let Some(curve) = Curve::new(
+                times.clone(),
+                std::mem::take(&mut positions[index]),
+                Interpolation::Linear,
+            )
         {
-            tracks.push(Track { target: index, channel: Channel::Position(curve) });
+            tracks.push(Track {
+                target: index,
+                channel: Channel::Position(curve),
+            });
         }
         if has_rotation
-            && let Some(curve) = Curve::new(times.clone(), std::mem::take(&mut rotations[index]), Interpolation::Linear)
+            && let Some(curve) = Curve::new(
+                times.clone(),
+                std::mem::take(&mut rotations[index]),
+                Interpolation::Linear,
+            )
         {
-            tracks.push(Track { target: index, channel: Channel::Rotation(curve) });
+            tracks.push(Track {
+                target: index,
+                channel: Channel::Rotation(curve),
+            });
         }
     }
 
@@ -243,11 +273,17 @@ Frame Time: 0.5
         let model = parse_text(SAMPLE, "take").unwrap();
         assert_eq!(model.nodes().len(), 3);
         assert_eq!(model.nodes()[2].name, "Spine_End");
-        assert_eq!(model.nodes()[1].transform.position, Vec3::new(0.0, 10.0, 0.0));
+        assert_eq!(
+            model.nodes()[1].transform.position,
+            Vec3::new(0.0, 10.0, 0.0)
+        );
         let clip = &model.animations()[0];
         assert!((clip.duration() - 0.5).abs() < 1e-6);
         let pose = clip.sample(0.5);
-        assert_eq!(pose.entry(0).unwrap().position, Some(Vec3::new(4.0, 5.0, 6.0)));
+        assert_eq!(
+            pose.entry(0).unwrap().position,
+            Some(Vec3::new(4.0, 5.0, 6.0))
+        );
         // 根：Z 转 90°。脊柱：Y 转 90°。
         let spine = pose.entry(1).unwrap().rotation.unwrap();
         assert!(spine.angle_between(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)) < 1e-4);
@@ -256,10 +292,24 @@ Frame Time: 0.5
     #[test]
     fn rotation_order_follows_the_declared_channels() {
         // 同样的数值，ZXY 与 XYZ 的顺序得到不同的旋转。
-        let zxy = Quat::from_rotation_z(0.5) * Quat::from_rotation_x(0.3) * Quat::from_rotation_y(0.2);
-        let text = SAMPLE.replace("90 0 0 0 0 90", &format!("{} {} {} 0 0 0", 0.5f32.to_degrees(), 0.3f32.to_degrees(), 0.2f32.to_degrees()));
+        let zxy =
+            Quat::from_rotation_z(0.5) * Quat::from_rotation_x(0.3) * Quat::from_rotation_y(0.2);
+        let text = SAMPLE.replace(
+            "90 0 0 0 0 90",
+            &format!(
+                "{} {} {} 0 0 0",
+                0.5f32.to_degrees(),
+                0.3f32.to_degrees(),
+                0.2f32.to_degrees()
+            ),
+        );
         let model = parse_text(&text, "t").unwrap();
-        let root = model.animations()[0].sample(0.5).entry(0).unwrap().rotation.unwrap();
+        let root = model.animations()[0]
+            .sample(0.5)
+            .entry(0)
+            .unwrap()
+            .rotation
+            .unwrap();
         assert!(root.angle_between(zxy) < 1e-4);
     }
 }

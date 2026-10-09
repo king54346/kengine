@@ -18,13 +18,13 @@ HTML 报告在 `target/criterion/report/index.html`。
 | `physics.rs` | 步进（自由落体 / 堆叠 / 关节链）、射线（打中 / 打空） |
 | `rendering_paths.rs` | 粒子推进与收集、蒙皮、调试线生成 |
 | `serialization.rs` | 场景存盘、读盘、存盘体积 |
+| `render.rs` | 无头渲染器一帧的 CPU 时间：1k / 10k / 50k 个方块，有无阴影；对照 `control/sort`。没有显卡适配器时跳过 |
 | `script.rs` | 一次 tick 的固定开销、脚本节点扫描、空回调、包装层 vs 裸桥 |
 
 ## 没覆盖什么
 
-**批处理与绘制提交量不了。** 那部分在 `Renderer::render` 里，需要一个 wgpu
-设备，headless 起不来。它仍然只能靠 demo 里的 `prepare_micros` 观察。
-这是已知盲区，不假装覆盖了。
+GPU 侧的时间。`render.rs` 只计 `Renderer::render` 的 CPU 部分（每轮之后等显卡做完、
+不计入）；各 pass 在显卡上花多久看剖析面板（F3，适配器支持时间戳查询时有）。
 
 ## ⚠️ 关于这些数字能信到什么程度
 

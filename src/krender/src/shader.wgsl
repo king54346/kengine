@@ -14,12 +14,17 @@
 // 这正是 bevy 那边 `FallbackImage` 在做的事。
 @group(2) @binding(6) var custom_texture0: texture_2d<f32>;
 @group(2) @binding(7) var custom_texture1: texture_2d<f32>;
+@group(2) @binding(8) var custom_texture2: texture_2d<f32>;
+@group(2) @binding(9) var custom_texture3: texture_2d<f32>;
 // 自定义纹理数组：一个槽位装很多张同尺寸的图，用整数层号选。
 // 没设的时候绑的是那张 1×1 白图的一层数组视图。
 //
 // 采样时**层号是第四个参数**，不是 UV 的第三个分量：
 // `textureSample(custom_texture_array, base_color_sampler, uv, layer)`。
-@group(2) @binding(8) var custom_texture_array: texture_2d_array<f32>;
+@group(2) @binding(10) var custom_texture_array: texture_2d_array<f32>;
+// 自定义三维纹理（`Texture::volume`）：`textureSample(custom_texture_3d, base_color_sampler, uvw)`，
+// 层与层之间也插值。没设的时候是 1×1×1 的白图。
+@group(2) @binding(11) var custom_texture_3d: texture_3d<f32>;
 // 环境 BRDF 查找表：u = n·v，v = 粗糙度。
 @group(3) @binding(0) var brdf_lut: texture_2d<f32>;
 @group(3) @binding(1) var brdf_sampler: sampler;
@@ -49,6 +54,9 @@
 // 于是等价于「乘 1」，着色器不必为它写分支。
 @group(3) @binding(9) var cookie_atlas: texture_2d_array<f32>;
 @group(3) @binding(10) var cookie_sampler: sampler;
+// 主投影光源之外的聚光 / 点光阴影：一层一张，光源的 `extra.z` 是「起始层 + 1」。
+@group(3) @binding(11) var local_shadow_map: texture_depth_2d_array;
+@group(3) @binding(12) var<storage, read> local_shadow_matrices: array<mat4x4<f32>>;
 
 
 struct VertexOutput {
@@ -63,6 +71,9 @@ struct VertexOutput {
     @location(6) @interpolate(flat) instance: u32,
     // 第二套 UV（lightmap 用）。
     @location(7) uv1: vec2<f32>,
+    // 实例的颜色和自定义数据（实例化节点；普通物体是白色和 0）。片元阶段不读实例缓冲，靠这两项。
+    @location(8) @interpolate(flat) instance_color: vec4<f32>,
+    @location(9) @interpolate(flat) instance_data: vec4<f32>,
 };
 
 @vertex
@@ -71,7 +82,7 @@ fn vs_main(
     @builtin(vertex_index) vertex_index: u32,
     @builtin(instance_index) instance: u32,
 ) -> VertexOutput {
-    let object = objects[instance];
+    let object = instance_object(instance);
 
     var position = in.position;
     var normal = in.normal;
@@ -87,8 +98,12 @@ fn vs_main(
     var vertex_surface: VertexSurface;
     vertex_surface.uv = in.uv;
     vertex_surface.uv1 = in.uv1;
+    vertex_surface.tangent = in.tangent;
+    vertex_surface.color = in.color;
     vertex_surface.time = globals.frame_params.x;
     vertex_surface.params = object.params;
+    vertex_surface.model = object.model;
+    vertex_surface.instance_data = instance_of(instance).data;
     vertex_surface.position = position;
     vertex_surface.normal = normal;
     vertex_surface = material_vertex(vertex_surface);
@@ -98,16 +113,19 @@ fn vs_main(
     let world_position = object.model * vec4<f32>(position, 1.0);
 
     var out: VertexOutput;
-    out.instance = instance;
+    out.instance = instance_object_index(instance);
+    let extra = instance_of(instance);
+    out.instance_color = extra.color;
+    out.instance_data = extra.data;
     out.clip_position = globals.view_proj * world_position;
     out.world_position = world_position.xyz;
     out.world_normal = (object.normal_matrix * vec4<f32>(normal, 0.0)).xyz;
     // 切线随模型矩阵变换即可，不需要逆转置——它是切向而非法向。
     out.world_tangent = (object.model * vec4<f32>(in.tangent.xyz, 0.0)).xyz;
     out.tangent_handedness = in.tangent.w;
-    out.uv = in.uv;
-    out.uv1 = in.uv1;
-    out.color = in.color;
+    out.uv = vertex_surface.uv;
+    out.uv1 = vertex_surface.uv1;
+    out.color = vertex_surface.color;
     return out;
 }
 
@@ -118,7 +136,7 @@ fn vs_skinned(
     @builtin(vertex_index) vertex_index: u32,
     @builtin(instance_index) instance: u32,
 ) -> VertexOutput {
-    let object = objects[instance];
+    let object = instance_object(instance);
 
     // 先形变再蒙皮：形变改的是绑定姿态下的形状，骨骼再把它带到世界里。
     var position = in.position;
@@ -137,8 +155,12 @@ fn vs_skinned(
     var vertex_surface: VertexSurface;
     vertex_surface.uv = in.uv;
     vertex_surface.uv1 = in.uv1;
+    vertex_surface.tangent = in.tangent;
+    vertex_surface.color = in.color;
     vertex_surface.time = globals.frame_params.x;
     vertex_surface.params = object.params;
+    vertex_surface.model = object.model;
+    vertex_surface.instance_data = instance_of(instance).data;
     vertex_surface.position = position;
     vertex_surface.normal = normal;
     vertex_surface = material_vertex(vertex_surface);
@@ -151,7 +173,10 @@ fn vs_skinned(
     let world_position = model * vec4<f32>(position, 1.0);
 
     var out: VertexOutput;
-    out.instance = instance;
+    out.instance = instance_object_index(instance);
+    let extra = instance_of(instance);
+    out.instance_color = extra.color;
+    out.instance_data = extra.data;
     out.clip_position = globals.view_proj * world_position;
     // 骨骼变换是刚体的（旋转加平移），逆转置等于它自己的 3×3 部分，
     // 所以法线直接乘 model 即可。骨骼带非均匀缩放时这里会有偏差。
@@ -159,9 +184,9 @@ fn vs_skinned(
     out.world_tangent = (model * vec4<f32>(in.tangent.xyz, 0.0)).xyz;
     out.world_position = world_position.xyz;
     out.tangent_handedness = in.tangent.w;
-    out.uv = in.uv;
-    out.uv1 = in.uv1;
-    out.color = in.color;
+    out.uv = vertex_surface.uv;
+    out.uv1 = vertex_surface.uv1;
+    out.color = vertex_surface.color;
     return out;
 }
 
@@ -245,6 +270,12 @@ fn cluster_of(pixel: vec2<f32>, view_depth: f32) -> u32 {
 //
 // 抽成函数是因为它有三个调用点（全局段、簇内、聚簇关着时的全遍历），
 // 三处各抄一遍的话，改一处忘两处是迟早的事。
+// 本片元的接触阴影（遮蔽图的绿通道），`fs_main` 开头取一次。
+//
+// 用模块级的 private 变量而不是给 `shade_light` 加参数：它只对 0 号光源
+// 有意义，却要穿过三个调用点——那三处每多抄一个参数就多一个抄错的机会。
+var<private> contact_shadow: f32 = 1.0;
+
 fn shade_light(
     light: Light,
     index: u32,
@@ -288,18 +319,33 @@ fn shade_light(
     if (index == 0u && globals.shadow_params.w > 0.5) {
         let n_dot_l = max(dot(n, sample.xyz), 0.0);
         // 沿法线推开一点再采样，比纯深度偏移更不容易漏光。
-        let offset_position = world_position + n * globals.shadow_params.y;
-        // 按到相机的距离选级联。用世界空间距离而不是视空间 z：
-        // 视空间 z 在视野边缘会偏小，导致边缘用了过细的级联，
-        // 而那一级根本没覆盖到那里——表现为屏幕四角的阴影消失。
-        let view_depth = distance(world_position, globals.camera_position.xyz);
-        let layer = pick_cascade(view_depth, globals.cascade_splits);
+        var offset_position = world_position + n * globals.shadow_params.y;
+        var depth_bias = globals.shadow_params.x;
+        var layer = 0;
+        let shadow_kind = globals.shadow_params.w;
+        if (shadow_kind < 1.5) {
+            // 方向光：按到相机的距离选级联。用世界空间距离而不是视空间 z：
+            // 视空间 z 在视野边缘会偏小，导致边缘用了过细的级联，
+            // 而那一级根本没覆盖到那里——表现为屏幕四角的阴影消失。
+            let view_depth = distance(world_position, globals.camera_position.xyz);
+            layer = pick_cascade(view_depth, globals.cascade_splits);
+        } else {
+            // 点光 / 聚光：透视的阴影图。深度偏移换算到归一化深度的那个公式
+            // （见 `shadow_factor_cascade`）只对正交矩阵成立，这里改成在世界
+            // 空间里把采样点朝光源挪一点——效果一样，而且和深度的分布无关。
+            offset_position += sample.xyz * depth_bias;
+            depth_bias = 0.0;
+            if (shadow_kind < 2.5) {
+                layer = shadow_cube_face(world_position - light.position.xyz);
+            }
+        }
         // 面光源的半影随「光源张开多大」变：贴着遮挡物是硬边，
         // 远离之后糊开。张角 = 面板半尺寸 / 到面板的距离。
         //
         // 其他类型给 0，走原来那条固定半径的 PCF——加这个功能不改
         // 已有场景的画面。
-        var penumbra_ratio = 0.0;
+        // 负数表示「固定半径（纹素）」：灯上设了 `shadow_radius`（three.js 的 shadow.radius）。
+        var penumbra_ratio = -f32(light.extra.w) * 0.01;
         if (light.position.w == LIGHT_RECT) {
             let half_size = max(light.params.x, light.params.y);
             let to_light = length(light.position.xyz - world_position);
@@ -312,10 +358,37 @@ fn shade_light(
             layer,
             offset_position,
             n_dot_l,
-            globals.shadow_params.x,
+            depth_bias,
             globals.shadow_params.z,
             penumbra_ratio,
         );
+    }
+    // 额外的投影光源：透视阴影，和主光源的点光 / 聚光同一套偏移办法。
+    else if (light.extra.z > 0u) {
+        let n_dot_l = max(dot(n, sample.xyz), 0.0);
+        var layer = i32(light.extra.z - 1u);
+        if (light.position.w == LIGHT_POINT) {
+            layer += shadow_cube_face(world_position - light.position.xyz);
+        }
+        let offset_position = world_position
+            + n * globals.shadow_params.y
+            + sample.xyz * globals.shadow_params.x;
+        visibility = shadow_factor_cascade(
+            local_shadow_map,
+            shadow_sampler,
+            local_shadow_matrices[layer],
+            layer,
+            offset_position,
+            n_dot_l,
+            0.0,
+            f32(textureDimensions(local_shadow_map).x),
+            -f32(light.extra.w) * 0.01,
+        );
+    }
+    // 接触阴影补的是阴影贴图够不着的那一圈，只属于阴影投射者。
+    // 没开的时候遮蔽图是 1×1 白图，这里乘 1。
+    if (index == 0u) {
+        visibility *= contact_shadow;
     }
 
     // 矩形面光源的形状因子：矩形对着色点张成的立体角乘余弦，闭式解。
@@ -330,6 +403,7 @@ fn shade_light(
     input.light_direction = sample.xyz;
     input.radiance = radiance;
     input.form_factor = form_factor;
+    input.visibility = visibility;
 
     // 阴影在钩子**之后**乘。放在这里而不是交给钩子，是因为「自定义光照
     // 模型顺手把阴影搞丢了」正是这个钩子要解决的问题——能忘掉的东西
@@ -338,15 +412,20 @@ fn shade_light(
 }
 
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let object = objects[in.instance];
+fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
+    let object = tinted_object(in.instance, in.instance_color);
     // 图集取格：整张图的 UV 是 0..1，缩放到格子大小再偏移到格子位置，
     // 就等于「只采样这一格」。所有贴图槽用同一套变换，否则法线贴图会错位。
     let uv = in.uv * object.uv_transform.xy + object.uv_transform.zw;
     let sampled = textureSample(base_color_texture, base_color_sampler, uv);
 
     // ── 切线空间法线 ──
-    let geometric_normal = normalize(in.world_normal);
+    //
+    // 背面（只有双面材质会画到）把法线翻过来。不翻的话法线背对相机，
+    // `n·v` 被夹到接近 0、`n·l` 算的是另一面的受光——布料翻过来的
+    // 那一面几乎黑成一片，看着像背面没画。单面材质的背面已被剔除，
+    // 这一行对它们没有影响。
+    let geometric_normal = normalize(in.world_normal) * select(-1.0, 1.0, front_facing);
     // Gram-Schmidt 重新正交化：插值后的切线未必还垂直于法线。
     // 没有切线（全零）或切线和法线平行时，随便取一个垂直方向兜底，
     // 免得 normalize(0) 在后面变成 NaN。
@@ -378,6 +457,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var surface: Surface;
     surface.world_position = in.world_position;
     surface.geometric_normal = geometric_normal;
+    surface.front_facing = front_facing;
     surface.uv = uv;
     // 不经过 `uv_transform`：那是材质 UV 图集取格用的，lightmap UV
     // 是独立的一套展开，跟贴图图集没有关系。
@@ -392,6 +472,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     surface.bitangent = b;
     // 逐对象的自定义参数。整块搬过去，钩子按下标取。
     surface.params = object.params;
+    surface.instance_data = in.instance_data;
 
     surface.base_color = object.base_color * sampled * vec4<f32>(in.color, 1.0);
     surface.normal = mapped_normal;
@@ -423,7 +504,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     //
     // 按屏幕坐标取：`position.xy` 就是像素坐标，AO 图和帧缓冲同分辨率，
     // 所以直接 `textureLoad`，不必采样也不必算 UV。
-    let ssao = textureLoad(ssao_texture, vec2<i32>(in.clip_position.xy), 0).r;
+    //
+    // 坐标要夹到纹理尺寸以内：关着 SSAO 时绑的是 1×1 白图，除了 (0,0)
+    // 全是越界读，而 wgpu 的越界 `textureLoad` 返回 0——整个画面的
+    // 环境光（球谐漫反射 + 预滤波镜面）会被乘成零，只剩自发光和直射光。
+    let ssao_max = vec2<i32>(textureDimensions(ssao_texture)) - vec2<i32>(1);
+    let screen_terms = textureLoad(ssao_texture, min(vec2<i32>(in.clip_position.xy), ssao_max), 0);
+    let ssao = screen_terms.r;
+    contact_shadow = screen_terms.g;
     let occlusion = clamp(surface.occlusion * ssao, 0.0, 1.0);
     let v = surface.view_direction;
 
@@ -586,6 +674,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     ambient.occlusion = occlusion;
     ambient.reflection = reflection;
     color += material_ambient(&surface, ambient);
+    // 光照钩子攒下的、不被阴影挡的光（见 `Surface::transmitted`）。
+    color += surface.transmitted;
 
     // ── 雾 ──
     //
@@ -601,5 +691,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // 输出线性 HDR，不做色调映射也不做 gamma——
     // 那些交给后处理链，Bloom 需要未经压缩的高光才能提取出来。
-    return vec4<f32>(color, base.a);
+    // 不透明度取钩子**跑完之后**的：光照 / 环境光钩子可以经由指针改它——只接影子的地面
+    // （three.js 的 ShadowMaterial）就是按 `input.visibility` 把影子处写成不透明。默认钩子不碰它。
+    let output = material_output(&surface, vec4<f32>(color, surface.base_color.a));
+    // 半透明管线是预乘混合（见 `create_standard_pipeline`）：alpha 模式输出 (rgb·a, a)，
+    // 叠加模式输出 (rgb·a, 0)——目标里原有的颜色一点不减，只往上加。
+    let blend = object.emissive.w;
+    if (blend > 2.5) {
+        // 已预乘（体积渲染）：钩子给的就是 (rgb·a, a)，原样交出去。
+        return output;
+    }
+    if (blend > 1.5) {
+        return vec4<f32>(output.rgb * output.a, 0.0);
+    }
+    if (blend > 0.5) {
+        return vec4<f32>(output.rgb * output.a, output.a);
+    }
+    return output;
 }

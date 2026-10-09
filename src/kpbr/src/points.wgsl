@@ -13,11 +13,11 @@
 // 拿不到（对象 uniform 只存了 model 和法线矩阵），所以由
 // `PointMaterial::set_camera` 每帧把相机换算到局部空间后写进 params[1]。
 //
-// # 点是方的不是圆的
+// # 方点和圆点
 //
-// 圆点要在片元里按到中心的距离 `discard`，而引擎的钩子体系没有暴露
-// `discard`（它会影响提前深度测试，是管线级的决定）。three.js 的
-// `PointsMaterial` 不带贴图时画出来的也是方块，一致。
+// 默认是方的（three.js 的 `PointsMaterial` 不带贴图时也是方块）。`params[0].y > 0.5` 时是圆的：
+// 片元按到中心的距离 `discard`（three.js 的 `shapeCircle()`）——表面钩子里 discard 的材质，
+// 阴影也跟着是圆的（渲染器给它建带片元阶段的阴影管线）。
 
 fn material_vertex(vertex: VertexSurface) -> VertexSurface {
     var out = vertex;
@@ -46,6 +46,9 @@ fn material_vertex(vertex: VertexSurface) -> VertexSurface {
 // 把颜色整个搬到自发光上，直射光和环境光都返回 0。
 fn material_surface(surface: Surface) -> Surface {
     var out = surface;
+    if (surface.params[0].y > 0.5 && length(surface.uv * 2.0 - vec2<f32>(1.0)) > 1.0) {
+        discard;
+    }
     out.emissive = surface.base_color.rgb;
     out.base_color = vec4<f32>(0.0, 0.0, 0.0, surface.base_color.a);
     return out;

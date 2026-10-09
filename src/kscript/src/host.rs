@@ -84,6 +84,12 @@ pub(crate) struct Host {
     pub(crate) dt: f32,
     pub(crate) elapsed: f32,
     pub(crate) signals: Vec<Signal>,
+    /// 异步回调（计时器、`await` 之后的代码、信号回调）里抛的异常：
+    /// `(出错脚本所在的节点, 错误信息)`。tick 末尾由运行时按节点停掉对应脚本。
+    pub(crate) async_errors: Vec<(Handle<Node>, String)>,
+    /// `console.*` 写下的日志：`(级别, 文本)`，级别 0 调试、1 信息、2 警告、3 错误。
+    /// 调试面板读它；klog 那边已经同时打过了。
+    pub(crate) log: Vec<(i32, String)>,
 }
 
 /// 一帧最多接受多少个信号。
@@ -191,6 +197,11 @@ pub(crate) fn with_scene<R>(f: impl FnOnce(&mut Scene) -> R) -> Option<R> {
 /// 借用寄存中的输入。
 pub(crate) fn with_input<R>(f: impl FnOnce(&Input) -> R) -> Option<R> {
     with_host(|host| host.input.as_ref().map(f)).flatten()
+}
+
+/// 可变地访问本帧的输入。只给「记一个意图」的调用用（锁定光标），不改按键状态。
+pub(crate) fn with_input_mut<R>(f: impl FnOnce(&mut Input) -> R) -> Option<R> {
+    with_host(|host| host.input.as_mut().map(f)).flatten()
 }
 
 /// 登记一个句柄，拿到给 JS 用的下标。

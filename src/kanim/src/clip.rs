@@ -446,6 +446,14 @@ impl AnimationClip {
         }
     }
 
+    /// 某个目标的位置曲线（根运动用）。
+    pub fn position_curve(&self, target: usize) -> Option<&Curve<Vec3>> {
+        self.tracks.iter().find_map(|track| match &track.channel {
+            Channel::Position(curve) if track.target == target => Some(curve),
+            _ => None,
+        })
+    }
+
     /// 采样出一份新的姿态。每帧调用会反复分配，热路径请用 [`sample_into`](Self::sample_into)。
     pub fn sample(&self, time: f32) -> Pose {
         let mut pose = Pose::with_targets(self.targets);

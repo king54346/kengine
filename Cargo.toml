@@ -1,14 +1,18 @@
 [workspace]
+exclude = ["third_party"]
 members = [
     "src/kanim",
     "src/kapp",
     "src/kasset",
     "src/kaudio",
     "src/kcamera",
+    "src/kcomponents",
     "src/kcore",
     "src/kcore-derive",
     "src/kinput",
     "src/klight",
+    "src/klocale",
+    "src/knav",
     "src/klog",
     "src/kfont",
     "src/kgizmo",
@@ -31,6 +35,8 @@ members = [
     "src/kterrain",
     "src/ktexture",
     "src/kimport",
+    "src/kvideo",
+    "src/kxunxian",
 ]
 
 [package]
@@ -38,18 +44,28 @@ name = "kengine"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# 视频解码（kvideo 的 OpenH264 后端）。OpenH264 是 C++，要本机有 C/C++ 编译器，所以默认关：
+# `cargo run --release --features video --example video_frame`。
+video = ["kvideo/h264"]
+
 [dependencies]
 kanim = { path = "src/kanim" }
+kcomponents = { path = "src/kcomponents" }
 kapp = { path = "src/kapp" }
 kasset = { path = "src/kasset" }
 kaudio = { path = "src/kaudio" }
 kcamera = { path = "src/kcamera" }
 kcore = { path = "src/kcore" }
 kfont = { path = "src/kfont" }
+klocale = { path = "src/klocale" }
+knav = { path = "src/knav" }
 kgizmo = { path = "src/kgizmo" }
 kgltf = { path = "src/kgltf" }
 kinput = { path = "src/kinput" }
 kimport = { path = "src/kimport" }
+kvideo = { path = "src/kvideo" }
+kxunxian = { path = "src/kxunxian" }
 klight = { path = "src/klight" }
 klog = { path = "src/klog" }
 kmaterial = { path = "src/kmaterial" }
@@ -77,6 +93,8 @@ winit = "0.30.13"
 criterion = { version = "0.5", features = ["html_reports"] }
 # GPU 粒子的例子要把每帧参数按 WGSL 的布局打成字节。
 bytemuck = { version = "1.25.2", features = ["derive"] }
+# render 基准与截图回归测试起无头渲染器（它是 async 的）。
+pollster = "1.0.1"
 
 # ── benches ──
 # `harness = false` 是 criterion 的要求：它自带 main，不走 libtest。
@@ -100,12 +118,273 @@ harness = false
 name = "script"
 harness = false
 
+[[bench]]
+name = "render"
+harness = false
+
 # three.js 例子的 kengine 移植。放在 examples/kengine/ 下单独一个目录，
 # 和引擎自己的例子分开——它们的目的不同：那些是「怎么用某个功能」，
 # 这些是「对着一个成熟引擎的例子查自己缺什么」。
 [[example]]
 name = "backdrop_water"
 path = "examples/kengine/backdrop_water.rs"
+
+# 海洋演示：FFT 海浪、程序化天空、浮力、焦散、水下，全部来自 kcomponents。
+# VFX 沙盒：ThreeJSVFX-Demo 移植（冰枪等技能，全程序化特效）。
+[[example]]
+name = "vfx"
+path = "examples/kengine/vfx/main.rs"
+
+[[example]]
+name = "xunxian"
+path = "examples/kengine/xunxian/main.rs"
+
+[[example]]
+name = "ocean"
+path = "examples/kengine/ocean/main.rs"
+
+# 海岛演示：assets/water 里的船、岛、鱼、海草 + kcomponents。
+[[example]]
+name = "water_island"
+path = "examples/kengine/water_island/main.rs"
+
+[[example]]
+name = "reflection_blurred"
+path = "examples/kengine/new/reflection_blurred.rs"
+
+[[example]]
+name = "reflection_roughness"
+path = "examples/kengine/new/reflection_roughness.rs"
+
+[[example]]
+name = "refraction"
+path = "examples/kengine/new/refraction.rs"
+
+[[example]]
+name = "rtt"
+path = "examples/kengine/new/rtt.rs"
+
+[[example]]
+name = "rendertarget_2d_array_3d"
+path = "examples/kengine/new/rendertarget_2d_array_3d.rs"
+
+[[example]]
+name = "reversed_depth_buffer"
+path = "examples/kengine/new/reversed_depth_buffer.rs"
+
+[[example]]
+name = "textures_partialupdate"
+path = "examples/kengine/new/textures_partialupdate.rs"
+
+[[example]]
+name = "shadowmap"
+path = "examples/kengine/new/shadowmap.rs"
+
+[[example]]
+name = "shadowmap_vsm"
+path = "examples/kengine/new/shadowmap_vsm.rs"
+
+[[example]]
+name = "shadowmap_pointlight"
+path = "examples/kengine/new/shadowmap_pointlight.rs"
+
+[[example]]
+name = "shadowmap_csm"
+path = "examples/kengine/new/shadowmap_csm.rs"
+
+[[example]]
+name = "shadowmap_array"
+path = "examples/kengine/new/shadowmap_array.rs"
+
+[[example]]
+name = "shadow_contact"
+path = "examples/kengine/new/shadow_contact.rs"
+
+[[example]]
+name = "shadowmap_progressive"
+path = "examples/kengine/new/shadowmap_progressive.rs"
+
+[[example]]
+name = "shadowmap_opacity"
+path = "examples/kengine/new/shadowmap_opacity.rs"
+
+[[example]]
+name = "skinning"
+path = "examples/kengine/new/skinning.rs"
+
+[[example]]
+name = "skinning_instancing"
+path = "examples/kengine/new/skinning_instancing.rs"
+
+[[example]]
+name = "skinning_points"
+path = "examples/kengine/new/skinning_points.rs"
+
+[[example]]
+name = "skinning_instancing_individual"
+path = "examples/kengine/new/skinning_instancing_individual.rs"
+
+[[example]]
+name = "sky"
+path = "examples/kengine/new/sky.rs"
+
+[[example]]
+name = "sprites"
+path = "examples/kengine/new/sprites.rs"
+
+[[example]]
+name = "tonemapping"
+path = "examples/kengine/new/tonemapping.rs"
+
+[[example]]
+name = "textures_anisotropy"
+path = "examples/kengine/new/textures_anisotropy.rs"
+
+[[example]]
+name = "texturegrad"
+path = "examples/kengine/new/texturegrad.rs"
+
+[[example]]
+name = "texturegather"
+path = "examples/kengine/new/texturegather.rs"
+
+[[example]]
+name = "storage_buffer"
+path = "examples/kengine/new/storage_buffer.rs"
+
+[[example]]
+name = "textures_2d_array"
+path = "examples/kengine/new/textures_2d_array.rs"
+
+[[example]]
+name = "textures_2d_array_compressed"
+path = "examples/kengine/new/textures_2d_array_compressed.rs"
+
+[[example]]
+name = "sandbox"
+path = "examples/kengine/new/sandbox.rs"
+
+[[example]]
+name = "shadertoy"
+path = "examples/kengine/new/shadertoy.rs"
+
+[[example]]
+name = "struct_drawindirect"
+path = "examples/kengine/new/struct_drawindirect.rs"
+
+[[example]]
+name = "test_memory"
+path = "examples/kengine/new/test_memory.rs"
+
+[[example]]
+name = "tsl_raging_sea"
+path = "examples/kengine/new/tsl_raging_sea.rs"
+
+[[example]]
+name = "tsl_procedural_terrain"
+path = "examples/kengine/new/tsl_procedural_terrain.rs"
+
+[[example]]
+name = "tsl_wood"
+path = "examples/kengine/new/tsl_wood.rs"
+
+[[example]]
+name = "tsl_earth"
+path = "examples/kengine/new/tsl_earth.rs"
+
+[[example]]
+name = "tsl_galaxy"
+path = "examples/kengine/new/tsl_galaxy.rs"
+
+[[example]]
+name = "tsl_halftone"
+path = "examples/kengine/new/tsl_halftone.rs"
+
+[[example]]
+name = "tsl_angular_slicing"
+path = "examples/kengine/new/tsl_angular_slicing.rs"
+
+[[example]]
+name = "tsl_vfx_flames"
+path = "examples/kengine/new/tsl_vfx_flames.rs"
+
+[[example]]
+name = "tsl_vfx_tornado"
+path = "examples/kengine/new/tsl_vfx_tornado.rs"
+
+[[example]]
+name = "tsl_vfx_linkedparticles"
+path = "examples/kengine/new/tsl_vfx_linkedparticles.rs"
+
+[[example]]
+name = "tsl_compute_attractors_particles"
+path = "examples/kengine/new/tsl_compute_attractors_particles.rs"
+
+[[example]]
+name = "tsl_interoperability"
+path = "examples/kengine/new/tsl_interoperability.rs"
+
+[[example]]
+name = "tsl_transpiler"
+path = "examples/kengine/new/tsl_transpiler.rs"
+
+[[example]]
+name = "tsl_editor"
+path = "examples/kengine/new/tsl_editor.rs"
+
+[[example]]
+name = "tsl_graph"
+path = "examples/kengine/new/tsl_graph.rs"
+
+[[example]]
+name = "volume_cloud"
+path = "examples/kengine/new/volume_cloud.rs"
+
+[[example]]
+name = "volume_caustics"
+path = "examples/kengine/new/volume_caustics.rs"
+
+[[example]]
+name = "video_frame"
+path = "examples/kengine/new/video_frame.rs"
+required-features = ["video"]
+
+[[example]]
+name = "video_panorama"
+path = "examples/kengine/new/video_panorama.rs"
+required-features = ["video"]
+
+[[example]]
+name = "upscaling_fsr1"
+path = "examples/kengine/new/upscaling_fsr1.rs"
+
+[[example]]
+name = "upscaling_taau"
+path = "examples/kengine/new/upscaling_taau.rs"
+
+[[example]]
+name = "navigation"
+path = "examples/kengine/navigation.rs"
+
+[[example]]
+name = "meadow"
+path = "examples/kengine/meadow.rs"
+
+[[example]]
+name = "instancing"
+path = "examples/kengine/instancing.rs"
+
+[[example]]
+name = "reflection"
+path = "examples/kengine/new/reflection.rs"
+
+[[example]]
+name = "root_motion"
+path = "examples/kengine/root_motion.rs"
+
+[[example]]
+name = "localization"
+path = "examples/kengine/localization.rs"
 
 # 对象驱动的小游戏：Rust 摆场景、登记原型，玩法全在 scripts/ 的 JS 里。
 [[example]]
@@ -620,3 +899,187 @@ path = "examples/kengine/new/loader_gltf_anisotropy.rs"
 [[example]]
 name = "loader_gltf_avif"
 path = "examples/kengine/new/loader_gltf_avif.rs"
+
+# texture2ddecoder 0.1.2（当时 crates.io 最新）的 BC6H 解码有移位溢出 bug，
+# 用打过补丁的本地副本替换。详见 third_party/texture2ddecoder/Cargo.toml。
+[patch.crates-io]
+texture2ddecoder = { path = "third_party/texture2ddecoder" }
+
+# ── dev 构建也优化依赖和物理 ──
+#
+# 不开的话 `cargo run --example physics_cloth`（不带 --release）一帧 190 ms：
+# rapier、glam 这类数值密集的依赖在 opt-level 0 下慢几十倍，布料每帧
+# 要做几十万次约束和近邻检查。依赖只在第一次编译时多花点时间，之后
+# 几乎不再重编；kphysics 是工作区成员，`"*"` 管不到它，单独列出来。
+# 断言和溢出检查照旧开着——只动优化级别，不动调试检查。
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev.package.kphysics]
+opt-level = 3
+
+# 海面的 FFT 在 CPU 上做（三个级联、每帧几十万次复数运算）：opt-level 0 下一帧 37 ms，
+# 开了 3 ms。渲染器、场景、动画每帧都要遍历上千个节点（water_island 里 140 条鱼的蒙皮、
+# 几百棵海草），也一起开。不带 --release 跑 water_island 高画质从 20 帧到 80 帧。
+[profile.dev.package.kcomponents]
+opt-level = 3
+
+[profile.dev.package.krender]
+opt-level = 3
+
+[profile.dev.package.kscene]
+opt-level = 3
+
+[profile.dev.package.kanim]
+opt-level = 3
+
+# ── three.js 的 webgpu_postprocessing_* 移植 ──
+# 这一批是冲着「后处理链」来的：它们逼出了引擎的可编程后处理
+# （krender::postfx）、运动向量、后处理遮罩、离屏相机、TAA / SMAA / SSAA。
+[[example]]
+name = "postprocessing"
+path = "examples/kengine/new/postprocessing.rs"
+
+[[example]]
+name = "postprocessing_ca"
+path = "examples/kengine/new/postprocessing_ca.rs"
+
+[[example]]
+name = "postprocessing_sobel"
+path = "examples/kengine/new/postprocessing_sobel.rs"
+
+[[example]]
+name = "postprocessing_fxaa"
+path = "examples/kengine/new/postprocessing_fxaa.rs"
+
+[[example]]
+name = "postprocessing_smaa"
+path = "examples/kengine/new/postprocessing_smaa.rs"
+
+[[example]]
+name = "postprocessing_traa"
+path = "examples/kengine/new/postprocessing_traa.rs"
+
+[[example]]
+name = "postprocessing_ssaa"
+path = "examples/kengine/new/postprocessing_ssaa.rs"
+
+[[example]]
+name = "postprocessing_radial_blur"
+path = "examples/kengine/new/postprocessing_radial_blur.rs"
+
+[[example]]
+name = "postprocessing_difference"
+path = "examples/kengine/new/postprocessing_difference.rs"
+
+[[example]]
+name = "postprocessing_afterimage"
+path = "examples/kengine/new/postprocessing_afterimage.rs"
+
+[[example]]
+name = "postprocessing_bloom"
+path = "examples/kengine/new/postprocessing_bloom.rs"
+
+[[example]]
+name = "postprocessing_bloom_emissive"
+path = "examples/kengine/new/postprocessing_bloom_emissive.rs"
+
+[[example]]
+name = "postprocessing_bloom_selective"
+path = "examples/kengine/new/postprocessing_bloom_selective.rs"
+
+[[example]]
+name = "postprocessing_anamorphic"
+path = "examples/kengine/new/postprocessing_anamorphic.rs"
+
+[[example]]
+name = "postprocessing_lensflare"
+path = "examples/kengine/new/postprocessing_lensflare.rs"
+
+[[example]]
+name = "postprocessing_dof_basic"
+path = "examples/kengine/new/postprocessing_dof_basic.rs"
+
+[[example]]
+name = "postprocessing_dof"
+path = "examples/kengine/new/postprocessing_dof.rs"
+
+[[example]]
+name = "postprocessing_motion_blur"
+path = "examples/kengine/new/postprocessing_motion_blur.rs"
+
+[[example]]
+name = "postprocessing_godrays"
+path = "examples/kengine/new/postprocessing_godrays.rs"
+
+[[example]]
+name = "postprocessing_outline"
+path = "examples/kengine/new/postprocessing_outline.rs"
+
+[[example]]
+name = "postprocessing_masking"
+path = "examples/kengine/new/postprocessing_masking.rs"
+
+[[example]]
+name = "postprocessing_pixel"
+path = "examples/kengine/new/postprocessing_pixel.rs"
+
+[[example]]
+name = "postprocessing_retro"
+path = "examples/kengine/new/postprocessing_retro.rs"
+
+[[example]]
+name = "postprocessing_transition"
+path = "examples/kengine/new/postprocessing_transition.rs"
+
+[[example]]
+name = "postprocessing_3dlut"
+path = "examples/kengine/new/postprocessing_3dlut.rs"
+
+[[example]]
+name = "postprocessing_ao"
+path = "examples/kengine/new/postprocessing_ao.rs"
+
+[[example]]
+name = "postprocessing_sss"
+path = "examples/kengine/new/postprocessing_sss.rs"
+
+[[example]]
+name = "postprocessing_ssr"
+path = "examples/kengine/new/postprocessing_ssr.rs"
+
+[[example]]
+name = "postprocessing_ssr_denoise"
+path = "examples/kengine/new/postprocessing_ssr_denoise.rs"
+
+[[example]]
+name = "postprocessing_ssgi"
+path = "examples/kengine/new/postprocessing_ssgi.rs"
+
+[[example]]
+name = "postprocessing_ssgi_ballpool"
+path = "examples/kengine/new/postprocessing_ssgi_ballpool.rs"
+
+[[example]]
+name = "lights_phong"
+path = "examples/kengine/new/lights_phong.rs"
+
+[[example]]
+name = "lights_pointlights"
+path = "examples/kengine/new/lights_pointlights.rs"
+
+[[example]]
+name = "lights_dynamic"
+path = "examples/kengine/new/lights_dynamic.rs"
+
+[[example]]
+name = "lights_physical"
+path = "examples/kengine/new/lights_physical.rs"
+
+[[example]]
+name = "lights_projector"
+path = "examples/kengine/new/lights_projector.rs"
+
+[[example]]
+name = "loader_materialx"
+path = "examples/kengine/new/loader_materialx.rs"

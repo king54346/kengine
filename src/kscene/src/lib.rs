@@ -11,18 +11,22 @@
 mod audio;
 mod cull;
 mod debug;
-mod lod;
 pub mod decal;
+mod instance;
+mod lod;
+mod nav;
 mod node;
 mod physics;
 mod physics2d;
 mod ragdoll;
+mod root_motion;
 mod script;
 mod serialize;
 mod skin;
 mod streaming;
 mod terrain;
 mod transform;
+mod tween;
 
 pub use audio::SoundSource;
 pub use debug::SceneDebugOptions;
@@ -36,6 +40,8 @@ pub use kphysics::PhysicsDebugOptions;
 // 2D 的那套整个转出来，不逐个列举：它是一整套平行的类型
 // （`d2::PhysicsWorld`、`d2::JointDesc`…），名字和 3D 的一模一样，
 // 平铺到同一个命名空间里只会让人分不清手里拿的是哪一维的。
+pub use instance::Instance;
+pub use knav::{GroundSample, NavGrid, NavGridSettings};
 pub use kphysics::d2;
 pub use kphysics::{
     BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, CollisionEvent, InteractionGroups,
@@ -53,6 +59,7 @@ pub use serialize::SCENE_FORMAT_VERSION;
 pub use skin::{AnimationPlayer, Skin};
 pub use streaming::{Cell, CellState, Streaming, StreamingReport};
 pub use transform::Transform;
+pub use tween::{TweenId, TweenProperty};
 
 use cull::SceneCulling;
 use fxhash::FxHashMap;
@@ -94,6 +101,19 @@ pub struct RenderItem<'a> {
     /// 子网格材质组（[`kmesh::MeshGroup`]）的产物——网格带分组时，
     /// 每组各产出一个 [`RenderItem`]，这个字段告诉渲染器只画自己那一段。
     pub index_range: Option<(u32, u32)>,
+    /// 来自哪个节点。
+    ///
+    /// 渲染器要**跨帧**认出同一个物体：运动向量是「这一帧的位置减上一帧
+    /// 的位置」，没有身份就没有上一帧。
+    pub node: Handle<Node>,
+    /// 属于哪些渲染层。见 [`Node::render_layers`]。
+    pub layers: u32,
+    /// 后处理遮罩。见 [`Node::post_mask`]。
+    pub post_mask: u32,
+    /// 投不投影子。见 [`Node::casts_shadows`]。
+    pub casts_shadows: bool,
+    /// 实例化节点的实例（见 [`Instance`]）；普通节点是 `None`。`transform` 是节点的，每个实例再乘自己的。
+    pub instances: Option<&'a [Instance]>,
 }
 
 /// 把一个节点转成一个或多个绘制项。
@@ -109,45 +129,89 @@ pub struct RenderItem<'a> {
 /// （[`Scene::cull`]、[`Scene::visible_meshes`]）拿到 `&Node` 的方式不同
 /// （前者先按句柄查，后者已经在遍历 `Node` 本身），共同点只在“节点转
 /// 绘制项”这一步。
-fn render_items_for_node(node: &Node) -> Vec<RenderItem<'_>> {
+fn render_items_for_node(handle: Handle<Node>, node: &Node) -> NodeItems<'_> {
     let Some(mesh) = node.mesh() else {
-        return Vec::new();
+        return NodeItems {
+            node,
+            handle,
+            mesh: None,
+            next: 0,
+            count: 0,
+            transform: Mat4::IDENTITY,
+        };
     };
+    let count = mesh.groups().len().max(1);
+    NodeItems {
+        node,
+        handle,
+        mesh: Some(mesh),
+        next: 0,
+        count,
+        transform: skinned_transform(node),
+    }
+}
 
-    let transform = skinned_transform(node);
-    let aabb = node.global_aabb;
-    let skin = node.skin().map(Skin::matrices);
-    let morph_weights = node.morph_weights();
-    let light_mask = node.light_mask;
+/// 可见节点超过这个数时，建绘制项前先按节点池顺序排一下。见 [`Scene::cull_into`]。
+const SORT_VISIBLE_THRESHOLD: usize = 8192;
 
-    let groups = mesh.groups();
-    if groups.is_empty() {
-        return vec![RenderItem {
+/// 一个节点产出的绘制项，逐个生成、不分配。
+///
+/// 早先这里返回 `Vec`——每个可见节点一次堆分配，剔除两万个节点时光这一项
+/// 就占了一半时间。绝大多数节点只产出一项，用迭代器就省掉了。
+struct NodeItems<'a> {
+    node: &'a Node,
+    handle: Handle<Node>,
+    mesh: Option<&'a kmesh::Mesh>,
+    next: usize,
+    count: usize,
+    transform: Mat4,
+}
+
+impl<'a> Iterator for NodeItems<'a> {
+    type Item = RenderItem<'a>;
+
+    fn next(&mut self) -> Option<RenderItem<'a>> {
+        let mesh = self.mesh?;
+        if self.next >= self.count {
+            return None;
+        }
+        let index = self.next;
+        self.next += 1;
+        let node = self.node;
+        let (material, index_range) = match mesh.groups().get(index) {
+            Some(group) => (
+                node.materials()
+                    .get(group.material as usize)
+                    .or(node.material()),
+                Some((group.start, group.count)),
+            ),
+            None => (node.material(), None),
+        };
+        Some(RenderItem {
             mesh,
-            material: node.material(),
-            transform,
-            aabb,
-            skin,
-            morph_weights,
-            light_mask,
-            index_range: None,
-        }];
+            material,
+            transform: self.transform,
+            aabb: node.global_aabb,
+            skin: node.skin().map(Skin::matrices),
+            morph_weights: node.morph_weights(),
+            light_mask: node.light_mask,
+            index_range,
+            node: self.handle,
+            layers: node.render_layers,
+            post_mask: node.post_mask,
+            casts_shadows: node.casts_shadows,
+            instances: node.instances(),
+        })
     }
 
-    let materials = node.materials();
-    groups
-        .iter()
-        .map(|group| RenderItem {
-            mesh,
-            material: materials.get(group.material as usize).or(node.material()),
-            transform,
-            aabb,
-            skin,
-            morph_weights,
-            light_mask,
-            index_range: Some((group.start, group.count)),
-        })
-        .collect()
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = if self.mesh.is_some() {
+            self.count - self.next
+        } else {
+            0
+        };
+        (left, Some(left))
+    }
 }
 
 /// 渲染器每帧收集到的一个粒子系统。
@@ -228,6 +292,17 @@ pub struct Scene {
     sprites: Vec<ksprite::SpriteInstance>,
     /// 预滤波的 HDR 环境图 mip 链。渲染器靠它做镜面 IBL。
     prefiltered_environment: Option<std::sync::Arc<Vec<kpbr::prefilter::PrefilteredLevel>>>,
+    /// 原分辨率的 HDR 环境图，只给天空背景用。
+    ///
+    /// 预滤波链的第 0 级只有 256 宽，拿来当背景铺满屏幕会糊成一片马赛克；
+    /// 反射用那一级够了，背景不够。
+    environment_background: Option<std::sync::Arc<kpbr::hdr::HdrImage>>,
+    /// 纯色背景。`Some` 时天空 pass 画这个颜色，**不影响照明**。
+    background_color: Option<kmath::Vec3>,
+    /// HDR 背景的亮度倍数。`None` 时跟着环境强度走。
+    background_intensity: Option<f32>,
+    /// HDR 背景的模糊程度，0..1。
+    background_blurriness: f32,
     /// 反射探针。和全局环境拼在同一张 GPU 纹理数组里。
     reflection_probes: Vec<ReflectionProbeEntry>,
     /// 全局环境用的预滤波设置。探针必须沿用它——纹理数组要求每层等大。
@@ -251,7 +326,9 @@ pub struct Scene {
     /// 物理、脚本）拿得到的是场景，拿不到渲染器。渲染器每帧读走后清空。
     gizmos: Gizmos,
     /// 用于 `update()` 的树遍历栈，复用分配。
-    scratch_traversal_stack: Vec<(Handle<Node>, kmath::Mat4, bool)>,
+    scratch_traversal_stack: Vec<(Handle<Node>, kmath::Mat4, bool, bool)>,
+    /// 在跑的补间。见 [`Scene::tween_position`]。
+    tweens: tween::Tweens,
 }
 
 /// 按组件分类的节点句柄索引。
@@ -321,10 +398,15 @@ impl Scene {
             sprite_textures: Vec::new(),
             cookie_atlas: None,
             prefiltered_environment: None,
+            environment_background: None,
+            background_color: None,
+            background_intensity: None,
+            background_blurriness: 0.0,
             reflection_probes: Vec::new(),
             probe_settings: kpbr::prefilter::PrefilterSettings::default(),
             environment_version: 0,
             scratch_traversal_stack: Vec::new(),
+            tweens: tween::Tweens::default(),
         }
     }
 
@@ -350,10 +432,15 @@ impl Scene {
             sprite_textures: Vec::new(),
             cookie_atlas: None,
             prefiltered_environment: None,
+            environment_background: None,
+            background_color: None,
+            background_intensity: None,
+            background_blurriness: 0.0,
             reflection_probes: Vec::new(),
             probe_settings: kpbr::prefilter::PrefilterSettings::default(),
             environment_version: 0,
             scratch_traversal_stack: Vec::new(),
+            tweens: tween::Tweens::default(),
         }
     }
 
@@ -397,6 +484,7 @@ impl Scene {
 
         let handle = self.nodes.spawn(node);
         self.nodes[handle].parent = parent;
+        self.nodes[handle].world_dirty = true;
         self.nodes[parent].children.push(handle);
 
         // 物理索引在这里就地补上，而不是等下一次 `update`。
@@ -444,6 +532,7 @@ impl Scene {
 
         self.detach_from_parent(child);
         self.nodes[child].parent = parent;
+        self.nodes[child].world_dirty = true;
         self.nodes[parent].children.push(child);
     }
 
@@ -497,8 +586,27 @@ impl Scene {
     ///
     /// 模型有多个根节点时，会额外建一个容器节点把它们收拢，
     /// 这样调用方拿到的永远是单个句柄。
+    ///
+    /// # 单根模型返回的就是 glTF 的根节点
+    ///
+    /// 它**带着模型自己的变换**——Mixamo 导出的角色根上是 0.01 的缩放加 90° 旋转。对返回的句柄
+    /// 直接改 `transform.scale` / `rotation` 是**替换**掉那个变换，不是叠加：把 0.01 改成 100，
+    /// 角色就大了一万倍（`skinning_points` 例子踩到的）。要像 three.js 的 `gltf.scene` 那样整体摆放，
+    /// 用 [`instantiate_model_wrapped`](Self::instantiate_model_wrapped)。
     pub fn instantiate_model(&mut self, model: &Model, parent: Handle<Node>) -> Handle<Node> {
         self.instantiate_model_mapped(model, parent).0
+    }
+
+    /// 同 [`instantiate_model`](Self::instantiate_model)，但总是套一层新的空节点返回——对它改变换是在模型
+    /// 自己的变换**之上**叠加（three.js 的 `gltf.scene`）。动画播放器挂在里面那一层（模型的根）上。
+    pub fn instantiate_model_wrapped(
+        &mut self,
+        model: &Model,
+        parent: Handle<Node>,
+    ) -> Handle<Node> {
+        let wrapper = self.add_node_with_parent(Node::new("Model"), parent);
+        self.instantiate_model(model, wrapper);
+        wrapper
     }
 
     /// 同 [`instantiate_model`](Self::instantiate_model)，另外交出
@@ -576,6 +684,34 @@ impl Scene {
                 }
             }
         }
+    }
+
+    /// 给实例化出来的模型追加动画剪辑（通常是 [`Model::retarget_animations_from`](kgltf::Model::retarget_animations_from)
+    /// 从别的文件换过来的动作）。返回新剪辑在播放器里的起始序号；`model` 下面没有动画播放器时返回 `None`。
+    ///
+    /// 播放器整个换新：已有的播放状态（正在放的、权重）清掉，追加完再按序号 `play` / `crossfade`。
+    pub fn add_animations(
+        &mut self,
+        model: Handle<Node>,
+        clips: impl IntoIterator<Item = kanim::AnimationClip>,
+    ) -> Option<usize> {
+        let holder = std::iter::once(model)
+            .chain(self.descendants(model))
+            .find(|&handle| {
+                self.try_get(handle)
+                    .is_some_and(|node| node.animator().is_some())
+            })?;
+        let player = self.try_get(holder)?.animator()?;
+        let mut all: Vec<kanim::AnimationClip> = player.animator().clips().to_vec();
+        let first = all.len();
+        all.extend(clips);
+        let targets = player.targets().to_vec();
+        let node = self.try_get_mut(holder)?;
+        node.animator = Some(Box::new(AnimationPlayer::new(
+            Animator::new(std::sync::Arc::new(all)),
+            targets,
+        )));
+        Some(first)
     }
 
     /// 给模型根节点挂上动画播放器。
@@ -757,6 +893,7 @@ impl Scene {
             };
 
             node.parent = translate(node.parent);
+            node.world_dirty = true;
             for child in &mut node.children {
                 *child = translate(*child);
             }
@@ -794,7 +931,11 @@ impl Scene {
     pub fn update(&mut self) {
         // LOD 要量到相机的距离。相机是哪台得看上一帧的索引（马上要清掉），
         // 但位置沿父链现算——这一帧里挪过相机，选级也跟着新位置走。
-        let viewer = self.active_camera_node().map(|camera| self.current_world_position(camera));
+        let viewer = self
+            .active_camera_node()
+            .map(|camera| self.current_world_position(camera));
+        let mut section = klog::profile::Sequence::new();
+        section.next("世界变换");
 
         self.culling.begin();
         self.index.clear();
@@ -802,13 +943,25 @@ impl Scene {
         // ── 第一趟：沿树算世界变换，顺手把挂了组件的节点分类记下 ──
         let mut stack = std::mem::take(&mut self.scratch_traversal_stack);
         stack.clear();
-        stack.push((self.root, kmath::Mat4::IDENTITY, true));
-        while let Some((handle, parent_matrix, parent_visible)) = stack.pop() {
-            let (global, visible, child_count, drawable, components) = {
+        // 栈里带着「父节点这一帧动没动」：父节点动了，整棵子树都得重算。
+        stack.push((self.root, kmath::Mat4::IDENTITY, true, false));
+        while let Some((handle, parent_matrix, parent_visible, parent_moved)) = stack.pop() {
+            let (global, visible, moved, child_count, drawable, components) = {
                 let node = &mut self.nodes[handle];
-                let global = parent_matrix * node.transform.matrix();
+                // 静态场景里绝大多数节点没动：比一下十个浮点数，省掉一次矩阵组装和乘法，
+                // 后面包围盒那一趟也跟着跳过。
+                let moved = parent_moved || node.world_dirty || node.transform != node.last_local;
+                let global = if moved {
+                    let global = parent_matrix * node.transform.matrix();
+                    node.global_transform = global;
+                    node.last_local = node.transform;
+                    node.world_dirty = false;
+                    node.bounds_dirty = true;
+                    global
+                } else {
+                    node.global_transform
+                };
                 let visible = parent_visible && node.visible;
-                node.global_transform = global;
                 node.global_visible = visible;
                 // 选级放在这里而不是事后改子节点：子节点压栈时要带着
                 // 「这一帧可见吗」，事后再改就得把整棵子树重走一遍。
@@ -820,6 +973,7 @@ impl Scene {
                 (
                     global,
                     visible,
+                    moved,
                     node.children.len(),
                     visible && node.mesh.is_some(),
                     (
@@ -899,11 +1053,12 @@ impl Scene {
             for index in (0..child_count).rev() {
                 let child = node.children[index];
                 let shown = node.lod.as_deref().is_none_or(|lod| lod.shows_child(index));
-                stack.push((child, global, visible && shown));
+                stack.push((child, global, visible && shown, moved));
             }
         }
 
         self.scratch_traversal_stack = stack;
+        section.next("地形与骨骼");
 
         // ── 地形 ──
         // 排在第一趟**之后**：它要靠索引找到地形节点，而索引正是第一趟建的。
@@ -921,15 +1076,28 @@ impl Scene {
 
         // ── 第三趟：包围盒与剔除结构 ──
         // 同样得等骨骼算完——蒙皮网格的包围盒是由关节位置定的。
+        section.next("包围盒");
         for position in 0..self.index.drawables.len() {
             let handle = self.index.drawables[position];
-            let aabb = self.compute_bounds(handle);
-            if let Ok(node) = self.nodes.try_borrow_mut(handle) {
-                node.global_aabb = aabb;
-            }
+            let Ok(node) = self.nodes.try_borrow(handle) else {
+                continue;
+            };
+            // 蒙皮跟着关节走、形变跟着权重走，这两样每帧都算；其余没标脏就沿用上一帧的。
+            let aabb = if node.bounds_dirty || node.skin.is_some() || !node.morph_weights.is_empty()
+            {
+                let aabb = self.compute_bounds(handle);
+                if let Ok(node) = self.nodes.try_borrow_mut(handle) {
+                    node.global_aabb = aabb;
+                    node.bounds_dirty = false;
+                }
+                aabb
+            } else {
+                node.global_aabb
+            };
             self.culling.push(handle, aabb);
         }
 
+        section.next("剔除结构");
         self.culling.commit();
     }
 
@@ -981,9 +1149,17 @@ impl Scene {
 
         let Some(skin) = node.skin.as_deref() else {
             // 形变会把顶点推出绑定姿态的包围盒，按当前权重把范围撑开。
-            return mesh
-                .morphed_aabb(node.morph_weights())
-                .transform(node.global_transform);
+            let local = mesh.morphed_aabb(node.morph_weights());
+            // 实例化：每个实例的包围盒并起来（只在标脏时算，十万个实例约一两毫秒）。
+            if let Some(instances) = node.instances() {
+                let mut bounds = Aabb::EMPTY;
+                for instance in instances {
+                    bounds =
+                        bounds.union(&local.transform(node.global_transform * instance.transform));
+                }
+                return bounds;
+            }
+            return local.transform(node.global_transform);
         };
 
         // 蒙皮网格的顶点由骨骼驱动，绑定姿态的包围盒动起来就不准了
@@ -1008,6 +1184,8 @@ impl Scene {
     /// 必须在 [`Scene::update`] **之前**调用：它改的是局部变换，
     /// 世界变换要在之后才重算，顺序反了动画就慢一帧。
     pub fn tick_animations(&mut self, dt: f32) {
+        // 补间和骨骼动画一样写局部变换，放在同一处推进。
+        self.tick_tweens(dt);
         for position in 0..self.index.animators.len() {
             let handle = self.index.animators[position];
             // 同样先摘出来：应用姿态要写别的节点。
@@ -1283,14 +1461,38 @@ impl Scene {
     ///
     /// 结果依赖 [`Scene::update`] 维护的加速结构，务必在其之后调用。
     pub fn cull(&self, frustum: &Frustum) -> Vec<RenderItem<'_>> {
-        let mut indices = Vec::new();
-        self.culling.cull(frustum, &mut indices);
+        let mut items = Vec::new();
+        self.cull_into(frustum, &mut Vec::new(), &mut items);
+        items
+    }
 
-        indices
-            .into_iter()
-            .filter_map(|index| self.try_get(self.culling.handle(index)))
-            .flat_map(render_items_for_node)
-            .collect()
+    /// [`Scene::cull`] 的复用缓冲版：`indices` 是中间结果的暂存，`out` 先清空再填。
+    ///
+    /// 每帧都剔除的调用方（渲染器）把两块缓冲留着下一帧接着用，省掉两次随
+    /// 可见数增长的分配。
+    pub fn cull_into<'a>(
+        &'a self,
+        frustum: &Frustum,
+        indices: &mut Vec<u32>,
+        out: &mut Vec<RenderItem<'a>>,
+    ) {
+        indices.clear();
+        out.clear();
+        self.culling.cull(frustum, indices);
+        // 可见的多了以后，按节点在内存里的顺序访问：BVH 的顺序是空间上的，对节点池
+        // 来说近乎随机，一个节点七百多字节，两万个就是十几兆，每个都是缓存缺失。
+        // 排一下序（两万个约 0.1 ms）换来顺序访问，实测两万个可见时快四成；
+        // 几千个时节点池还在缓存里，排序反而是净开销。结果顺序因此不保证是深度优先。
+        if indices.len() >= SORT_VISIBLE_THRESHOLD {
+            indices.sort_unstable_by_key(|&i| self.culling.handle(i).index());
+        }
+        out.reserve(indices.len());
+        for &index in indices.iter() {
+            let handle = self.culling.handle(index);
+            if let Some(node) = self.try_get(handle) {
+                out.extend(render_items_for_node(handle, node));
+            }
+        }
     }
 
     /// 场景中第一个启用且可见的相机，返回（世界变换, 相机参数）。
@@ -1298,12 +1500,54 @@ impl Scene {
         self.index.cameras.iter().find_map(|&handle| {
             let node = self.try_get(handle)?;
             match node.camera() {
-                Some(camera) if camera.enabled && node.global_visible => {
+                Some(camera)
+                    if camera.enabled
+                        && node.global_visible
+                        && camera.target == kcamera::CameraTarget::Screen =>
+                {
                     Some((node.global_transform, *camera))
                 }
                 _ => None,
             }
         })
+    }
+
+    /// 第一台启用的覆盖层相机（[`kcamera::CameraTarget::Overlay`]）：`(世界变换, 相机参数)`。
+    pub fn overlay_camera(&self) -> Option<(Mat4, Camera)> {
+        self.index.cameras.iter().find_map(|&handle| {
+            let node = self.try_get(handle)?;
+            let camera = node.camera()?;
+            (camera.enabled
+                && node.global_visible
+                && camera.target == kcamera::CameraTarget::Overlay)
+                .then_some((node.global_transform, *camera))
+        })
+    }
+
+    /// 所有启用的**离屏**相机：`(视图编号, 世界变换, 相机参数)`。
+    ///
+    /// 同一个编号有多台时只取第一台——两台抢一张纹理，后画的那台会把
+    /// 前一台整个盖掉，还不如一开始就说清楚谁算数。
+    pub fn view_cameras(&self) -> Vec<(u8, Mat4, Camera)> {
+        let mut views: Vec<(u8, Mat4, Camera)> = Vec::new();
+        for &handle in &self.index.cameras {
+            let Some(node) = self.try_get(handle) else {
+                continue;
+            };
+            let Some(camera) = node.camera() else {
+                continue;
+            };
+            if !camera.enabled || !node.global_visible {
+                continue;
+            }
+            if let kcamera::CameraTarget::View(slot) = camera.target
+                && slot < kcamera::MAX_VIEWS
+                && views.iter().all(|(taken, _, _)| *taken != slot)
+            {
+                views.push((slot, node.global_transform, *camera));
+            }
+        }
+        views
     }
 
     /// 所有可见网格的世界包围盒之并。
@@ -1346,9 +1590,9 @@ impl Scene {
     /// 需要视锥剔除时用 [`Scene::cull`]，它走 BVH，对象多时快得多。
     pub fn visible_meshes(&self) -> impl Iterator<Item = RenderItem<'_>> {
         self.nodes
-            .iter()
-            .filter(|node| node.global_visible)
-            .flat_map(render_items_for_node)
+            .pair_iter()
+            .filter(|(_, node)| node.global_visible)
+            .flat_map(|(handle, node)| render_items_for_node(handle, node))
     }
 
     /// `ancestor` 是否为 `node` 的祖先。
@@ -1406,8 +1650,11 @@ impl Scene {
     /// 两者必须同进同出，否则调试绘制会把正在用的相机也画出来。
     pub fn active_camera_node(&self) -> Option<Handle<Node>> {
         self.index.cameras.iter().copied().find(|&handle| {
-            self.try_get(handle)
-                .is_some_and(|node| node.camera().is_some_and(|c| c.enabled) && node.global_visible)
+            self.try_get(handle).is_some_and(|node| {
+                node.camera()
+                    .is_some_and(|c| c.enabled && c.target == kcamera::CameraTarget::Screen)
+                    && node.global_visible
+            })
         })
     }
 
@@ -1419,6 +1666,43 @@ impl Scene {
     /// 物理世界的可变引用，用来改重力、求解器参数。
     pub fn physics_mut(&mut self) -> &mut PhysicsWorld {
         &mut self.physics
+    }
+
+    /// 用角色控制器移动一个**节点**。节点要挂着运动学刚体和碰撞体。
+    ///
+    /// 返回实际的移动结果；节点没有刚体（或刚体还没在物理世界里建出来）
+    /// 时返回 [`None`]。
+    ///
+    /// # 为什么不是 `physics_mut().move_character`
+    ///
+    /// 场景每帧都用**节点的变换**驱动运动学刚体。物理世界那一版把刚体的
+    /// 下一个位置设好之后，紧接着就会被同步用节点那个没动过的变换盖掉——
+    /// 角色原地不动，连重力都不生效（悬在出生点的半空里），而且不报任何错。
+    /// 这一版把位移写回节点，同步自然把它带到刚体上。
+    pub fn move_character(
+        &mut self,
+        node: Handle<Node>,
+        controller: &kphysics::CharacterController,
+        desired: Vec3,
+        dt: f32,
+    ) -> Option<kphysics::CharacterMovement> {
+        let body = self.try_get(node)?.rigid_body()?.native()?;
+        let movement =
+            self.physics
+                .compute_character_movement(controller, body, desired, dt, &mut |_| {});
+        if movement.translation != Vec3::ZERO {
+            let parent = self.try_get(node)?.parent;
+            // 位移是世界空间的，节点变换是相对父节点的。
+            let local = if parent.is_none() {
+                movement.translation
+            } else {
+                self.world_matrix(parent)
+                    .inverse()
+                    .transform_vector3(movement.translation)
+            };
+            self.try_get_mut(node)?.transform.position += local;
+        }
+        Some(movement)
     }
 
     /// 本帧提交的 2D 精灵。
@@ -1490,6 +1774,7 @@ impl Scene {
         settings: kpbr::prefilter::PrefilterSettings,
     ) {
         self.environment.set_hdr(image);
+        self.environment_background = Some(std::sync::Arc::new(image.clone()));
         self.prefiltered_environment = Some(std::sync::Arc::new(kpbr::prefilter::prefilter(
             image, settings,
         )));
@@ -1575,6 +1860,55 @@ impl Scene {
     /// 预滤波的环境 mip 链。没设过 HDR 时为 `None`。
     pub fn prefiltered_environment(&self) -> Option<&[kpbr::prefilter::PrefilteredLevel]> {
         self.prefiltered_environment.as_ref().map(|c| c.as_slice())
+    }
+
+    /// 用纯色当背景（线性 HDR 值），`None` 恢复成天空 / HDR 环境。
+    ///
+    /// 照明不受影响：three.js 里 `scene.environment`（照明）和
+    /// `scene.background`（背景）是两件事，一个产品图常见的组合就是
+    /// 「影棚 HDR 打光 + 纯色背景」。这边的天空和环境图原来是绑在一起的——
+    /// 设了 HDR，背景就一定是那张 HDR。
+    pub fn set_background(&mut self, color: Option<kmath::Vec3>) {
+        self.background_color = color;
+    }
+
+    /// 当前的纯色背景。
+    pub fn background(&self) -> Option<kmath::Vec3> {
+        self.background_color
+    }
+
+    /// 背景（HDR 环境图画在天上的那张）单独的亮度倍数；`None` 跟着
+    /// [`Environment::intensity`](kpbr::Environment::intensity) 走。
+    ///
+    /// three.js 的 `backgroundIntensity` 和 `environmentIntensity` 是分开的：
+    /// 常见的用法是把环境光开得很强（室内场景靠它打光），天空本身却不该
+    /// 亮成一片白。
+    pub fn set_background_intensity(&mut self, intensity: Option<f32>) {
+        self.background_intensity = intensity;
+    }
+
+    /// 背景的亮度倍数。
+    pub fn background_intensity(&self) -> Option<f32> {
+        self.background_intensity
+    }
+
+    /// HDR 背景的模糊程度（three.js 的 `scene.backgroundBlurriness`）。
+    ///
+    /// 0 是原图，1 是预滤波链里最粗糙的那级。取的就是给物体算反射用的
+    /// 那条 mip 链，所以不花额外的显存和时间——模糊的背景把视线让给
+    /// 前景的产品模型，又保留了环境的色调。
+    pub fn set_background_blurriness(&mut self, blurriness: f32) {
+        self.background_blurriness = blurriness.clamp(0.0, 1.0);
+    }
+
+    /// HDR 背景的模糊程度。
+    pub fn background_blurriness(&self) -> f32 {
+        self.background_blurriness
+    }
+
+    /// 原分辨率的 HDR 环境图（天空背景用）。没设过 HDR 时为 `None`。
+    pub fn environment_background(&self) -> Option<&kpbr::hdr::HdrImage> {
+        self.environment_background.as_deref()
     }
 
     /// 环境图的版本号。每次换图递增。
@@ -2374,8 +2708,126 @@ FORMAT=32-bit_rle_rgbe
 
 #[cfg(test)]
 mod test {
+    #[test]
+    fn skinned_positions_follow_the_joints() {
+        use kmesh::{SkinVertex, Vertex};
+        let mut scene = Scene::new();
+        let joint = scene.add_node(Node::new("Joint").with_position(Vec3::new(2.0, 0.0, 0.0)));
+        let mesh = Mesh::new(
+            vec![
+                Vertex::new(Vec3::new(0.0, 1.0, 0.0), Vec3::Y, [0.0, 0.0]),
+                Vertex::new(Vec3::ZERO, Vec3::Y, [0.0, 0.0]),
+            ],
+            vec![0, 1, 0],
+        )
+        .with_skin(vec![
+            SkinVertex {
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
+            },
+            SkinVertex {
+                joints: [0, 0, 0, 0],
+                weights: [0.5, 0.0, 0.0, 0.0],
+            },
+        ]);
+        let skinned = scene.add_node(
+            Node::new("Skinned")
+                .with_mesh(mesh)
+                .with_skin(crate::Skin::new(vec![joint], vec![Mat4::IDENTITY])),
+        );
+        scene.update();
+        let positions = scene
+            .try_get(skinned)
+            .unwrap()
+            .skinned_positions()
+            .expect("蒙皮网格应该有蒙皮后的位置");
+        assert!(
+            (positions[0] - Vec3::new(2.0, 1.0, 0.0)).length() < 1e-5,
+            "顶点跟着关节挪了 2 米：{:?}",
+            positions[0]
+        );
+        assert!(
+            scene.try_get(joint).unwrap().skinned_positions().is_none(),
+            "没有网格的节点没有蒙皮位置"
+        );
+    }
+
     use super::*;
     use kmath::Vec3;
+
+    // ── 脏标记：静态节点跳过重算，下面几条是「不能跳过」的情形 ──
+
+    #[test]
+    fn writing_the_public_transform_field_is_noticed() {
+        let mut scene = Scene::new();
+        let node = scene.add_node(Node::new("n").with_mesh(Mesh::cube()));
+        scene.update();
+        scene.update();
+        scene[node].transform.position = Vec3::new(5.0, 0.0, 0.0);
+        scene.update();
+        assert_eq!(scene[node].global_position(), Vec3::new(5.0, 0.0, 0.0));
+        assert!((scene[node].global_aabb().center() - Vec3::new(5.0, 0.0, 0.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn moving_a_parent_moves_untouched_children() {
+        let mut scene = Scene::new();
+        let parent = scene.add_node(Node::new("p"));
+        let child = scene.add_node_with_parent(Node::new("c").with_mesh(Mesh::cube()), parent);
+        scene.update();
+        scene[parent].transform.position = Vec3::new(0.0, 3.0, 0.0);
+        scene.update();
+        assert_eq!(scene[child].global_position(), Vec3::new(0.0, 3.0, 0.0));
+        assert!((scene[child].global_aabb().center().y - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn relinking_a_static_node_recomputes_it() {
+        let mut scene = Scene::new();
+        let a = scene.add_node(Node::new("a").with_position(Vec3::new(10.0, 0.0, 0.0)));
+        let child = scene.add_node(Node::new("c").with_position(Vec3::new(1.0, 0.0, 0.0)));
+        scene.update();
+        assert_eq!(scene[child].global_position(), Vec3::new(1.0, 0.0, 0.0));
+        // 子节点自己的局部变换没变，变的只是父节点。
+        scene.link_nodes(child, a);
+        scene.update();
+        assert_eq!(scene[child].global_position(), Vec3::new(11.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn a_node_moved_while_hidden_has_fresh_bounds_when_shown() {
+        let mut scene = Scene::new();
+        let node = scene.add_node(Node::new("n").with_mesh(Mesh::cube()));
+        scene.update();
+        scene[node].visible = false;
+        scene.update();
+        // 隐藏期间挪走：这一帧它不可绘制，包围盒那一趟轮不到它。
+        scene[node].transform.position = Vec3::new(0.0, 0.0, -50.0);
+        scene.update();
+        scene[node].visible = true;
+        scene.update();
+        assert!((scene[node].global_aabb().center().z + 50.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn editing_mesh_vertices_refreshes_bounds() {
+        let mut scene = Scene::new();
+        let node = scene.add_node(Node::new("n").with_mesh(Mesh::cube()));
+        scene.update();
+        let before = scene[node].global_aabb();
+        if let Some(mesh) = scene[node].mesh_mut() {
+            for vertex in mesh.vertices_mut() {
+                vertex.position = (Vec3::from(vertex.position) * 4.0).into();
+            }
+            mesh.recompute_bounds();
+        }
+        scene.update();
+        let after = scene[node].global_aabb();
+        assert!(
+            after.half_extents().x > before.half_extents().x * 3.0,
+            "{before:?} → {after:?}"
+        );
+    }
 
     #[test]
     fn child_inherits_parent_transform() {

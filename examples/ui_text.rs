@@ -167,6 +167,8 @@ impl Plugin for UiDemo {
         self.widgets.end_scroll();
 
         self.widgets.finish(ctx.ui, ctx.ui_input);
+        // 文本框拿到焦点时才开输入法；平时关着，免得它截走游戏按键。
+        ctx.input.set_ime_allowed(self.widgets.wants_keyboard());
 
         // 读上一帧的交互结果。
         if self.widgets.response(toggle).clicked {

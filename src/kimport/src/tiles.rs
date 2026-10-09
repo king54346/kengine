@@ -112,7 +112,15 @@ pub struct Selection {
 /// 从裁剪矩阵取出六个平面（Gribb–Hartmann），法线朝内。
 fn frustum_planes(m: Mat4) -> [Vec4; 6] {
     let r = |i: usize| m.row(i);
-    [r(3) + r(0), r(3) - r(0), r(3) + r(1), r(3) - r(1), r(3) + r(2), r(3) - r(2)].map(|p| {
+    [
+        r(3) + r(0),
+        r(3) - r(0),
+        r(3) + r(1),
+        r(3) - r(1),
+        r(3) + r(2),
+        r(3) - r(2),
+    ]
+    .map(|p| {
         let length = p.truncate().length().max(1e-12);
         p / length
     })
@@ -137,7 +145,14 @@ impl Tileset {
             return selection;
         }
         let mut requests: Vec<(f32, usize)> = Vec::new();
-        self.visit(0, view, &planes, &ready, &mut selection.visible, &mut requests);
+        self.visit(
+            0,
+            view,
+            &planes,
+            &ready,
+            &mut selection.visible,
+            &mut requests,
+        );
         requests.sort_by(|a, b| b.0.total_cmp(&a.0));
         requests.dedup_by_key(|r| r.1);
         selection.requests = requests.into_iter().map(|r| r.1).collect();
@@ -146,7 +161,9 @@ impl Tileset {
 
     fn in_frustum(&self, tile: usize, planes: &[Vec4; 6]) -> bool {
         let t = &self.tiles[tile];
-        planes.iter().all(|p| p.truncate().dot(t.center) + p.w >= -t.radius)
+        planes
+            .iter()
+            .all(|p| p.truncate().dot(t.center) + p.w >= -t.radius)
     }
 
     /// 返回这个子树是否有东西可画（给父级判断「子级是否就绪」用）。
@@ -214,24 +231,52 @@ loader! {
 }
 
 /// 解析瓦片集。
-pub async fn parse(bytes: Vec<u8>, path: PathBuf, io: Arc<dyn ResourceIo>) -> Result<Tileset, LoadError> {
+pub async fn parse(
+    bytes: Vec<u8>,
+    path: PathBuf,
+    io: Arc<dyn ResourceIo>,
+) -> Result<Tileset, LoadError> {
     let mut tileset = Tileset::default();
-    let json: Value = serde_json::from_slice(&bytes).map_err(|e| bad(format!("tileset.json 不是合法 JSON：{e}")))?;
+    let json: Value = serde_json::from_slice(&bytes)
+        .map_err(|e| bad(format!("tileset.json 不是合法 JSON：{e}")))?;
     if json.get("root").is_none() {
         return Err(bad("tileset.json 缺少 root"));
     }
-    tileset.geometric_error = json.get("geometricError").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+    tileset.geometric_error = json
+        .get("geometricError")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0) as f32;
     // 外部瓦片集递归展开：栈里放 `(JSON, 基目录, 父变换, 父瓦片, 深度)`。
-    let mut pending = vec![(json["root"].clone(), crate::base_dir(&path), Mat4::IDENTITY, None::<usize>, 0usize, Refine::Replace)];
+    let mut pending = vec![(
+        json["root"].clone(),
+        crate::base_dir(&path),
+        Mat4::IDENTITY,
+        None::<usize>,
+        0usize,
+        Refine::Replace,
+    )];
     let mut external_budget = 256;
     while let Some((node, base, parent_transform, parent, depth, inherited)) = pending.pop() {
         if tileset.tiles.len() > 1_000_000 || depth > 64 {
             return Err(bad("瓦片集太大或太深"));
         }
-        let transform = parent_transform * node.get("transform").map_or(Mat4::IDENTITY, |t| {
-            let v: Vec<f32> = t.as_array().map(|a| a.iter().filter_map(Value::as_f64).map(|f| f as f32).collect()).unwrap_or_default();
-            if v.len() == 16 { Mat4::from_cols_array(&v.try_into().expect("16")) } else { Mat4::IDENTITY }
-        });
+        let transform = parent_transform
+            * node.get("transform").map_or(Mat4::IDENTITY, |t| {
+                let v: Vec<f32> = t
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_f64)
+                            .map(|f| f as f32)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if v.len() == 16 {
+                    Mat4::from_cols_array(&v.try_into().expect("16"))
+                } else {
+                    Mat4::IDENTITY
+                }
+            });
         let (center, radius) = bounding_sphere(node.get("boundingVolume"), transform);
         let refine = match node.get("refine").and_then(Value::as_str) {
             Some(r) if r.eq_ignore_ascii_case("ADD") => Refine::Add,
@@ -248,7 +293,10 @@ pub async fn parse(bytes: Vec<u8>, path: PathBuf, io: Arc<dyn ResourceIo>) -> Re
         tileset.tiles.push(Tile {
             center,
             radius,
-            geometric_error: node.get("geometricError").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+            geometric_error: node
+                .get("geometricError")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0) as f32,
             refine,
             content: None,
             children: Vec::new(),
@@ -260,16 +308,28 @@ pub async fn parse(bytes: Vec<u8>, path: PathBuf, io: Arc<dyn ResourceIo>) -> Re
         }
         match content {
             // 外部瓦片集：把它的根当成这个瓦片的子级。
-            Some(file) if file.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")) => {
+            Some(file)
+                if file
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("json")) =>
+            {
                 external_budget -= 1;
                 if external_budget < 0 {
                     return Err(bad("外部瓦片集过多（多半是循环引用）"));
                 }
                 match io.load_file(&file).await {
                     Ok(bytes) => {
-                        let child: Value = serde_json::from_slice(&bytes).map_err(|e| bad(format!("{} 不是合法 JSON：{e}", file.display())))?;
+                        let child: Value = serde_json::from_slice(&bytes)
+                            .map_err(|e| bad(format!("{} 不是合法 JSON：{e}", file.display())))?;
                         if let Some(root) = child.get("root") {
-                            pending.push((root.clone(), crate::base_dir(&file), transform, Some(index), depth + 1, refine));
+                            pending.push((
+                                root.clone(),
+                                crate::base_dir(&file),
+                                transform,
+                                Some(index),
+                                depth + 1,
+                                refine,
+                            ));
                         }
                     }
                     Err(error) => klog::warn!("外部瓦片集 {} 读不出来：{error}", file.display()),
@@ -280,7 +340,14 @@ pub async fn parse(bytes: Vec<u8>, path: PathBuf, io: Arc<dyn ResourceIo>) -> Re
         if let Some(children) = node.get("children").and_then(Value::as_array) {
             // 倒序压栈，出栈时就是文件里的顺序。
             for child in children.iter().rev() {
-                pending.push((child.clone(), base.clone(), transform, Some(index), depth + 1, refine));
+                pending.push((
+                    child.clone(),
+                    base.clone(),
+                    transform,
+                    Some(index),
+                    depth + 1,
+                    refine,
+                ));
             }
         }
     }
@@ -290,17 +357,31 @@ pub async fn parse(bytes: Vec<u8>, path: PathBuf, io: Arc<dyn ResourceIo>) -> Re
 /// 包围体 → 包围球（已变换）。
 fn bounding_sphere(volume: Option<&Value>, transform: Mat4) -> (Vec3, f32) {
     let numbers = |key: &str| -> Option<Vec<f64>> {
-        Some(volume?.get(key)?.as_array()?.iter().filter_map(Value::as_f64).collect())
+        Some(
+            volume?
+                .get(key)?
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_f64)
+                .collect(),
+        )
     };
     let scale = transform.to_scale_rotation_translation().0.max_element();
     if let Some(b) = numbers("box").filter(|b| b.len() >= 12) {
         let center = Vec3::new(b[0] as f32, b[1] as f32, b[2] as f32);
         let half = [3, 6, 9].map(|i| Vec3::new(b[i] as f32, b[i + 1] as f32, b[i + 2] as f32));
-        let radius = (half[0] + half[1] + half[2]).length().max((half[0] - half[1] + half[2]).length()).max((half[0] + half[1] - half[2]).length()).max((-half[0] + half[1] + half[2]).length());
+        let radius = (half[0] + half[1] + half[2])
+            .length()
+            .max((half[0] - half[1] + half[2]).length())
+            .max((half[0] + half[1] - half[2]).length())
+            .max((-half[0] + half[1] + half[2]).length());
         return (transform.transform_point3(center), radius * scale);
     }
     if let Some(s) = numbers("sphere").filter(|s| s.len() >= 4) {
-        return (transform.transform_point3(Vec3::new(s[0] as f32, s[1] as f32, s[2] as f32)), s[3] as f32 * scale);
+        return (
+            transform.transform_point3(Vec3::new(s[0] as f32, s[1] as f32, s[2] as f32)),
+            s[3] as f32 * scale,
+        );
     }
     if let Some(r) = numbers("region").filter(|r| r.len() >= 6) {
         // [西, 南, 东, 北, 最低, 最高]（弧度、米），WGS84 → ECEF。区域本身就在 ECEF 里，不乘变换。
@@ -308,7 +389,11 @@ fn bounding_sphere(volume: Option<&Value>, transform: Mat4) -> (Vec3, f32) {
             let a = 6_378_137.0f64;
             let e2 = 6.694_379_990_14e-3;
             let n = a / (1.0 - e2 * lat.sin().powi(2)).sqrt();
-            Vec3::new(((n + h) * lat.cos() * lon.cos()) as f32, ((n + h) * lat.cos() * lon.sin()) as f32, ((n * (1.0 - e2) + h) * lat.sin()) as f32)
+            Vec3::new(
+                ((n + h) * lat.cos() * lon.cos()) as f32,
+                ((n + h) * lat.cos() * lon.sin()) as f32,
+                ((n * (1.0 - e2) + h) * lat.sin()) as f32,
+            )
         };
         let mut corners = vec![ecef((r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0, r[5])];
         for lon in [r[0], r[2]] {
@@ -319,7 +404,10 @@ fn bounding_sphere(volume: Option<&Value>, transform: Mat4) -> (Vec3, f32) {
             }
         }
         let center = corners.iter().copied().sum::<Vec3>() / corners.len() as f32;
-        let radius = corners.iter().map(|c| c.distance(center)).fold(0.0, f32::max);
+        let radius = corners
+            .iter()
+            .map(|c| c.distance(center))
+            .fold(0.0, f32::max);
         return (center, radius);
     }
     (transform.transform_point3(Vec3::ZERO), f32::MAX / 4.0)
@@ -333,7 +421,11 @@ loader! {
 }
 
 /// 解析 `.b3dm`。
-pub async fn parse_b3dm(bytes: Vec<u8>, path: PathBuf, io: Arc<dyn ResourceIo>) -> Result<Model, LoadError> {
+pub async fn parse_b3dm(
+    bytes: Vec<u8>,
+    path: PathBuf,
+    io: Arc<dyn ResourceIo>,
+) -> Result<Model, LoadError> {
     let glb = b3dm_payload(&bytes)?.to_vec();
     kgltf::import_bytes(glb, path, io).await
 }
@@ -349,7 +441,10 @@ pub fn b3dm_payload(bytes: &[u8]) -> Result<&[u8], LoadError> {
     if bytes.get(start..start + 4) != Some(b"glTF") {
         start = 24 + word(12) + word(16) + word(20);
     }
-    bytes.get(start..).filter(|b| b.starts_with(b"glTF")).ok_or_else(|| bad("b3dm 里找不到 GLB"))
+    bytes
+        .get(start..)
+        .filter(|b| b.starts_with(b"glTF"))
+        .ok_or_else(|| bad("b3dm 里找不到 GLB"))
 }
 
 #[cfg(test)]
@@ -371,7 +466,12 @@ mod tests {
             }
         }"#;
         let io: Arc<dyn ResourceIo> = Arc::new(MemoryResourceIo::new());
-        ktask::block_on(parse(json.to_vec(), PathBuf::from("tiles/tileset.json"), io)).unwrap()
+        ktask::block_on(parse(
+            json.to_vec(),
+            PathBuf::from("tiles/tileset.json"),
+            io,
+        ))
+        .unwrap()
     }
 
     fn view(distance: f32) -> View {
@@ -391,7 +491,10 @@ mod tests {
         let t = tileset();
         assert_eq!(t.tiles.len(), 3);
         assert_eq!(t.tiles[0].children, [1, 2]);
-        assert_eq!(t.tiles[1].content.as_deref(), Some(Path::new("tiles/a.glb")));
+        assert_eq!(
+            t.tiles[1].content.as_deref(),
+            Some(Path::new("tiles/a.glb"))
+        );
         assert_eq!(t.tiles[1].refine, Refine::Replace, "细化方式要继承父级");
     }
 

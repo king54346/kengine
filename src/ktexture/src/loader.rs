@@ -15,6 +15,10 @@ impl ResourceLoader for TextureLoader {
     fn extensions(&self) -> &[&str] {
         &[
             "png", "jpg", "jpeg", "tga", "tif", "tiff", "dds", "pvr", "ktx",
+            // 这两种 `from_encoded` 本来就解得了（GIF 走自己的容器解析，
+            // WebP 走 `image`），只是没登记扩展名——请求 `crate.gif` 会报
+            // 「没有能处理 gif 的加载器」。
+            "gif", "webp",
         ]
     }
 

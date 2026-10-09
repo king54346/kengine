@@ -11,6 +11,25 @@ use kshader::Shader;
 use ktexture::Texture;
 use std::sync::OnceLock;
 
+/// 扩展材质的钩子源码，**不含** `material_surface`——表面钩子的本体叫
+/// `physical_surface`。想先用自己的逻辑改表面（节点图、程序化纹理）再走
+/// 扩展光照时，拼上它和一个调用 `physical_surface` 的 `material_surface`：
+///
+/// ```text
+/// {PHYSICAL_WGSL}
+/// fn material_surface(s: Surface) -> Surface {
+///     var out = s;
+///     out.base_color = ...;
+///     return physical_surface(out);
+/// }
+/// ```
+pub const PHYSICAL_WGSL: &str = include_str!("physical.wgsl");
+
+/// 默认的表面钩子：直接交给 `physical_surface`。
+pub const PHYSICAL_SURFACE_WGSL: &str =
+    "fn material_surface(s: Surface) -> Surface { return physical_surface(s); }
+";
+
 /// Parameters of the extended material shader. Defaults preserve ordinary PBR.
 #[derive(Debug, Clone)]
 pub struct Physical {
@@ -20,6 +39,11 @@ pub struct Physical {
     pub ior: f32,
     /// 介质厚度，用于按 Beer–Lambert 衰减透过的光。
     pub thickness: f32,
+    /// 体积的颜色（`KHR_materials_volume` 的 `attenuationColor`）：光在材质里走 `attenuation_distance` 米后
+    /// 剩下的颜色。走得越远越接近这个颜色的 n 次方（比尔-朗伯定律）——厚的地方颜色深、薄的地方淡。
+    pub attenuation_color: Vec3,
+    /// 走多远衰减到 `attenuation_color`。0 或无穷大是不衰减（透明体积没有颜色）。
+    pub attenuation_distance: f32,
     /// 色散强度（KHR_materials_dispersion 的 `dispersion`）。
     pub dispersion: f32,
     /// 薄膜干涉的强度（KHR_materials_iridescence 的 `iridescenceFactor`）。
@@ -51,6 +75,8 @@ impl Default for Physical {
             transmission: 0.0,
             ior: 1.5,
             thickness: 0.0,
+            attenuation_color: Vec3::ONE,
+            attenuation_distance: 0.0,
             dispersion: 0.0,
             iridescence: 0.0,
             film_thickness: 400.0,
@@ -86,7 +112,10 @@ impl Physical {
                 .get_or_init(|| {
                     Resource::new_ok(
                         "builtin/physical.wgsl",
-                        Shader::snippet(include_str!("physical.wgsl")),
+                        Shader::snippet(format!(
+                            "{PHYSICAL_WGSL}
+{PHYSICAL_SURFACE_WGSL}"
+                        )),
                     )
                 })
                 .clone(),
@@ -123,6 +152,13 @@ impl Physical {
                 self.clearcoat_roughness.clamp(0.0, 1.0),
             ),
         );
+        // 第五个槽位：体积衰减的颜色和距离（0 = 不衰减）。
+        let distance = if self.attenuation_distance.is_finite() {
+            self.attenuation_distance.max(0.0)
+        } else {
+            0.0
+        };
+        material.set_param(4, self.attenuation_color.extend(distance));
         if let Some(texture) = self.anisotropy_texture.as_ref().filter(|_| has_texture) {
             material.set_custom_texture(0, texture.clone());
         }

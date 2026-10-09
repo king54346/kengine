@@ -70,6 +70,14 @@ pub struct SoftBodySettings {
     /// 只对**闭合**网格有意义。开的话软体会努力维持初始体积，
     /// 表现为「捏下去会鼓回来」。
     pub pressure: f32,
+    /// 自碰撞的厚度（世界单位），`0` 表示不做。
+    ///
+    /// 布会折叠、堆叠的场合（落地、披在东西上）必须开：没有它两层布会
+    /// 互相穿过去，双面渲染下两层交错，看着是一片斑点和破洞。
+    ///
+    /// 按粒子间距的 0.8～1 倍给。**静止时就比这更近**的粒子对不参与
+    /// （它们是相邻粒子，归距离约束管），所以给得比间距大会让布变硬。
+    pub self_collision: f32,
 }
 
 impl Default for SoftBodySettings {
@@ -82,6 +90,7 @@ impl Default for SoftBodySettings {
             damping: 0.5,
             particle_radius: 0.02,
             pressure: 0.0,
+            self_collision: 0.0,
         }
     }
 }
@@ -123,6 +132,12 @@ pub struct SoftBody {
     vertex_to_particle: Vec<u32>,
     /// 初始体积，体积约束的目标。
     rest_volume: f32,
+    /// 各粒子的初始位置。自碰撞靠它认出「本来就挨着」的粒子对。
+    rest_positions: Vec<Vec3>,
+    /// 自碰撞空间哈希的缓冲：每个桶的起点、按桶排好的粒子下标。
+    /// 存在这里是为了跨子步复用，不必每次重新分配。
+    hash_starts: Vec<u32>,
+    hash_entries: Vec<u32>,
 }
 
 impl SoftBody {
@@ -210,8 +225,12 @@ impl SoftBody {
             triangles,
             vertex_to_particle,
             rest_volume: 0.0,
+            rest_positions: Vec::new(),
+            hash_starts: Vec::new(),
+            hash_entries: Vec::new(),
         };
         body.rest_volume = body.volume();
+        body.rest_positions = body.particles.iter().map(|p| p.position).collect();
         body
     }
 
@@ -289,8 +308,12 @@ impl SoftBody {
             triangles,
             vertex_to_particle,
             rest_volume: 0.0,
+            rest_positions: Vec::new(),
+            hash_starts: Vec::new(),
+            hash_entries: Vec::new(),
         };
         body.rest_volume = body.volume();
+        body.rest_positions = body.particles.iter().map(|p| p.position).collect();
         body
     }
 
@@ -410,6 +433,14 @@ impl SoftBody {
         // （半秒只掉 10 厘米）。而它看起来只是「布有点飘」，
         // 很容易被当成参数没调好。
         let damping = (1.0 - self.settings.damping.clamp(0.0, 1.0)).powf(h);
+        let thickness = self.settings.self_collision.max(0.0);
+        // 开了自碰撞时，一个子步里最多走一个厚度。走得更远的粒子
+        // 可能一步就从另一层布的这边跳到那边，自碰撞根本看不到它们相遇。
+        let max_speed = if thickness > 0.0 {
+            thickness / h
+        } else {
+            f32::INFINITY
+        };
 
         for _ in 0..substeps {
             for particle in &mut self.particles {
@@ -418,6 +449,10 @@ impl SoftBody {
                     continue;
                 }
                 particle.velocity = (particle.velocity + gravity * h) * damping;
+                let speed = particle.velocity.length();
+                if speed > max_speed {
+                    particle.velocity *= max_speed / speed;
+                }
                 particle.previous = particle.position;
                 particle.position += particle.velocity * h;
             }
@@ -427,6 +462,10 @@ impl SoftBody {
                 if self.settings.pressure > 0.0 {
                     self.solve_volume();
                 }
+            }
+
+            if thickness > 0.0 {
+                self.solve_self_collisions(thickness);
             }
 
             if let Some(world) = world {
@@ -524,6 +563,107 @@ impl SoftBody {
             let w = self.particles[index].inverse_mass;
             if w > 0.0 {
                 self.particles[index].position += *gradient * (lambda * w);
+            }
+        }
+    }
+
+    /// 自碰撞：离得比 `thickness` 近的粒子对互相推开。
+    ///
+    /// 用空间哈希找近邻：格子边长取厚度，于是只要看周围 27 格。
+    /// 两两暴力比较是 O(n²)，48×48 的布一个子步就是两百多万对。
+    ///
+    /// 哈希表是**扁平**的（计数排序进两个数组），缓冲跨子步复用、不分配。
+    /// 第一版用 `HashMap<_, Vec<u32>>`，每个子步新建几千个小 `Vec`、
+    /// 再做六万多次 SipHash 查找——48×48 的布光这一项每帧 8 毫秒，
+    /// 占了整个步进的四分之三。
+    ///
+    /// 静止时就比厚度近的粒子对跳过——它们是网格上的邻居，距离由
+    /// 距离约束管；自碰撞再去推它们，两种约束会互相打架，布会抖。
+    fn solve_self_collisions(&mut self, thickness: f32) {
+        let count = self.particles.len();
+        let inverse_cell = 1.0 / thickness;
+        // 桶数取粒子数两倍往上凑到 2 的幂：再少冲突变多，再多只是白占内存。
+        // 凑成 2 的幂是为了用位与代替取模——每个子步要算六万多次桶号，
+        // 整数除法一次二三十个周期，光它就能吃掉几毫秒。
+        let buckets = (count * 2).max(1).next_power_of_two();
+        let mask = buckets - 1;
+        let cell_of = |p: Vec3| {
+            [
+                (p.x * inverse_cell).floor() as i32,
+                (p.y * inverse_cell).floor() as i32,
+                (p.z * inverse_cell).floor() as i32,
+            ]
+        };
+        let bucket_of = |c: [i32; 3]| {
+            let h = (c[0].wrapping_mul(92_837_111))
+                ^ (c[1].wrapping_mul(689_287_499))
+                ^ (c[2].wrapping_mul(283_923_481));
+            h as u32 as usize & mask
+        };
+
+        // 计数排序：cell_start[b]..cell_start[b + 1] 是第 b 个桶里的粒子。
+        let starts = &mut self.hash_starts;
+        let entries = &mut self.hash_entries;
+        starts.clear();
+        starts.resize(buckets + 1, 0);
+        entries.clear();
+        entries.resize(count, 0);
+        for particle in &self.particles {
+            starts[bucket_of(cell_of(particle.position))] += 1;
+        }
+        let mut running = 0;
+        for start in starts.iter_mut() {
+            running += *start;
+            *start = running;
+        }
+        for (index, particle) in self.particles.iter().enumerate() {
+            let bucket = bucket_of(cell_of(particle.position));
+            starts[bucket] -= 1;
+            entries[starts[bucket] as usize] = index as u32;
+        }
+
+        let thickness_squared = thickness * thickness;
+        for a in 0..count {
+            let wa = self.particles[a].inverse_mass;
+            let [cx, cy, cz] = cell_of(self.particles[a].position);
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        // 不同的格子偶尔会哈希到同一个桶，同一对会被看两遍。
+                        // 不必去重：第一遍已经把它们推到正好一个厚度，
+                        // 第二遍算出来不用推。去重反而要 27×27 次比较。
+                        let bucket = bucket_of([cx + dx, cy + dy, cz + dz]);
+
+                        let range = self.hash_starts[bucket] as usize
+                            ..self.hash_starts[bucket + 1] as usize;
+                        for slot in range {
+                            let b = self.hash_entries[slot] as usize;
+                            // 每对只处理一次。
+                            if b <= a {
+                                continue;
+                            }
+                            let wb = self.particles[b].inverse_mass;
+                            let total = wa + wb;
+                            if total <= 0.0 {
+                                continue;
+                            }
+                            let delta = self.particles[b].position - self.particles[a].position;
+                            let distance_squared = delta.length_squared();
+                            if distance_squared >= thickness_squared || distance_squared < 1e-12 {
+                                continue;
+                            }
+                            let rest =
+                                (self.rest_positions[b] - self.rest_positions[a]).length_squared();
+                            if rest < thickness_squared {
+                                continue;
+                            }
+                            let distance = distance_squared.sqrt();
+                            let correction = delta * ((thickness - distance) / distance / total);
+                            self.particles[a].position -= correction * wa;
+                            self.particles[b].position += correction * wb;
+                        }
+                    }
+                }
             }
         }
     }
@@ -827,10 +967,13 @@ mod tests {
 
         let (squashed, without) = run(0.0);
         let (_, with) = run(1.0);
+        let rest = SoftBody::from_mesh(&mesh, Mat4::IDENTITY).volume();
 
+        // 不开压力时只靠边长约束慢慢弹回去，恢复多少取决于约束的迭代顺序（顶点 / 三角形的排列一变，
+        // 0.39 和 0.45 都出现过）；开压力的应当几乎回到原体积，和顺序无关（两种排列都是 0.5016）。
         assert!(
-            with > without * 1.2,
-            "压扁到 {squashed} 之后，开压力恢复到 {with}，不开恢复到 {without}"
+            with > rest * 0.95 && with > without,
+            "原体积 {rest}，压扁到 {squashed} 之后，开压力恢复到 {with}，不开恢复到 {without}"
         );
     }
 
@@ -888,6 +1031,57 @@ mod tests {
         assert!(
             lowest < 0.7,
             "布停在 y = {lowest}，离地面太远，没真的落下来"
+        );
+    }
+
+    #[test]
+    fn self_collision_keeps_two_folded_layers_apart() {
+        // 把布的右半边对折到左半边正上方 3 厘米处。没有自碰撞的话
+        // 两层就停在 3 厘米（甚至穿过去）；开了之后要被推到厚度以外。
+        const N: usize = 12;
+        let thickness = 0.15;
+        let mut body = SoftBody::cloth(
+            N,
+            N,
+            2.0,
+            2.0,
+            Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+        );
+        body.set_settings(SoftBodySettings {
+            self_collision: thickness,
+            bend_stiffness: 0.0,
+            ..SoftBodySettings::default()
+        });
+        let spacing = 2.0 / (N - 1) as f32;
+        let fold_x = (N / 2) as f32 * spacing - 1.0 - spacing * 0.5;
+        for y in 0..N {
+            for x in N / 2..N {
+                let index = y * N + x;
+                let p = body.position(index).unwrap();
+                body.set_position(index, Vec3::new(2.0 * fold_x - p.x, 0.03, p.z));
+            }
+        }
+
+        for _ in 0..30 {
+            body.step(1.0 / 60.0, Vec3::ZERO, None);
+        }
+
+        // 只看离折线远的粒子对：折线附近的粒子被距离约束拽着，
+        // 本来就和对面那层挨得近。
+        let mut closest = f32::INFINITY;
+        for y in 0..N {
+            for x in 0..N / 2 - 2 {
+                let a = body.position(y * N + x).unwrap();
+                for yy in 0..N {
+                    for xx in N / 2 + 2..N {
+                        closest = closest.min(a.distance(body.position(yy * N + xx).unwrap()));
+                    }
+                }
+            }
+        }
+        assert!(
+            closest > thickness * 0.8,
+            "两层布最近只隔 {closest}，厚度是 {thickness} —— 自碰撞没把它们推开"
         );
     }
 

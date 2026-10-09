@@ -107,19 +107,25 @@ const FIELD_SCALE = 1;
 class Node {
     // 私有字段，理由同 `BoundVector3`：`self` 每取一次就新建一个 Node。
     #id;
+    #position;
+    #scale;
 
     constructor(id) {
         this.#id = id;
+        __nodeIds.set(this, id);
     }
 
     get name() { return __k.getName(this.#id); }
 
     get valid() { return __k.isValid(this.#id); }
 
-    get position() { return new BoundVector3(this.#id, FIELD_POSITION); }
+    // 代理对象只记「哪个节点、哪个字段」，没有自己的状态，所以每个 Node 缓存一份。
+    // `self` 现在是每个实例常驻的同一个对象，`self.position.y += dt` 这条
+    // 最常走的路于是不再每次都新建一个代理。
+    get position() { return this.#position ??= new BoundVector3(this.#id, FIELD_POSITION); }
     set position(v) { __k.setVec(this.#id, FIELD_POSITION, v.x, v.y, v.z); }
 
-    get scale() { return new BoundVector3(this.#id, FIELD_SCALE); }
+    get scale() { return this.#scale ??= new BoundVector3(this.#id, FIELD_SCALE); }
     set scale(v) { __k.setVec(this.#id, FIELD_SCALE, v.x, v.y, v.z); }
 
     // 世界坐标是每帧算出来的派生值，只读。
@@ -156,6 +162,28 @@ class Node {
     // 名字取剪辑名，和 glTF 里导出的一致。找不到时返回 false 而不是抛异常，
     // 美术改个剪辑名不该让整个脚本停掉。
     playAnimation(name) { return __k.playAnimation(this.#id, String(name)); }
+
+    // 补间：`property` 是 "position" / "rotation"（欧拉角，弧度）/ "scale"，
+    // 在 `duration` 秒里按 `ease`（"linear"、"easeOutCubic"、"easeOutBack"…）过渡到 `target`。
+    // 返回一个走完时兑现成 true 的 Promise；被顶替、被取消或节点被删时兑现成 false。
+    //
+    //     await self.tween("position", new Vector3(0, 3, 0), 0.5, "easeOutCubic");
+    //     self.tween("scale", 1.2, 0.2, "easeOutBack");   // 缩放可以给一个数
+    //
+    // 同一节点同一属性只留最新的一段：连点两次，第二段从当前位置接着走。
+    tween(property, target, duration, ease) {
+        const v = typeof target === "number" ? { x: target, y: target, z: target } : target;
+        const id = __k.tween(this.#id, String(property), v.x, v.y, v.z, Number(duration), ease === undefined ? "linear" : String(ease));
+        if (id === 0) return Promise.resolve(false);
+        return new Promise(resolve => {
+            // 每帧看一眼还在不在跑。走完的那一帧最后一次写入已经落地了。
+            const poll = () => {
+                if (__k.tweenActive(id)) __addTimer(0, poll, false);
+                else resolve(__k.tweenFinished(id));
+            };
+            __addTimer(0, poll, false);
+        });
+    }
     stopAnimation() { __k.setAnimationPlaying(this.#id, false); return this; }
     resumeAnimation() { __k.setAnimationPlaying(this.#id, true); return this; }
     get animationPlaying() { return __k.isAnimationPlaying(this.#id); }
@@ -178,7 +206,83 @@ class Node {
     // 名字取自 GDScript 的 `queue_free()`：删除在本次操作里立即生效。
     queueFree() { __k.queueFree(this.#id); }
 
-    getNode(name) { return getNode(name); }
+    // ── 旋转 ──
+    //
+    // 欧拉角和 Godot 一样：弧度，YXZ 顺序。偏航在最外层，改俯仰不会把偏航带歪。
+    get rotation() { const r = __k.getRotation(this.#id); return new Vector3(r[0], r[1], r[2]); }
+    set rotation(v) { __k.setRotation(this.#id, v.x, v.y, v.z); }
+    get rotationDegrees() { return this.rotation.mul(180 / Math.PI); }
+    set rotationDegrees(v) { this.rotation = new Vector3(v.x, v.y, v.z).mul(Math.PI / 180); }
+    get quaternion() { const q = __k.getQuat(this.#id); return new Quaternion(q[0], q[1], q[2], q[3]); }
+    set quaternion(q) { __k.setQuat(this.#id, q.x, q.y, q.z, q.w); }
+
+    rotateX(a) { __k.rotateAxis(this.#id, 1, 0, 0, a, true); return this; }
+    rotateZ(a) { __k.rotateAxis(this.#id, 0, 0, 1, a, true); return this; }
+    // 绕自身的轴转。
+    rotate(axis, angle) { __k.rotateAxis(this.#id, axis.x, axis.y, axis.z, angle, true); return this; }
+    // 绕父空间（没有父节点时就是世界）的轴转。
+    rotateGlobal(axis, angle) { __k.rotateAxis(this.#id, axis.x, axis.y, axis.z, angle, false); return this; }
+
+    // 世界空间的三根轴（已归一化）。`forward` 在上面，是 -Z。
+    get right() { const a = __k.getAxes(this.#id); return new Vector3(a[0], a[1], a[2]); }
+    get up() { const a = __k.getAxes(this.#id); return new Vector3(a[3], a[4], a[5]); }
+
+    // 写世界坐标：换算成父空间里的局部坐标再写。
+    set globalPosition(v) { __k.setGlobalPosition(this.#id, v.x, v.y, v.z); }
+
+    // 局部 ↔ 世界。点会平移，方向（`Global/LocalDirection`）只转不移。
+    toGlobal(p) { const v = __k.toGlobal(this.#id, p.x, p.y, p.z, true); return new Vector3(v[0], v[1], v[2]); }
+    toLocal(p) { const v = __k.toLocal(this.#id, p.x, p.y, p.z, true); return new Vector3(v[0], v[1], v[2]); }
+    toGlobalDirection(d) { const v = __k.toGlobal(this.#id, d.x, d.y, d.z, false); return new Vector3(v[0], v[1], v[2]); }
+    toLocalDirection(d) { const v = __k.toLocal(this.#id, d.x, d.y, d.z, false); return new Vector3(v[0], v[1], v[2]); }
+
+    // ── 节点树 ──
+    //
+    // 挂在场景根下的节点 `parent` 是 null：根不是一个能动的节点。
+    get parent() { const id = __k.getParent(this.#id); return id < 0 ? null : new Node(id); }
+    get children() { return __k.getChildren(this.#id).map(id => new Node(id)); }
+
+    // 按名字找子节点；`recursive` 为真时找整棵子树（深度优先，先到先得）。
+    findChild(name, recursive) {
+        const id = __k.findChild(this.#id, String(name), recursive === undefined ? true : !!recursive);
+        return id < 0 ? null : new Node(id);
+    }
+
+    // 相对路径，和 Godot 一样：`"Arm/Hand"`、`"../Sibling"`、`"/Level/Door"`（从场景根）。
+    // 只写一个名字、在子节点里又找不到时，退回按名字全局查找——
+    // 这是以前 `getNode` 的行为，老脚本不受影响。
+    getNode(path) { return __resolvePath(this, String(path)); }
+
+    // 改挂到另一个节点下（null = 场景根）。`keepGlobal` 默认为真：看起来原地不动。
+    reparent(parent, keepGlobal) {
+        const target = parent === null || parent === undefined ? -1 : parent.#id;
+        return __k.reparent(this.#id, target, keepGlobal === undefined ? true : !!keepGlobal);
+    }
+
+    // 两个 Node 对象是不是同一个节点（每次取 `self` 都是新对象，`===` 不管用）。
+    equals(other) { return other instanceof Node && other.#id === this.#id; }
+
+    // ── 信号（Godot 的 connect / emit_signal）──
+    //
+    //     door.connect("opened", () => print("门开了"));     // 订阅
+    //     self.emitSignal("opened", 3);                       // 发出，参数原样传给订阅者
+    //     const [who] = await enemy.toSignal("died");         // 等一次
+    //
+    // 订阅者的回调跑的时候，`self` 和 `engine.*` 看到的是**订阅者**自己；
+    // 回调抛异常只停掉订阅者的脚本，不连累发出信号的那个。
+    // 订阅者的节点删掉之后，它的订阅自动作废。
+    connect(signal, callback, once) {
+        return __connect(this.#id, String(signal), callback, !!once);
+    }
+    disconnect(signal, callback) { __disconnect(this.#id, String(signal), callback); return this; }
+    emitSignal(signal, ...args) { return __emitSignal(this.#id, String(signal), args); }
+    // 下一次发出 `signal` 时兑现的 Promise。只有一个参数时兑现成那个参数，
+    // 多个时兑现成数组，没有参数时是 undefined。
+    toSignal(signal) {
+        return new Promise(resolve => {
+            __connect(this.#id, String(signal), (...args) => resolve(args.length <= 1 ? args[0] : args), true);
+        });
+    }
 
     // 这个节点上跑着的脚本对象，没挂脚本时是 null。
     //
@@ -206,11 +310,55 @@ Object.defineProperty(globalThis, "self", {
     configurable: true,
 });
 
-// 按名字找节点，找不到返回 null（GDScript 里是 null，不是异常）。
+// 按名字（或路径）找节点，找不到返回 null（GDScript 里是 null，不是异常）。
+//
+// 单个名字在整个场景里找；带 `/` 的按路径从场景根往下走：`"Level/Door"`。
 function getNode(name) {
-    const id = __k.find(name);
+    const text = String(name);
+    if (text.indexOf("/") >= 0) return __resolvePath(null, text);
+    const id = __k.find(text);
     return id < 0 ? null : new Node(id);
 }
+
+// 解析节点路径。`from` 为 null 时从场景根开始。
+function __resolvePath(from, path) {
+    let current = from;
+    let parts = path.split("/");
+    if (path.startsWith("/")) {
+        current = null;
+        parts = parts.slice(1);
+    }
+    parts = parts.filter(p => p.length > 0 && p !== ".");
+    if (parts.length === 0) return current;
+    // 单个名字：先当子节点找，找不到退回全局（兼容旧的 getNode）。
+    if (from !== null && parts.length === 1 && parts[0] !== "..") {
+        const child = from.findChild(parts[0], false);
+        if (child !== null) return child;
+        const id = __k.find(parts[0]);
+        return id < 0 ? null : new Node(id);
+    }
+    for (const part of parts) {
+        if (part === "..") {
+            if (current === null) return null;
+            current = current.parent;
+            continue;
+        }
+        const id = __k.findChild(current === null ? -1 : __nodeId(current), part, false);
+        if (id < 0) return null;
+        current = new Node(id);
+    }
+    return current;
+}
+
+// 给原生侧和信号表用：从 Node 对象拿回下标。
+// 通过 `equals` 那条路访问不了私有字段，这里用一个只在前奏里出现的小技巧：
+// 把下标存在一张 WeakMap 里，Node 构造时登记。
+const __nodeIds = new WeakMap();
+function __nodeId(node) { const id = __nodeIds.get(node); return id === undefined ? -1 : id; }
+
+// 每个脚本实例化时拿到的 `self`：绑定到它自己的节点，`await` 之后、
+// 信号回调里、计时器里都指着同一个节点。
+function __makeNode(id) { return new Node(id); }
 
 // 脚本实例登记表：节点下标 → 脚本返回的那个对象。
 // 由 Rust 侧的运行时在实例化与回收时维护，`Node.script` 查它。
@@ -267,7 +415,18 @@ const Input = {
         const d = __k.scrollDelta();
         return { x: d[0], y: d[1] };
     },
+
+    // 第一人称锁定光标：隐藏、关在窗口里，视角靠 mouseDelta 转。
+    // 窗口失焦自动放开、切回来自动恢复。不传参数等于 true。
+    lockCursor(locked) { __k.lockCursor(locked === undefined ? true : Boolean(locked)); },
+    cursorLocked() { return __k.cursorLocked(); },
 };
+
+// 本地化：`tr("menu-start")`、`tr("greeting", { name: "小明" })`。
+// 找不到的键原样返回键名——界面上露出 `menu-start` 比空白好找。
+// 当前语言由游戏侧设（Rust 的 `klocale::set_language`），`language()` 读它。
+function tr(key, args) { return __k.tr(String(key), args === undefined ? null : args); }
+function language() { return __k.language(); }
 
 // 一次射线检测的结果。
 class RayHit {
@@ -292,8 +451,33 @@ function raycast(from, direction, maxDistance) {
 
 function print() {
     let parts = [];
-    for (let i = 0; i < arguments.length; i++) parts.push(String(arguments[i]));
+    for (let i = 0; i < arguments.length; i++) parts.push(__inspect(arguments[i]));
     __k.log(parts.join(" "));
+}
+
+// 把任意值变成人看得懂的文本。字符串原样，类实例走自己的 toString，
+// 普通对象和数组展开（限深度，防循环引用），函数只显示名字。
+function __inspect(value, depth) {
+    const level = depth === undefined ? 0 : depth;
+    if (typeof value === "string") return level === 0 ? value : JSON.stringify(value);
+    if (value === null || value === undefined) return String(value);
+    if (typeof value === "function") return "[函数 " + (value.name || "匿名") + "]";
+    if (typeof value !== "object") return String(value);
+    if (value instanceof Error) return value.name + ": " + value.message;
+    if (level > 3) return Array.isArray(value) ? "[…]" : "{…}";
+    if (Array.isArray(value)) {
+        const items = value.slice(0, 50).map(v => __inspect(v, level + 1));
+        if (value.length > 50) items.push("…还有 " + (value.length - 50) + " 项");
+        return "[" + items.join(", ") + "]";
+    }
+    // 自己定义了 toString 的类（Vector3、Node……）用它。
+    if (typeof value.toString === "function" && value.toString !== Object.prototype.toString) {
+        return value.toString();
+    }
+    const keys = Object.keys(value);
+    const shown = keys.slice(0, 50).map(k => k + ": " + __inspect(value[k], level + 1));
+    if (keys.length > 50) shown.push("…");
+    return "{ " + shown.join(", ") + " }";
 }
 
 // 给 Rust 侧发一个信号。

@@ -16,9 +16,10 @@
 #![warn(missing_docs)]
 
 mod avif;
-mod gif;
 pub mod container;
+mod gif;
 mod loader;
+pub mod lut;
 
 pub use container::{Container, ContainerLoader};
 pub use loader::TextureLoader;
@@ -39,8 +40,32 @@ impl fmt::Display for TextureError {
 
 impl Error for TextureError {}
 
+/// 把 RGBA8 像素存成 PNG。截图、烘焙结果落盘用。
+pub fn write_png(
+    path: impl AsRef<std::path::Path>,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Result<(), TextureError> {
+    image::save_buffer(
+        path.as_ref(),
+        rgba,
+        width,
+        height,
+        image::ExtendedColorType::Rgba8,
+    )
+    .map_err(|error| TextureError(error.to_string()))
+}
+
 /// [`Texture`] 的资源类型标识。
 pub const TEXTURE_TYPE_UUID: Uuid = uuid!("c4a91e07-6b3d-42f8-9e15-8a7d0c2b6f43");
+
+/// 离屏相机视图在材质里的替身 id（见 [`Texture::camera_view`]），下标即视图编号。
+/// 两个，和 `kcamera::MAX_VIEWS` 一致。
+const CAMERA_VIEW_IDS: [Uuid; 2] = [
+    uuid!("6e1f0c3a-9b27-4d58-8a41-0c7e2f9b5d10"),
+    uuid!("6e1f0c3a-9b27-4d58-8a41-0c7e2f9b5d11"),
+];
 
 /// 常用类型的集中导出。
 pub mod prelude {
@@ -80,7 +105,7 @@ pub enum WrapMode {
 }
 
 /// 采样设置。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sampler {
     /// 放大时的过滤方式。
     pub mag_filter: FilterMode,
@@ -90,6 +115,30 @@ pub struct Sampler {
     pub wrap_u: WrapMode,
     /// V 方向环绕方式。
     pub wrap_v: WrapMode,
+    /// 生成 mip 链（默认开，three.js 的 `generateMipmaps`）。
+    ///
+    /// 没有 mip 的贴图缩小时每个像素只采原图的一个点：铺满地面的棋盘格远处闪成一片摩尔纹、
+    /// 地形贴图一动就跳。渲染器上传时在 CPU 上逐级 2×2 平均（sRGB 的先换到线性再平均，不然越远越暗）。
+    /// 关掉它的场合：当数据用、只按第 0 级采的查找表（反正采不到别的级），省 1/3 显存。
+    pub mipmaps: bool,
+    /// 各向异性过滤的倍数（1 = 关，常用 4–16，three.js 的 `texture.anisotropy`）。
+    ///
+    /// 掠射角下看的地面、路面：普通的三线性过滤按长轴挑 mip，整片糊掉；各向异性沿长轴多采几次，
+    /// 远处的纹理还是清楚的。要 `mipmaps` 开着、三种过滤都是线性才生效（wgpu 的要求）。
+    pub anisotropy: u8,
+}
+
+impl Default for Sampler {
+    fn default() -> Self {
+        Self {
+            mag_filter: FilterMode::default(),
+            min_filter: FilterMode::default(),
+            wrap_u: WrapMode::default(),
+            wrap_v: WrapMode::default(),
+            mipmaps: true,
+            anisotropy: 1,
+        }
+    }
 }
 
 impl Sampler {
@@ -100,7 +149,26 @@ impl Sampler {
             min_filter: FilterMode::Nearest,
             wrap_u: WrapMode::ClampToEdge,
             wrap_v: WrapMode::ClampToEdge,
+            ..Self::default()
         }
+    }
+
+    /// 线性过滤 + 边缘拉伸，不要 mip：当数据用的贴图（查找表、调色板、按第 0 级采的场）。
+    pub fn data() -> Self {
+        Self {
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            wrap_u: WrapMode::ClampToEdge,
+            wrap_v: WrapMode::ClampToEdge,
+            mipmaps: false,
+            anisotropy: 1,
+        }
+    }
+
+    /// 改各向异性倍数。
+    pub fn with_anisotropy(mut self, anisotropy: u8) -> Self {
+        self.anisotropy = anisotropy.max(1);
+        self
     }
 }
 
@@ -127,6 +195,16 @@ pub struct Texture {
     sampler: Sampler,
     /// RGBA8 像素，长度恒为 `width * height * 4 * layers`，逐层排列。
     data: Arc<[u8]>,
+    /// 内容版本。[`with_pixels`](Self::with_pixels) 换像素时加一，
+    /// `id` 不变——渲染器据此**原地**重写显存，而不是再传一张新的。
+    revision: u64,
+    /// [`with_region`](Self::with_region) 改过的矩形 `(基准版本, x, y, 宽, 高)`：从基准版本到现在
+    /// 只有这一块变了。渲染器手里正好是基准版本时只传这一块。
+    dirty: Option<(u64, u32, u32, u32, u32)>,
+    /// [`external`](Self::external) 替身。
+    external: bool,
+    /// 三维纹理（[`volume`](Self::volume)）：`layers` 是深度，渲染器建 `D3` 纹理。
+    volume: bool,
 }
 
 impl Texture {
@@ -152,6 +230,10 @@ impl Texture {
             format: TextureFormat::default(),
             sampler: Sampler::default(),
             data: data.into(),
+            revision: 0,
+            dirty: None,
+            external: false,
+            volume: false,
         }
     }
 
@@ -180,6 +262,10 @@ impl Texture {
             format: TextureFormat::default(),
             sampler: Sampler::default(),
             data: data.into(),
+            revision: 0,
+            dirty: None,
+            external: false,
+            volume: false,
         }
     }
 
@@ -220,6 +306,10 @@ impl Texture {
             format: first.format,
             sampler: first.sampler,
             data: data.into(),
+            revision: 0,
+            dirty: None,
+            external: false,
+            volume: false,
         }
     }
 
@@ -244,6 +334,42 @@ impl Texture {
         let rgba = image.to_rgba8();
         let (width, height) = rgba.dimensions();
         Ok(Self::new(width, height, rgba.into_raw()))
+    }
+
+    /// 把一张灰度**凹凸图**（bump map，亮 = 高）转成切线空间法线贴图。
+    ///
+    /// three.js 的 `bumpMap` 是在着色器里对高度求屏幕空间导数；这里在加载时
+    /// 一次性转掉，渲染管线只认法线贴图一种扰动方式。`strength` 是高度的
+    /// 放大倍数——三像素宽的一道凹槽，`strength = 1` 时斜率是 1/3。
+    ///
+    /// 边界按平铺处理（凹凸图几乎都是要平铺的）。
+    pub fn bump_to_normal(&self, strength: f32) -> Texture {
+        let (w, h) = (self.width.max(1), self.height.max(1));
+        let height_at = |x: i64, y: i64| -> f32 {
+            let x = x.rem_euclid(w as i64) as usize;
+            let y = y.rem_euclid(h as i64) as usize;
+            let i = (y * w as usize + x) * 4;
+            // 取三通道平均：凹凸图偶尔是彩色存的。
+            (self.data[i] as f32 + self.data[i + 1] as f32 + self.data[i + 2] as f32)
+                / (3.0 * 255.0)
+        };
+        let mut out = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h as i64 {
+            for x in 0..w as i64 {
+                let dx = (height_at(x + 1, y) - height_at(x - 1, y)) * 0.5 * strength;
+                // 纹理的 v 朝下而切线空间的副切线朝上，y 方向取反。
+                let dy = (height_at(x, y - 1) - height_at(x, y + 1)) * 0.5 * strength;
+                let n = [-dx, -dy, 1.0];
+                let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                for c in n {
+                    out.push(((c / len * 0.5 + 0.5) * 255.0 + 0.5) as u8);
+                }
+                out.push(255);
+            }
+        }
+        Texture::new(w, h, out)
+            .with_format(TextureFormat::Linear)
+            .with_sampler(self.sampler)
     }
 
     /// 创建纯色纹理，常用作缺省贴图。
@@ -324,6 +450,94 @@ impl Texture {
         Self::new(size, size, data)
     }
 
+    /// 换一份同尺寸的像素，**保留身份**（`id`、格式、采样设置不变）、
+    /// 版本加一。
+    ///
+    /// 每帧都在变的贴图（Lottie 动画、程序化画布、视频帧）用它：
+    /// 每帧 `Texture::new` 的话 id 每帧都是新的，渲染器会当成新贴图
+    /// 各传一份、各建一个绑定组，显存只增不减。同一个 id 换版本，
+    /// 渲染器直接往原来那块显存里写。
+    ///
+    /// # Panics
+    ///
+    /// `data` 长度和原来的不一样时 panic——尺寸变了就不是同一张图了，
+    /// 该用 [`Texture::new`]。
+    pub fn with_pixels(&self, data: Vec<u8>) -> Texture {
+        assert_eq!(
+            data.len(),
+            self.data.len(),
+            "with_pixels 只能换同样大小的像素：期望 {} 字节，实际 {}",
+            self.data.len(),
+            data.len()
+        );
+        Texture {
+            data: data.into(),
+            revision: self.revision + 1,
+            dirty: None,
+            external: false,
+            volume: false,
+            ..self.clone()
+        }
+    }
+
+    /// 只改一块矩形（第 0 层）：`pixels` 是 `width × height` 的 RGBA8，写到 `(x, y)`。
+    ///
+    /// 和 [`with_pixels`](Self::with_pixels) 一样换版本、不换 id；不同的是渲染器只往显存里传这一块，
+    /// 一张 2048² 的贴图上画一个 32² 的笔触，每帧传 4 KB 而不是 16 MB。同一帧里连续改好几块，
+    /// 记的是它们的外接矩形。超出图边的部分裁掉。
+    pub fn with_region(&self, x: u32, y: u32, width: u32, height: u32, pixels: &[u8]) -> Texture {
+        assert_eq!(
+            pixels.len(),
+            width as usize * height as usize * 4,
+            "with_region：像素数据长度和宽高对不上"
+        );
+        let mut data = self.data.to_vec();
+        let (x1, y1) = ((x + width).min(self.width), (y + height).min(self.height));
+        for row in y..y1 {
+            let source = ((row - y) * width) as usize * 4;
+            let target = (row * self.width + x) as usize * 4;
+            let count = (x1.saturating_sub(x)) as usize * 4;
+            data[target..target + count].copy_from_slice(&pixels[source..source + count]);
+        }
+        let rect = (
+            x.min(self.width),
+            y.min(self.height),
+            x1.saturating_sub(x),
+            y1.saturating_sub(y),
+        );
+        let dirty = match self.dirty {
+            // 上一次的改动还没被渲染器取走（同一个基准）：合成外接矩形。
+            Some((base, dx, dy, dw, dh)) => {
+                let (left, top) = (dx.min(rect.0), dy.min(rect.1));
+                let (right, bottom) = (
+                    (dx + dw).max(rect.0 + rect.2),
+                    (dy + dh).max(rect.1 + rect.3),
+                );
+                (base, left, top, right - left, bottom - top)
+            }
+            None => (self.revision, rect.0, rect.1, rect.2, rect.3),
+        };
+        Texture {
+            data: data.into(),
+            revision: self.revision + 1,
+            dirty: Some(dirty),
+            ..self.clone()
+        }
+    }
+
+    /// 从 `base` 版本到现在改过的矩形 `(x, y, 宽, 高)`；不是 `base` 起算的（或整张换过）返回 `None`。
+    pub fn dirty_region_since(&self, base: u64) -> Option<(u32, u32, u32, u32)> {
+        match self.dirty {
+            Some((from, x, y, w, h)) if from == base => Some((x, y, w, h)),
+            _ => None,
+        }
+    }
+
+    /// 内容版本，见 [`with_pixels`](Self::with_pixels)。
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// 指定像素格式。
     pub fn with_format(mut self, format: TextureFormat) -> Self {
         if self.format != format {
@@ -345,6 +559,83 @@ impl Texture {
     /// 显存缓存键。克隆的纹理共享同一个 id。
     pub fn id(&self) -> Uuid {
         self.id
+    }
+
+    /// 一张「指向离屏相机视图」的贴图：设进材质的任何贴图槽，渲染器绑的是
+    /// 那台 `CameraTarget::View(slot)` 相机这一帧画出来的画面（线性 HDR），不是这张图的像素。
+    ///
+    /// 平面反射、监控屏幕、传送门都是这个用法：一台相机画进视图，材质按屏幕坐标或 UV 去采。
+    /// 视图还没画出来（第一帧、窗口刚改尺寸）时采到的是白色。采样器是线性 + 夹边。
+    ///
+    /// 渲染器靠 [`id`](Self::id) 认出它，所以别对它调 [`with_sampler`](Self::with_sampler)
+    /// 之类会换 id 的方法。
+    pub fn camera_view(slot: u8) -> Self {
+        let mut texture = Self::new(1, 1, vec![255; 4]).with_format(TextureFormat::Linear);
+        texture.id = CAMERA_VIEW_IDS[usize::from(slot).min(CAMERA_VIEW_IDS.len() - 1)];
+        texture.sampler = Sampler {
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            wrap_u: WrapMode::ClampToEdge,
+            wrap_v: WrapMode::ClampToEdge,
+            ..Default::default()
+        };
+        texture
+    }
+
+    /// 一张「指向渲染器外部显存」的替身贴图，`id` 是那块显存登记时用的标识。
+    ///
+    /// 一般不直接调：计算着色器的存储纹理用 `krender::StorageTexture::texture` 拿替身。
+    /// 渲染器认得这个 id 就绑那块显存；认不得（显存已经释放）就当一张 1×1 白图。
+    pub fn external(id: Uuid) -> Self {
+        let mut texture = Self::new(1, 1, vec![255; 4]).with_format(TextureFormat::Linear);
+        texture.id = id;
+        texture.external = true;
+        texture
+    }
+
+    /// 一张**三维纹理**：`depth` 层 `width × height` 的 RGBA8，逐层排列（和 [`array`](Self::array) 一样的数据布局）。
+    ///
+    /// 和纹理数组的区别在采样：三维纹理按 `vec3` 坐标采、**层与层之间也插值**（三线性），
+    /// 体积云、体素数据、3D 噪声、三维调色查找表要的是这个；纹理数组的层号是整数，层间不混。
+    /// 设进材质的 `custom_texture_3d` 槽（钩子里 `textureSample(custom_texture_3d, base_color_sampler, uvw)`）。
+    /// 不建 mip。
+    ///
+    /// # Panics
+    ///
+    /// `depth` 为 0，或数据长度不等于 `width * height * 4 * depth` 时 panic。
+    pub fn volume(width: u32, height: u32, depth: u32, data: Vec<u8>) -> Self {
+        let mut texture = Self::array(width, height, depth, data);
+        texture.volume = true;
+        texture.sampler.mipmaps = false;
+        texture
+    }
+
+    /// 是不是三维纹理（[`volume`](Self::volume)）。
+    pub fn is_volume(&self) -> bool {
+        self.volume
+    }
+
+    /// 是不是 [`external`](Self::external) 替身。
+    pub fn is_external(&self) -> bool {
+        self.external
+    }
+
+    /// 这张贴图是不是 [`camera_view`](Self::camera_view) 的替身，是的话指向哪个视图。
+    pub fn camera_view_slot(&self) -> Option<u8> {
+        Self::camera_view_slot_of(self.id)
+    }
+
+    /// 按 id 判断（渲染器只有 id 时用）。
+    pub fn camera_view_slot_of(id: Uuid) -> Option<u8> {
+        CAMERA_VIEW_IDS
+            .iter()
+            .position(|view| *view == id)
+            .map(|slot| slot as u8)
+    }
+
+    /// 视图 `slot` 的替身 id。
+    pub fn camera_view_id(slot: u8) -> Uuid {
+        CAMERA_VIEW_IDS[usize::from(slot).min(CAMERA_VIEW_IDS.len() - 1)]
     }
 
     /// 宽度（像素）。
@@ -407,6 +698,89 @@ impl fmt::Debug for Texture {
     }
 }
 
+/// mip 链要几级（含第 0 级）：边长逐级减半到 1。
+pub fn mip_level_count(width: u32, height: u32) -> u32 {
+    32 - width.max(height).max(1).leading_zeros()
+}
+
+/// 生成第 1 级起的 mip 链（每级逐层排列，和 [`Texture::data`] 一样的布局）。
+///
+/// 2×2 盒式平均；奇数边长时最后一行 / 列复用（夹边）。`srgb` 为真时先换到线性空间再平均——
+/// 直接平均 sRGB 编码值会让远处整体发暗（gamma 的凹性）。alpha 一律线性平均。
+pub fn generate_mips(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    layers: u32,
+    srgb: bool,
+) -> Vec<Vec<u8>> {
+    static TO_LINEAR: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    let to_linear = TO_LINEAR.get_or_init(|| {
+        let mut table = [0.0; 256];
+        for (i, value) in table.iter_mut().enumerate() {
+            let c = i as f32 / 255.0;
+            *value = if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            };
+        }
+        table
+    });
+    let to_srgb = |c: f32| {
+        let s = if c <= 0.0031308 {
+            c * 12.92
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        };
+        (s.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+    };
+    let mut levels = Vec::new();
+    let (mut w, mut h) = (width.max(1), height.max(1));
+    let mut previous = data.to_vec();
+    while w > 1 || h > 1 {
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        let mut next = vec![0u8; (nw * nh * 4 * layers) as usize];
+        for layer in 0..layers {
+            let source = (w * h * 4 * layer) as usize;
+            let target = (nw * nh * 4 * layer) as usize;
+            for y in 0..nh {
+                for x in 0..nw {
+                    let mut sum = [0.0f32; 4];
+                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        let sx = (x * 2 + dx).min(w - 1);
+                        let sy = (y * 2 + dy).min(h - 1);
+                        let i = source + ((sy * w + sx) * 4) as usize;
+                        for c in 0..3 {
+                            sum[c] += if srgb {
+                                to_linear[previous[i + c] as usize]
+                            } else {
+                                previous[i + c] as f32 / 255.0
+                            };
+                        }
+                        sum[3] += previous[i + 3] as f32 / 255.0;
+                    }
+                    let o = target + ((y * nw + x) * 4) as usize;
+                    for c in 0..3 {
+                        let v = sum[c] * 0.25;
+                        next[o + c] = if srgb {
+                            to_srgb(v)
+                        } else {
+                            (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+                        };
+                    }
+                    next[o + 3] = (sum[3] * 0.25 * 255.0 + 0.5) as u8;
+                }
+            }
+        }
+        levels.push(next.clone());
+        previous = next;
+        w = nw;
+        h = nh;
+    }
+    levels
+}
+
 impl ResourceData for Texture {
     fn type_uuid(&self) -> Uuid {
         TEXTURE_TYPE_UUID
@@ -415,7 +789,72 @@ impl ResourceData for Texture {
 
 #[cfg(test)]
 mod test {
+    #[test]
+    fn mip_chains_halve_down_to_one_texel_and_average_in_linear_space() {
+        assert_eq!(super::mip_level_count(256, 64), 9);
+        assert_eq!(super::mip_level_count(1, 1), 1);
+        assert_eq!(super::mip_level_count(5, 3), 3);
+        // 黑白相间的 2×2：sRGB 下平均出来不是 128（那是线性 0.21，偏暗），而是线性 0.5 ≈ sRGB 188。
+        let data = [
+            0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 255,
+        ];
+        let srgb = super::generate_mips(&data, 2, 2, 1, true);
+        assert_eq!(srgb.len(), 1);
+        assert!(
+            (186..=190).contains(&srgb[0][0]),
+            "sRGB 平均应该在线性空间做：{}",
+            srgb[0][0]
+        );
+        let linear = super::generate_mips(&data, 2, 2, 1, false);
+        assert!((127..=128).contains(&linear[0][0]));
+        assert_eq!(srgb[0][3], 255, "alpha 线性平均");
+        // 多层：每层各自缩，按层排列。
+        let two_layers: Vec<u8> = data.iter().copied().chain([10u8; 16]).collect();
+        let mips = super::generate_mips(&two_layers, 2, 2, 2, false);
+        assert_eq!(mips[0].len(), 8);
+        assert_eq!(mips[0][4], 10);
+    }
+
+    #[test]
+    fn region_writes_touch_only_their_rectangle_and_merge() {
+        let texture = Texture::new(8, 8, vec![0; 8 * 8 * 4]);
+        let base = texture.revision();
+        let a = texture.with_region(1, 2, 2, 2, &[255; 2 * 2 * 4]);
+        assert_eq!(a.dirty_region_since(base), Some((1, 2, 2, 2)));
+        assert_eq!(a.data()[(2 * 8 + 1) * 4], 255, "矩形里写进去了");
+        assert_eq!(a.data()[(2 * 8 + 3) * 4], 0, "矩形外没动");
+        // 渲染器还没取走就又改了一块：合成外接矩形，基准不变。
+        let b = a.with_region(5, 6, 2, 2, &[9; 2 * 2 * 4]);
+        assert_eq!(b.dirty_region_since(base), Some((1, 2, 6, 6)));
+        assert_eq!(b.dirty_region_since(a.revision()), None, "基准是最初那一版");
+        // 超出图边的部分裁掉。
+        let c = texture.with_region(7, 7, 2, 2, &[1; 2 * 2 * 4]);
+        assert_eq!(c.dirty_region_since(base), Some((7, 7, 1, 1)));
+        // 整张换过就不再是「只改了一块」。
+        assert_eq!(
+            b.with_pixels(vec![0; 8 * 8 * 4]).dirty_region_since(base),
+            None
+        );
+    }
+
     use super::*;
+
+    #[test]
+    fn with_pixels_keeps_identity_and_bumps_the_revision() {
+        let original = Texture::new(1, 1, vec![0, 0, 0, 255]).with_format(TextureFormat::Linear);
+        let next = original.with_pixels(vec![255, 0, 0, 255]);
+        assert_eq!(next.id(), original.id());
+        assert_eq!(next.revision(), original.revision() + 1);
+        assert_eq!(next.format(), TextureFormat::Linear);
+        assert_eq!(texel(&next, 0, 0), [255, 0, 0, 255]);
+        assert_eq!(texel(&original, 0, 0), [0, 0, 0, 255], "原来那份不受影响");
+    }
+
+    #[test]
+    #[should_panic(expected = "with_pixels")]
+    fn with_pixels_refuses_a_different_size() {
+        Texture::new(1, 1, vec![0; 4]).with_pixels(vec![0; 8]);
+    }
 
     /// 取某个像素的 RGBA。
     fn texel(texture: &Texture, x: u32, y: u32) -> [u8; 4] {

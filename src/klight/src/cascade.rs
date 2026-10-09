@@ -30,6 +30,81 @@ use kmath::{Aabb, Mat4, Vec3};
 /// 而每级都是一次完整的阴影 pass（多一次场景遍历 + 一张深度图）。
 pub const MAX_CASCADES: usize = 4;
 
+/// 阴影图数组最多几层：方向光的级联用前 [`MAX_CASCADES`] 层，
+/// 点光的立方体阴影要六层（一面一层）。
+pub const MAX_SHADOW_LAYERS: usize = 6;
+
+/// 阴影投射者是哪一类光。决定阴影图数组里的层怎么用、着色器怎么选层。
+///
+/// 数值直接写进着色器（`shadow_params.w`），改了要两边一起改。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShadowKind {
+    /// 方向光：按到相机的距离分级的正交级联。
+    Cascades = 1,
+    /// 点光：立方体的六个面，按「着色点在光源的哪个方向」选面。
+    Cube = 2,
+    /// 聚光：一张透视阴影图。
+    Spot = 3,
+}
+
+/// 立方体阴影六个面的朝向与「上」，顺序是 +X −X +Y −Y +Z −Z。
+///
+/// 着色器按主轴选面（见 `shader.wgsl` 的 `shadow_cube_face`），
+/// 两边的顺序必须一致。「上」怎么取无所谓——同一个矩阵既用来画
+/// 阴影图也用来查，只要两边一样就对。
+pub const CUBE_FACES: [(Vec3, Vec3); 6] = [
+    (Vec3::X, Vec3::Y),
+    (Vec3::NEG_X, Vec3::Y),
+    (Vec3::Y, Vec3::Z),
+    (Vec3::NEG_Y, Vec3::Z),
+    (Vec3::Z, Vec3::Y),
+    (Vec3::NEG_Z, Vec3::Y),
+];
+
+/// 点光的立方体阴影：六个 90° 透视面，每面一个 [`Cascade`]。
+///
+/// `near` 不能给 0（透视投影在 0 处退化）；`far` 通常取光的作用范围——
+/// 更远的东西反正不被这盏灯照亮，没有影子可言。
+pub fn point_faces(position: Vec3, near: f32, far: f32) -> Vec<Cascade> {
+    let near = near.max(1e-3);
+    let far = far.max(near * 2.0);
+    let projection = Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 1.0, near, far);
+    CUBE_FACES
+        .iter()
+        .map(|&(forward, up)| Cascade {
+            near,
+            far,
+            matrix: projection * Mat4::look_at_rh(position, position + forward, up),
+        })
+        .collect()
+}
+
+/// 聚光的阴影：一张透视图，视场角取外锥角的两倍再宽一点（软边不被切掉）。
+pub fn spot_face(
+    position: Vec3,
+    direction: Vec3,
+    outer_angle_degrees: f32,
+    near: f32,
+    far: f32,
+) -> Vec<Cascade> {
+    let near = near.max(1e-3);
+    let far = far.max(near * 2.0);
+    let direction = direction.normalize_or(Vec3::NEG_Y);
+    let fov = (outer_angle_degrees.to_radians() * 2.0 * 1.1).clamp(0.05, 3.0);
+    // 光朝正上 / 正下的时候不能拿 Y 当「上」，叉积会退化。
+    let up = if direction.y.abs() > 0.99 {
+        Vec3::Z
+    } else {
+        Vec3::Y
+    };
+    let projection = Mat4::perspective_rh(fov, 1.0, near, far);
+    vec![Cascade {
+        near,
+        far,
+        matrix: projection * Mat4::look_at_rh(position, position + direction, up),
+    }]
+}
+
 /// 级联阴影的参数。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CascadeSettings {
@@ -279,12 +354,26 @@ pub fn shadow_visibility(matrix: Mat4, aabb: Aabb, resolution: u32, min_texels: 
 
     let mut min = Vec3::splat(f32::INFINITY);
     let mut max = Vec3::splat(f32::NEG_INFINITY);
+    let mut behind = 0;
     for corner in aabb.corners() {
         let clip = matrix * corner.extend(1.0);
-        // 正交投影，w 恒为 1，不用做透视除法。级联矩阵一定是正交的
-        // （方向光没有透视），所以这里不必处理 w 为负的情况。
-        min = min.min(clip.truncate());
-        max = max.max(clip.truncate());
+        // 级联（正交）的 w 恒为 1；点光和聚光的面是透视的，要除 w。
+        if clip.w <= 1e-6 {
+            behind += 1;
+            continue;
+        }
+        let ndc = clip.truncate() / clip.w;
+        min = min.min(ndc);
+        max = max.max(ndc);
+    }
+    // 全在光源背后（或者矩阵退化成全零）：看不见。
+    if behind == 8 {
+        return false;
+    }
+    // 一部分在背后：包围盒跨过了光源所在的平面，投影没有意义——
+    // 保守地算可见，别漏掉贴着灯的东西的影子。
+    if behind > 0 {
+        return true;
     }
 
     if !min.is_finite() || !max.is_finite() {
@@ -729,6 +818,75 @@ mod tests {
     fn an_empty_aabb_is_culled() {
         // 空包围盒的 min 是 +∞，转出来全是 NaN。
         assert!(!shadow_visibility(light_matrix(), Aabb::EMPTY, 1024, 0.0));
+    }
+
+    #[test]
+    fn the_cube_faces_cover_every_direction() {
+        // 每个方向都该落在「着色器按主轴选出来的那一面」的视野里。
+        let light = Vec3::new(1.0, 2.0, 3.0);
+        let faces = point_faces(light, 0.1, 50.0);
+        assert_eq!(faces.len(), 6);
+        for direction in [
+            Vec3::X,
+            Vec3::NEG_Y,
+            Vec3::new(0.3, -0.2, 0.9),
+            Vec3::new(-0.7, 0.69, 0.1),
+        ] {
+            let a = direction.abs();
+            let face = if a.x >= a.y && a.x >= a.z {
+                if direction.x > 0.0 { 0 } else { 1 }
+            } else if a.y >= a.z {
+                if direction.y > 0.0 { 2 } else { 3 }
+            } else if direction.z > 0.0 {
+                4
+            } else {
+                5
+            };
+            let clip = faces[face].matrix * (light + direction * 5.0).extend(1.0);
+            let ndc = clip.truncate() / clip.w;
+            assert!(clip.w > 0.0, "{direction:?} 在第 {face} 面的背后");
+            assert!(
+                ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0 && (0.0..=1.0).contains(&ndc.z),
+                "{direction:?} 不在第 {face} 面里：{ndc:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_spot_face_sees_along_the_cone() {
+        let faces = spot_face(Vec3::new(0.0, 5.0, 0.0), Vec3::NEG_Y, 30.0, 0.1, 20.0);
+        assert_eq!(faces.len(), 1);
+        let clip = faces[0].matrix * Vec3::new(1.0, 0.0, 0.5).extend(1.0);
+        let ndc = clip.truncate() / clip.w;
+        assert!(
+            ndc.x.abs() < 1.0 && ndc.y.abs() < 1.0,
+            "正下方附近该在视野里：{ndc:?}"
+        );
+    }
+
+    #[test]
+    fn perspective_faces_cull_what_is_behind_the_light() {
+        let faces = point_faces(Vec3::ZERO, 0.1, 50.0);
+        // +X 面看不见 −X 方向的东西。
+        assert!(!shadow_visibility(
+            faces[0].matrix,
+            box_at(Vec3::new(-10.0, 0.0, 0.0), 1.0),
+            1024,
+            0.0
+        ));
+        assert!(shadow_visibility(
+            faces[0].matrix,
+            box_at(Vec3::new(10.0, 0.0, 0.0), 1.0),
+            1024,
+            0.0
+        ));
+        // 包住光源的盒子：保守地算可见。
+        assert!(shadow_visibility(
+            faces[0].matrix,
+            box_at(Vec3::ZERO, 1.0),
+            1024,
+            0.0
+        ));
     }
 
     #[test]

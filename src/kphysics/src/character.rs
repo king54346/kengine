@@ -267,6 +267,11 @@ impl crate::PhysicsWorld {
     /// 只想算不想动的话用
     /// [`compute_character_movement`](Self::compute_character_movement)。
     ///
+    /// # 角色挂在场景节点上时**别用这个**
+    ///
+    /// 用 `kscene::Scene::move_character`。场景每帧拿节点的变换驱动运动学
+    /// 刚体，这里设的下一个位姿会被那个同步盖掉——角色一动不动。
+    ///
     /// # 重力要自己加
     ///
     /// 见模块文档。控制器只回答「想走这么远，实际能走多远」。
@@ -346,15 +351,71 @@ impl crate::PhysicsWorld {
         // 被挡住，角色会一路陷进地里。实测从 y=0.8 陷到 0.22。
         //
         // 代价是每帧多一次相交查询（没有扫掠循环，很便宜）。
+        //
+        // 这一趟**只解穿透、不贴地**。`move_shape` 每次调用都会跑一遍
+        // 「贴地」，这一趟也不例外：它先把角色贴到离地正好 `offset`，
+        // 正式那一趟再从这个位置出发、再贴一次。贴在正好 `offset` 上时，
+        // 水平扫掠（它的 `target_distance` 也是 `offset`）会在地面法线
+        // 恰好竖直的那一帧判成「零距离就撞上」，二十次迭代一步都挪不动——
+        // 角色走着走着在平地上卡死，只有跳一下才能脱身。
+        let mut depenetrate = native;
+        depenetrate.snap_to_ground = None;
         let queries = self.inner.query_pipeline_with_filter(filter);
-        let fix = native.move_shape(dt, &queries, &*shape, &pose, to_rv(Vec3::ZERO), |_| {});
+        let fix = depenetrate.move_shape(dt, &queries, &*shape, &pose, to_rv(Vec3::ZERO), |_| {});
         let pose =
             rapier3d::math::Pose::from_parts(pose.translation + fix.translation, pose.rotation);
 
         let mut collisions = Vec::new();
-        let result = native.move_shape(dt, &queries, &*shape, &pose, to_rv(desired), |collision| {
-            collisions.push(collision)
-        });
+        let mut result =
+            native.move_shape(dt, &queries, &*shape, &pose, to_rv(desired), |collision| {
+                collisions.push(collision)
+            });
+        let mut lifted = Vec3::ZERO;
+
+        // ── 平地上被「零距离命中」吞掉水平位移 ──
+        //
+        // 贴地之后角色离地正好 `offset`，而水平扫掠的 `target_distance` 也是
+        // `offset`。地面法线恰好竖直的那一帧，parry 把「贴着目标距离平移」
+        // 判成零距离命中，这一帧水平一步都走不了。rapier 自己也会碰上，
+        // 实测平地上走四秒卡五帧——表现为走路时偶尔顿一下。
+        //
+        // 只在「踩着地、撞到的全是地面、水平位移被吞掉大半」时，把起点
+        // 抬高 1 毫米重走一遍：离开那个退化的距离就不会误判，贴地会把人
+        // 放回地面。撞墙时不会进这里（墙的法线不朝上），所以不会穿墙。
+        let up = controller.up.normalize_or(Vec3::Y);
+        let horizontal = |v: Vec3| v - up * v.dot(up);
+        let wanted = horizontal(desired).length();
+        let floor_cos = controller.max_slope_climb_angle.cos();
+        if result.grounded
+            && wanted > 1e-5
+            && horizontal(from_rv(result.translation)).length() < wanted * 0.5
+            && !collisions.is_empty()
+            && collisions
+                .iter()
+                .all(|c| from_rv(c.hit.normal1).dot(up) >= floor_cos)
+        {
+            const LIFT: f32 = 1e-3;
+            let raised = rapier3d::math::Pose::from_parts(
+                pose.translation + to_rv(up * LIFT),
+                pose.rotation,
+            );
+            let mut retry_collisions = Vec::new();
+            let retry = native.move_shape(
+                dt,
+                &queries,
+                &*shape,
+                &raised,
+                to_rv(desired - up * LIFT),
+                |collision| retry_collisions.push(collision),
+            );
+            if horizontal(from_rv(retry.translation)).length()
+                > horizontal(from_rv(result.translation)).length()
+            {
+                result = retry;
+                collisions = retry_collisions;
+                lifted = up * LIFT;
+            }
+        }
 
         // 事件在扫掠结束之后再报：回调里可能会去查场景，而此刻
         // `move_shape` 还借着查询管线。
@@ -376,7 +437,7 @@ impl crate::PhysicsWorld {
 
         CharacterMovement {
             // 解穿透的修正也算进位移里，否则角色会一直停在穿透状态。
-            translation: from_rv(fix.translation) + from_rv(result.translation),
+            translation: from_rv(fix.translation) + lifted + from_rv(result.translation),
             grounded: result.grounded,
             sliding_down_slope: result.is_sliding_down_slope,
         }

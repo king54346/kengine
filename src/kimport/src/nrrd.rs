@@ -164,7 +164,7 @@ pub fn parse(bytes: &[u8]) -> Result<Volume, LoadError> {
     if dimension != 0 && dimension != 3 {
         return Err(bad(format!("只支持三维 NRRD，这份是 {dimension} 维")));
     }
-    if sizes.len() != 3 || sizes.iter().any(|&n| n == 0) {
+    if sizes.len() != 3 || sizes.contains(&0) {
         return Err(bad("NRRD 的 sizes 不是三个正整数"));
     }
     let count = sizes
@@ -369,7 +369,9 @@ mod tests {
         use flate2::{Compression, write::GzEncoder};
         use std::io::Write;
         let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-        encoder.write_all(&[0, 32, 64, 96, 128, 160, 192, 255]).unwrap();
+        encoder
+            .write_all(&[0, 32, 64, 96, 128, 160, 192, 255])
+            .unwrap();
         let payload = encoder.finish().unwrap();
         let mut bytes =
             b"NRRD0004\ntype: uchar\ndimension: 3\nsizes: 2 2 2\nencoding: gzip\n\n".to_vec();

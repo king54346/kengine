@@ -41,12 +41,12 @@ fn face_at_center(mesh: &Mesh, eye: Vec3) -> Option<Option<Vec3>> {
         .flat_map(|v| [v.position, v.normal])
         .collect();
     let vertices = create_buffer(
-        &device,
+        device,
         bytemuck::cast_slice(&data),
         wgpu::BufferUsages::VERTEX,
     );
     let indices = create_buffer(
-        &device,
+        device,
         bytemuck::cast_slice(mesh.indices()),
         wgpu::BufferUsages::INDEX,
     );
@@ -58,7 +58,7 @@ fn face_at_center(mesh: &Mesh, eye: Vec3) -> Option<Option<Vec3>> {
     let camera = Camera::perspective(45.0);
     let view_proj = camera.projection_matrix(1.0) * Mat4::look_at_rh(eye, Vec3::ZERO, up_for(eye));
     let uniform = create_buffer(
-        &device,
+        device,
         bytemuck::cast_slice(&view_proj.to_cols_array()),
         wgpu::BufferUsages::UNIFORM,
     );

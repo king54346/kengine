@@ -157,7 +157,11 @@ fn gradient(colors: &[Vec3], angles: &[f32], angle: f32) -> Vec3 {
 }
 
 /// [`loader!`] 要的异步签名：先同步解析，再异步把贴图读进来，最后同步建场景。
-pub async fn load(bytes: Vec<u8>, path: PathBuf, io: Arc<dyn ResourceIo>) -> Result<VrmlScene, LoadError> {
+pub async fn load(
+    bytes: Vec<u8>,
+    path: PathBuf,
+    io: Arc<dyn ResourceIo>,
+) -> Result<VrmlScene, LoadError> {
     let roots = parse(&bytes)?;
     let base = crate::base_dir(&path);
     let mut images = HashMap::new();
@@ -295,7 +299,11 @@ struct VNode {
 
 impl VNode {
     fn get(&self, name: &str) -> Option<&Value> {
-        self.fields.iter().rev().find(|(n, _)| n == name).map(|(_, v)| v)
+        self.fields
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v)
     }
 
     fn numbers(&self, name: &str) -> &[f64] {
@@ -330,7 +338,9 @@ impl VNode {
     /// 轴角旋转（`x y z 弧度`）。轴是零向量时当成不转。
     fn rotation(&self, name: &str) -> Quat {
         match self.numbers(name) {
-            [x, y, z, angle, ..] => axis_angle(Vec3::new(*x as f32, *y as f32, *z as f32), *angle as f32),
+            [x, y, z, angle, ..] => {
+                axis_angle(Vec3::new(*x as f32, *y as f32, *z as f32), *angle as f32)
+            }
             _ => Quat::IDENTITY,
         }
     }
@@ -720,11 +730,19 @@ fn texture_urls(roots: &[Arc<VNode>]) -> Vec<String> {
 
 fn srgb_to_linear(c: f32) -> f32 {
     let c = c.clamp(0.0, 1.0);
-    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 fn linear(color: Vec3) -> Vec3 {
-    Vec3::new(srgb_to_linear(color.x), srgb_to_linear(color.y), srgb_to_linear(color.z))
+    Vec3::new(
+        srgb_to_linear(color.x),
+        srgb_to_linear(color.y),
+        srgb_to_linear(color.z),
+    )
 }
 
 fn gizmo_color(color: Vec3, alpha: f32) -> Color {
@@ -793,7 +811,11 @@ fn build(roots: &[Arc<VNode>], images: &HashMap<String, Texture>, base: &Path) -
         lines: (lines.segment_count() > 0).then(|| lines.build()),
         points: (!points.is_empty()).then_some(points),
         background,
-        bounds: if min.x <= max.x { (min, max) } else { (Vec3::ZERO, Vec3::ZERO) },
+        bounds: if min.x <= max.x {
+            (min, max)
+        } else {
+            (Vec3::ZERO, Vec3::ZERO)
+        },
     }
 }
 
@@ -856,7 +878,11 @@ impl Builder<'_> {
             "LOD" => {
                 // VRML 97 叫 `level`，X3D 改名叫 `children`。只取最精细的一级。
                 let levels = node.nodes("level");
-                let levels = if levels.is_empty() { node.nodes("children") } else { levels };
+                let levels = if levels.is_empty() {
+                    node.nodes("children")
+                } else {
+                    levels
+                };
                 if let Some(first) = levels.first() {
                     self.visit(first, world, parent, depth + 1);
                 }
@@ -899,13 +925,14 @@ impl Builder<'_> {
         let mesh = match self.mesh_cache.get(&key) {
             Some(&cached) => cached,
             None => {
-                let built = build_geometry(geometry, texture_transform.map(|t| &**t)).and_then(|mesh| {
-                    if mesh.triangle_count() == 0 {
-                        return None;
-                    }
-                    self.meshes.push(mesh);
-                    Some(self.meshes.len() - 1)
-                });
+                let built =
+                    build_geometry(geometry, texture_transform.map(|t| &**t)).and_then(|mesh| {
+                        if mesh.triangle_count() == 0 {
+                            return None;
+                        }
+                        self.meshes.push(mesh);
+                        Some(self.meshes.len() - 1)
+                    });
                 self.mesh_cache.insert(key, built);
                 built
             }
@@ -927,7 +954,10 @@ impl Builder<'_> {
     }
 
     fn material(&mut self, appearance: Option<&Arc<VNode>>, double_sided: bool) -> usize {
-        let key = (appearance.map_or(0, |a| Arc::as_ptr(a) as usize), double_sided);
+        let key = (
+            appearance.map_or(0, |a| Arc::as_ptr(a) as usize),
+            double_sided,
+        );
         if let Some(&index) = self.material_cache.get(&key) {
             return index;
         }
@@ -971,8 +1001,16 @@ impl Builder<'_> {
             let color = material.base_color();
             // 规范：RGB(A) 贴图**替换**漫反射色，灰度贴图**调制**漫反射色；
             // 带 alpha 的贴图替换透明度。
-            let rgb = if components >= 3 { Vec3::ONE } else { color.truncate() };
-            let alpha = if components == 2 || components == 4 { 1.0 } else { color.w };
+            let rgb = if components >= 3 {
+                Vec3::ONE
+            } else {
+                color.truncate()
+            };
+            let alpha = if components == 2 || components == 4 {
+                1.0
+            } else {
+                color.w
+            };
             material.set_base_color(rgb.extend(alpha));
             material.set("base_color_texture", texture);
             if components == 2 || components == 4 {
@@ -988,7 +1026,11 @@ impl Builder<'_> {
     /// 贴图节点 → （贴图资源, 分量数）。分量数决定它是替换还是调制漫反射色。
     fn texture(&self, node: &VNode) -> Option<(Resource<Texture>, u32)> {
         let wrap = |name: &str| {
-            if node.bool(name, true) { WrapMode::Repeat } else { WrapMode::ClampToEdge }
+            if node.bool(name, true) {
+                WrapMode::Repeat
+            } else {
+                WrapMode::ClampToEdge
+            }
         };
         let (key, texture, components, filter) = match node.kind.as_str() {
             "ImageTexture" => {
@@ -996,13 +1038,23 @@ impl Builder<'_> {
                 let texture = self.images.get(url)?.clone();
                 let has_alpha = texture.data().chunks_exact(4).any(|p| p[3] < 255);
                 let key = self.base.join(url).to_string_lossy().into_owned();
-                (key, texture, if has_alpha { 4 } else { 3 }, FilterMode::Linear)
+                (
+                    key,
+                    texture,
+                    if has_alpha { 4 } else { 3 },
+                    FilterMode::Linear,
+                )
             }
             "PixelTexture" => {
                 let (texture, components) = pixel_texture(node.numbers("image"))?;
                 // 和 three.js 的 `DataTexture` 一样默认最近邻：PixelTexture
                 // 往往只有几个像素，线性过滤会把它糊成一团渐变。
-                (format!("vrml-pixel-texture-{:p}", node), texture, components, FilterMode::Nearest)
+                (
+                    format!("vrml-pixel-texture-{:p}", node),
+                    texture,
+                    components,
+                    FilterMode::Nearest,
+                )
             }
             _ => return None,
         };
@@ -1011,17 +1063,27 @@ impl Builder<'_> {
             min_filter: filter,
             wrap_u: wrap("repeatS"),
             wrap_v: wrap("repeatT"),
+            ..Default::default()
         };
-        let texture = texture.with_format(TextureFormat::Srgb).with_sampler(sampler);
+        let texture = texture
+            .with_format(TextureFormat::Srgb)
+            .with_sampler(sampler);
         Some((
-            Resource::new_ok(format!("{key}#{:?}{:?}", sampler.wrap_u, sampler.wrap_v), texture),
+            Resource::new_ok(
+                format!("{key}#{:?}{:?}", sampler.wrap_u, sampler.wrap_v),
+                texture,
+            ),
             components,
         ))
     }
 
     fn line_set(&mut self, geometry: &VNode, appearance: Option<&Arc<VNode>>, world: Mat4) {
         let points = geometry.vec3s("coord", "point");
-        let colors: Vec<Vec3> = geometry.vec3s("color", "color").into_iter().map(linear).collect();
+        let colors: Vec<Vec3> = geometry
+            .vec3s("color", "color")
+            .into_iter()
+            .map(linear)
+            .collect();
         let (fallback, alpha) = line_color(appearance);
         let per_vertex = geometry.bool("colorPerVertex", true);
         let color_index = geometry.indices("colorIndex");
@@ -1040,7 +1102,11 @@ impl Builder<'_> {
                 continue;
             };
             let color_slot = if per_vertex {
-                if color_index.is_empty() { index } else { color_index.get(slot).copied().unwrap_or(-1) }
+                if color_index.is_empty() {
+                    index
+                } else {
+                    color_index.get(slot).copied().unwrap_or(-1)
+                }
             } else if color_index.is_empty() {
                 polyline as i64
             } else {
@@ -1053,8 +1119,12 @@ impl Builder<'_> {
             let point = world.transform_point3(point);
             self.grow(point);
             if let Some((from, from_color)) = previous {
-                self.lines
-                    .gradient(from, point, gizmo_color(from_color, alpha), gizmo_color(color, alpha));
+                self.lines.gradient(
+                    from,
+                    point,
+                    gizmo_color(from_color, alpha),
+                    gizmo_color(color, alpha),
+                );
             }
             previous = Some((point, color));
         }
@@ -1062,7 +1132,11 @@ impl Builder<'_> {
 
     fn point_set(&mut self, geometry: &VNode, appearance: Option<&Arc<VNode>>, world: Mat4) {
         let points = geometry.vec3s("coord", "point");
-        let colors: Vec<Vec3> = geometry.vec3s("color", "color").into_iter().map(linear).collect();
+        let colors: Vec<Vec3> = geometry
+            .vec3s("color", "color")
+            .into_iter()
+            .map(linear)
+            .collect();
         let (fallback, _) = line_color(appearance);
         for (index, &point) in points.iter().enumerate() {
             if self.points.positions.len() >= limits::VERTICES {
@@ -1071,7 +1145,9 @@ impl Builder<'_> {
             let point = world.transform_point3(point);
             self.grow(point);
             self.points.positions.push(point);
-            self.points.colors.push(colors.get(index).copied().unwrap_or(fallback));
+            self.points
+                .colors
+                .push(colors.get(index).copied().unwrap_or(fallback));
         }
     }
 }
@@ -1136,14 +1212,23 @@ fn pixel_texture(numbers: &[f64]) -> Option<(Texture, u32)> {
 fn build_geometry(node: &VNode, texture_transform: Option<&VNode>) -> Option<Mesh> {
     match node.kind.as_str() {
         "Box" => Some(scaled(Mesh::cube(), node.vec3("size", Vec3::splat(2.0)))),
-        "Sphere" => Some(scaled(Mesh::sphere(24, 48), Vec3::splat(node.f32("radius", 1.0) * 2.0))),
+        "Sphere" => Some(scaled(
+            Mesh::sphere(24, 48),
+            Vec3::splat(node.f32("radius", 1.0) * 2.0),
+        )),
         "Cylinder" => {
             let (radius, height) = (node.f32("radius", 1.0), node.f32("height", 2.0));
-            Some(scaled(Mesh::cylinder(48), Vec3::new(radius * 2.0, height, radius * 2.0)))
+            Some(scaled(
+                Mesh::cylinder(48),
+                Vec3::new(radius * 2.0, height, radius * 2.0),
+            ))
         }
         "Cone" => {
             let (radius, height) = (node.f32("bottomRadius", 1.0), node.f32("height", 2.0));
-            Some(scaled(Mesh::cone(48), Vec3::new(radius * 2.0, height, radius * 2.0)))
+            Some(scaled(
+                Mesh::cone(48),
+                Vec3::new(radius * 2.0, height, radius * 2.0),
+            ))
         }
         "IndexedFaceSet" => FaceSet::indexed(node).map(|f| f.build(texture_transform)),
         "ElevationGrid" => FaceSet::elevation(node).map(|f| f.build(texture_transform)),
@@ -1195,7 +1280,9 @@ struct FaceSet {
 
 /// 按索引取颜色 / 法线 / UV；`index` 越界或为负时 `None`。
 fn pick<T: Copy>(values: &[T], index: i64) -> Option<T> {
-    usize::try_from(index).ok().and_then(|i| values.get(i).copied())
+    usize::try_from(index)
+        .ok()
+        .and_then(|i| values.get(i).copied())
 }
 
 impl FaceSet {
@@ -1204,7 +1291,11 @@ impl FaceSet {
         if positions.is_empty() {
             return None;
         }
-        let colors: Vec<Vec3> = node.vec3s("color", "color").into_iter().map(linear).collect();
+        let colors: Vec<Vec3> = node
+            .vec3s("color", "color")
+            .into_iter()
+            .map(linear)
+            .collect();
         let normals = node.vec3s("normal", "vector");
         let uvs = node.vec2s("texCoord", "point");
         let coord_index = node.indices("coordIndex");
@@ -1216,11 +1307,19 @@ impl FaceSet {
 
         // 「逐顶点」的属性：有自己的索引就按槽位对齐，没有就沿用 coordIndex。
         let per_vertex = |values_index: &[i64], slot: usize, coord: i64| -> i64 {
-            if values_index.is_empty() { coord } else { values_index.get(slot).copied().unwrap_or(-1) }
+            if values_index.is_empty() {
+                coord
+            } else {
+                values_index.get(slot).copied().unwrap_or(-1)
+            }
         };
         // 「逐面」的属性：有索引就按面号取索引，没有就直接用面号。
         let per_face = |values_index: &[i64], face: usize| -> i64 {
-            if values_index.is_empty() { face as i64 } else { values_index.get(face).copied().unwrap_or(-1) }
+            if values_index.is_empty() {
+                face as i64
+            } else {
+                values_index.get(face).copied().unwrap_or(-1)
+            }
         };
 
         let mut faces = Vec::new();
@@ -1229,9 +1328,12 @@ impl FaceSet {
             if coord < 0 {
                 if current.len() >= 3 {
                     let face = faces.len();
-                    let face_color = (!color_per_vertex).then(|| pick(&colors, per_face(&color_index, face))).flatten();
-                    let face_normal =
-                        (!normal_per_vertex).then(|| pick(&normals, per_face(&normal_index, face))).flatten();
+                    let face_color = (!color_per_vertex)
+                        .then(|| pick(&colors, per_face(&color_index, face)))
+                        .flatten();
+                    let face_normal = (!normal_per_vertex)
+                        .then(|| pick(&normals, per_face(&normal_index, face)))
+                        .flatten();
                     for corner in current.iter_mut() {
                         let corner: &mut Corner = corner;
                         if !color_per_vertex {
@@ -1252,9 +1354,17 @@ impl FaceSet {
             }
             current.push(Corner {
                 position: coord as usize,
-                normal: if normal_per_vertex { pick(&normals, per_vertex(&normal_index, slot, coord)) } else { None },
+                normal: if normal_per_vertex {
+                    pick(&normals, per_vertex(&normal_index, slot, coord))
+                } else {
+                    None
+                },
                 uv: pick(&uvs, per_vertex(&uv_index, slot, coord)),
-                color: if color_per_vertex { pick(&colors, per_vertex(&color_index, slot, coord)) } else { None },
+                color: if color_per_vertex {
+                    pick(&colors, per_vertex(&color_index, slot, coord))
+                } else {
+                    None
+                },
             });
         }
         if faces.is_empty() {
@@ -1276,10 +1386,10 @@ impl FaceSet {
     /// 规范给 `IndexedFaceSet` 的缺省纹理坐标：包围盒最长的轴是 s、次长的是 t，
     /// 两个方向用**同一个**尺度（最长边），贴图不会被拉伸。
     fn default_uvs(&mut self) {
-        let (min, max) = self
-            .positions
-            .iter()
-            .fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(a, b), &p| (a.min(p), b.max(p)));
+        let (min, max) = self.positions.iter().fold(
+            (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+            |(a, b), &p| (a.min(p), b.max(p)),
+        );
         let size = max - min;
         let mut axes = [0usize, 1, 2];
         axes.sort_by(|&a, &b| size[b].total_cmp(&size[a]));
@@ -1301,7 +1411,11 @@ impl FaceSet {
         }
         let (dx, dz) = (node.f32("xSpacing", 1.0), node.f32("zSpacing", 1.0));
         let heights = node.numbers("height");
-        let colors: Vec<Vec3> = node.vec3s("color", "color").into_iter().map(linear).collect();
+        let colors: Vec<Vec3> = node
+            .vec3s("color", "color")
+            .into_iter()
+            .map(linear)
+            .collect();
         let normals = node.vec3s("normal", "vector");
         let uvs = node.vec2s("texCoord", "point");
         let color_per_vertex = node.bool("colorPerVertex", true);
@@ -1319,7 +1433,12 @@ impl FaceSet {
             for column in 0..columns - 1 {
                 let quad = row * (columns - 1) + column;
                 // 从 +Y 往下看是逆时针：法线朝上。
-                let corners = [(column, row), (column, row + 1), (column + 1, row + 1), (column + 1, row)];
+                let corners = [
+                    (column, row),
+                    (column, row + 1),
+                    (column + 1, row + 1),
+                    (column + 1, row),
+                ];
                 faces.push(
                     corners
                         .iter()
@@ -1327,12 +1446,22 @@ impl FaceSet {
                             let vertex = r * columns + c;
                             Corner {
                                 position: vertex,
-                                normal: if normal_per_vertex { normals.get(vertex) } else { normals.get(quad) }.copied(),
+                                normal: if normal_per_vertex {
+                                    normals.get(vertex)
+                                } else {
+                                    normals.get(quad)
+                                }
+                                .copied(),
                                 uv: Some(uvs.get(vertex).copied().unwrap_or(Vec2::new(
                                     c as f32 / (columns - 1) as f32,
                                     r as f32 / (rows - 1) as f32,
                                 ))),
-                                color: if color_per_vertex { colors.get(vertex) } else { colors.get(quad) }.copied(),
+                                color: if color_per_vertex {
+                                    colors.get(vertex)
+                                } else {
+                                    colors.get(quad)
+                                }
+                                .copied(),
                             }
                         })
                         .collect(),
@@ -1349,8 +1478,11 @@ impl FaceSet {
     }
 
     fn extrusion(node: &VNode) -> Option<Self> {
-        let mut section: Vec<Vec2> =
-            node.numbers("crossSection").chunks_exact(2).map(|c| Vec2::new(c[0] as f32, c[1] as f32)).collect();
+        let mut section: Vec<Vec2> = node
+            .numbers("crossSection")
+            .chunks_exact(2)
+            .map(|c| Vec2::new(c[0] as f32, c[1] as f32))
+            .collect();
         if !node.fields.iter().any(|(n, _)| n == "crossSection") {
             section = vec![
                 Vec2::new(1.0, 1.0),
@@ -1360,16 +1492,28 @@ impl FaceSet {
                 Vec2::new(1.0, 1.0),
             ];
         }
-        let mut spine: Vec<Vec3> =
-            node.numbers("spine").chunks_exact(3).map(|c| Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32)).collect();
+        let mut spine: Vec<Vec3> = node
+            .numbers("spine")
+            .chunks_exact(3)
+            .map(|c| Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32))
+            .collect();
         if !node.fields.iter().any(|(n, _)| n == "spine") {
             spine = vec![Vec3::ZERO, Vec3::Y];
         }
-        let scales: Vec<Vec2> = node.numbers("scale").chunks_exact(2).map(|c| Vec2::new(c[0] as f32, c[1] as f32)).collect();
+        let scales: Vec<Vec2> = node
+            .numbers("scale")
+            .chunks_exact(2)
+            .map(|c| Vec2::new(c[0] as f32, c[1] as f32))
+            .collect();
         let orientations: Vec<Quat> = node
             .numbers("orientation")
             .chunks_exact(4)
-            .map(|c| axis_angle(Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32), c[3] as f32))
+            .map(|c| {
+                axis_angle(
+                    Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32),
+                    c[3] as f32,
+                )
+            })
             .collect();
         let (n, m) = (spine.len(), section.len());
         if n < 2 || m < 2 || n * m > limits::VERTICES {
@@ -1379,8 +1523,16 @@ impl FaceSet {
         let frames = spine_frames(&spine);
         let mut positions = Vec::with_capacity(n * m);
         for (i, &frame) in frames.iter().enumerate() {
-            let scale = scales.get(i).or(scales.last()).copied().unwrap_or(Vec2::ONE);
-            let orientation = orientations.get(i).or(orientations.last()).copied().unwrap_or(Quat::IDENTITY);
+            let scale = scales
+                .get(i)
+                .or(scales.last())
+                .copied()
+                .unwrap_or(Vec2::ONE);
+            let orientation = orientations
+                .get(i)
+                .or(orientations.last())
+                .copied()
+                .unwrap_or(Quat::IDENTITY);
             for point in &section {
                 let local = orientation * Vec3::new(point.x * scale.x, 0.0, point.y * scale.y);
                 positions.push(spine[i] + frame * local);
@@ -1431,16 +1583,26 @@ impl FaceSet {
         let closed_section = section.first() == section.last();
         let cap_points = if closed_section { m - 1 } else { m };
         if cap_points >= 3 {
-            let (min, max) = section.iter().fold((Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)), |(a, b), &p| {
-                (a.min(p), b.max(p))
-            });
+            let (min, max) = section.iter().fold(
+                (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)),
+                |(a, b), &p| (a.min(p), b.max(p)),
+            );
             let extent = (max - min).max_element().max(1e-6);
             let cap_uv = |k: usize| (section[k] - min) / extent;
             if node.bool("beginCap", true) {
-                faces.push((0..cap_points).rev().map(|k| corner(0, k, cap_uv(k))).collect());
+                faces.push(
+                    (0..cap_points)
+                        .rev()
+                        .map(|k| corner(0, k, cap_uv(k)))
+                        .collect(),
+                );
             }
             if node.bool("endCap", true) {
-                faces.push((0..cap_points).map(|k| corner(n - 1, k, cap_uv(k))).collect());
+                faces.push(
+                    (0..cap_points)
+                        .map(|k| corner(n - 1, k, cap_uv(k)))
+                        .collect(),
+                );
             }
         }
 
@@ -1470,7 +1632,11 @@ impl FaceSet {
                 for (index, corner) in face.iter().enumerate() {
                     let a = self.positions[corner.position];
                     let b = self.positions[face[(index + 1) % face.len()].position];
-                    normal += Vec3::new((a.y - b.y) * (a.z + b.z), (a.z - b.z) * (a.x + b.x), (a.x - b.x) * (a.y + b.y));
+                    normal += Vec3::new(
+                        (a.y - b.y) * (a.z + b.z),
+                        (a.z - b.z) * (a.x + b.x),
+                        (a.x - b.x) * (a.y + b.y),
+                    );
                 }
                 normal
             })
@@ -1484,7 +1650,10 @@ impl FaceSet {
         if self.crease_angle > 0.0 {
             for (face_index, face) in self.faces.iter().enumerate() {
                 for corner in face {
-                    incident.entry(key(self.positions[corner.position])).or_default().push(face_index);
+                    incident
+                        .entry(key(self.positions[corner.position]))
+                        .or_default()
+                        .push(face_index);
                 }
             }
         }
@@ -1498,19 +1667,27 @@ impl FaceSet {
             let face_normal = unit[face_index];
             for corner in face {
                 let position = self.positions[corner.position];
-                let normal = corner.normal.map(Vec3::normalize_or_zero).filter(|n| *n != Vec3::ZERO).unwrap_or_else(|| {
-                    if self.crease_angle <= 0.0 {
-                        return face_normal;
-                    }
-                    let mut sum = Vec3::ZERO;
-                    for &other in incident.get(&key(position)).map_or(&[][..], Vec::as_slice) {
-                        if unit[other].dot(face_normal) >= cos_crease {
-                            sum += raw[other];
+                let normal = corner
+                    .normal
+                    .map(Vec3::normalize_or_zero)
+                    .filter(|n| *n != Vec3::ZERO)
+                    .unwrap_or_else(|| {
+                        if self.crease_angle <= 0.0 {
+                            return face_normal;
                         }
-                    }
-                    let smooth = sum.normalize_or_zero();
-                    if smooth == Vec3::ZERO { face_normal } else { smooth }
-                });
+                        let mut sum = Vec3::ZERO;
+                        for &other in incident.get(&key(position)).map_or(&[][..], Vec::as_slice) {
+                            if unit[other].dot(face_normal) >= cos_crease {
+                                sum += raw[other];
+                            }
+                        }
+                        let smooth = sum.normalize_or_zero();
+                        if smooth == Vec3::ZERO {
+                            face_normal
+                        } else {
+                            smooth
+                        }
+                    });
                 let mut uv = corner.uv.unwrap_or(Vec2::ZERO);
                 if let Some(transform) = &uv_transform {
                     uv = transform.apply(uv);
@@ -1523,9 +1700,17 @@ impl FaceSet {
                 vertices.push(vertex);
             }
             let local = if self.convex || face.len() == 3 {
-                (1..face.len() as u32 - 1).flat_map(|i| [0, i, i + 1]).collect()
+                (1..face.len() as u32 - 1)
+                    .flat_map(|i| [0, i, i + 1])
+                    .collect()
             } else {
-                triangulate_face(&face.iter().map(|c| self.positions[c.position]).collect::<Vec<_>>(), face_normal)
+                triangulate_face(
+                    &face
+                        .iter()
+                        .map(|c| self.positions[c.position])
+                        .collect::<Vec<_>>(),
+                    face_normal,
+                )
             };
             indices.extend(local.into_iter().map(|i| base + i));
         }
@@ -1552,11 +1737,20 @@ fn triangulate_face(points: &[Vec3], normal: Vec3) -> Vec<u32> {
 fn spine_frames(spine: &[Vec3]) -> Vec<Mat3> {
     let n = spine.len();
     let closed = spine[0].distance(spine[n - 1]) < 1e-6;
-    let collinear = (1..n - 1).all(|i| (spine[i + 1] - spine[i]).cross(spine[i - 1] - spine[i]).length() < 1e-6);
+    let collinear = (1..n - 1).all(|i| {
+        (spine[i + 1] - spine[i])
+            .cross(spine[i - 1] - spine[i])
+            .length()
+            < 1e-6
+    });
 
     if collinear {
         // 整条脊线共线：把 +Y 转到脊线方向，XZ 平面跟着转。
-        let direction = spine.windows(2).map(|w| w[1] - w[0]).find(|d| d.length() > 1e-6).unwrap_or(Vec3::Y);
+        let direction = spine
+            .windows(2)
+            .map(|w| w[1] - w[0])
+            .find(|d| d.length() > 1e-6)
+            .unwrap_or(Vec3::Y);
         let rotation = Quat::from_rotation_arc(Vec3::Y, direction.normalize());
         return vec![Mat3::from_quat(rotation); n];
     }
@@ -1586,7 +1780,11 @@ fn spine_frames(spine: &[Vec3]) -> Vec<Mat3> {
 
     let mut zs: Vec<Vec3> = (0..n).map(z_raw).collect();
     // 开放脊线的两端、以及中间局部共线的点，Z 沿用相邻点的。
-    let first = zs.iter().copied().find(|z| *z != Vec3::ZERO).unwrap_or(Vec3::Z);
+    let first = zs
+        .iter()
+        .copied()
+        .find(|z| *z != Vec3::ZERO)
+        .unwrap_or(Vec3::Z);
     let mut previous = first;
     for z in &mut zs {
         if *z == Vec3::ZERO {
@@ -1683,10 +1881,14 @@ mod tests {
     #[test]
     fn transform_center_and_rotation_compose_per_spec() {
         // 绕 center (1,0,0) 转 180°：原点被转到 (2,0,0)。
-        let node = parse(b"#VRML V2.0 utf8\nTransform { center 1 0 0 rotation 0 1 0 3.14159265 }").unwrap();
+        let node = parse(b"#VRML V2.0 utf8\nTransform { center 1 0 0 rotation 0 1 0 3.14159265 }")
+            .unwrap();
         let matrix = transform_matrix(&node[0]);
         let moved = matrix.transform_point3(Vec3::ZERO);
-        assert!((moved - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-4, "{moved:?}");
+        assert!(
+            (moved - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-4,
+            "{moved:?}"
+        );
     }
 
     #[test]
@@ -1699,7 +1901,10 @@ mod tests {
         );
         let mesh = &s.model.meshes()[0];
         assert_eq!(mesh.triangle_count(), 2);
-        assert!(mesh.vertices().iter().all(|v| v.normal() == Vec3::Z), "逆时针 → 法线朝 +Z");
+        assert!(
+            mesh.vertices().iter().all(|v| v.normal() == Vec3::Z),
+            "逆时针 → 法线朝 +Z"
+        );
     }
 
     #[test]
@@ -1821,7 +2026,10 @@ mod tests {
             .map(|[a, b, c]| (b - a).cross(c - a).length() * 0.5)
             .sum();
         // U 形面积 9 - 2 = 7，两个端盖。
-        assert!((cap_area - 14.0).abs() < 1e-3, "端盖总面积应为 14，得到 {cap_area}");
+        assert!(
+            (cap_area - 14.0).abs() < 1e-3,
+            "端盖总面积应为 14，得到 {cap_area}"
+        );
     }
 
     #[test]
@@ -1831,7 +2039,12 @@ mod tests {
                 crossSection [ 0.1 0, 0 0.1, -0.1 0, 0 -0.1, 0.1 0 ]
                 spine [ 0 0 0, 1 0 0, 1 1 0, 1 1 1 ] } }"#,
         );
-        assert!(s.model.meshes()[0].vertices().iter().all(|v| v.position().is_finite()));
+        assert!(
+            s.model.meshes()[0]
+                .vertices()
+                .iter()
+                .all(|v| v.position().is_finite())
+        );
     }
 
     #[test]
@@ -1882,7 +2095,10 @@ mod tests {
                Shape { appearance Appearance { material Material { diffuseColor 1 0 0 transparency 0.5 } } geometry Box {} }"#,
         );
         let unlit = &s.model.materials()[0];
-        assert!(unlit.shader().is_some(), "没有 Material 的形体该用不受光的钩子");
+        assert!(
+            unlit.shader().is_some(),
+            "没有 Material 的形体该用不受光的钩子"
+        );
         assert!(unlit.double_sided());
         let lit = &s.model.materials()[1];
         assert!(lit.shader().is_none());
@@ -1892,7 +2108,8 @@ mod tests {
 
     #[test]
     fn pixel_texture_is_flipped_and_replaces_diffuse_when_rgb() {
-        let (texture, components) = pixel_texture(&[1.0, 2.0, 3.0, 0xFF0000 as f64, 0x0000FF as f64]).unwrap();
+        let (texture, components) =
+            pixel_texture(&[1.0, 2.0, 3.0, 0xFF0000 as f64, 0x0000FF as f64]).unwrap();
         assert_eq!(components, 3);
         // 第一个像素在左下角 → 内存里的最后一行。
         assert_eq!(&texture.data()[4..8], &[255, 0, 0, 255]);
@@ -1903,19 +2120,33 @@ mod tests {
                 material Material { diffuseColor 0.2 0.2 0.2 } } geometry Box {} }"#,
         );
         let material = &s.model.materials()[0];
-        assert_eq!(material.base_color().truncate(), Vec3::ONE, "RGB 贴图替换漫反射色");
+        assert_eq!(
+            material.base_color().truncate(),
+            Vec3::ONE,
+            "RGB 贴图替换漫反射色"
+        );
         assert!(material.base_color_texture().is_some());
     }
 
     #[test]
     fn background_gradient_interpolates_by_angle() {
-        let s = scene("Background { skyColor [ 0 0 0, 1 1 1 ] skyAngle [ 1.5707963 ] groundColor [ 1 0 0, 1 0 0 ] groundAngle [ 0.5 ] }");
+        let s = scene(
+            "Background { skyColor [ 0 0 0, 1 1 1 ] skyAngle [ 1.5707963 ] groundColor [ 1 0 0, 1 0 0 ] groundAngle [ 0.5 ] }",
+        );
         let background = s.background.unwrap();
         assert_eq!(background.color_at(0.0), Vec3::ZERO);
         assert!((background.color_at(std::f32::consts::FRAC_PI_4).x - 0.5).abs() < 1e-4);
-        assert_eq!(background.color_at(std::f32::consts::PI), Vec3::X, "天底被地面盖住");
+        assert_eq!(
+            background.color_at(std::f32::consts::PI),
+            Vec3::X,
+            "天底被地面盖住"
+        );
         let mesh = background.to_mesh(10.0);
-        assert!(mesh.vertices().iter().all(|v| (v.position().length() - 10.0).abs() < 1e-3));
+        assert!(
+            mesh.vertices()
+                .iter()
+                .all(|v| (v.position().length() - 10.0).abs() < 1e-3)
+        );
     }
 
     #[test]

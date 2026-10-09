@@ -28,6 +28,8 @@ pub struct WireframeMaterial;
 
 impl WireframeMaterial {
     /// 建一个线框材质。`width` 是线宽（屏幕像素）。
+    // 这几个材质模型是「拼一份 `Material`」的工厂，不是自己的类型——`new` 返回 `Material` 是有意的。
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(color: Vec3, width: f32) -> Material {
         static SHADER: OnceLock<Resource<Shader>> = OnceLock::new();
         Material::standard()

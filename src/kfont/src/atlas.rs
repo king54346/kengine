@@ -327,6 +327,7 @@ impl GlyphAtlas {
                 mag_filter: FilterMode::Linear,
                 wrap_u: WrapMode::ClampToEdge,
                 wrap_v: WrapMode::ClampToEdge,
+                ..Default::default()
             })
     }
 

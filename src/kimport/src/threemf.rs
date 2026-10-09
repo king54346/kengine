@@ -46,27 +46,45 @@ loader! {
 
 fn parse_color(text: &str) -> Vec4 {
     let hex = text.trim().trim_start_matches('#');
-    let byte = |i: usize| u8::from_str_radix(hex.get(i..i + 2).unwrap_or("ff"), 16).unwrap_or(255) as f32 / 255.0;
+    let byte = |i: usize| {
+        u8::from_str_radix(hex.get(i..i + 2).unwrap_or("ff"), 16).unwrap_or(255) as f32 / 255.0
+    };
     let alpha = if hex.len() >= 8 { byte(6) } else { 1.0 };
-    Vec4::new(srgb_to_linear(byte(0)), srgb_to_linear(byte(2)), srgb_to_linear(byte(4)), alpha)
+    Vec4::new(
+        srgb_to_linear(byte(0)),
+        srgb_to_linear(byte(2)),
+        srgb_to_linear(byte(4)),
+        alpha,
+    )
 }
 
 /// 3MF 的 `m00 m01 m02 m10 ... m32`：行向量约定的 4×3 矩阵。
 fn parse_transform(text: Option<&str>) -> Mat4 {
-    let Some(text) = text else { return Mat4::IDENTITY };
-    let v: Vec<f32> = text.split_ascii_whitespace().filter_map(|t| t.parse().ok()).collect();
+    let Some(text) = text else {
+        return Mat4::IDENTITY;
+    };
+    let v: Vec<f32> = text
+        .split_ascii_whitespace()
+        .filter_map(|t| t.parse().ok())
+        .collect();
     if v.len() != 12 {
         return Mat4::IDENTITY;
     }
     // 行向量 × 矩阵 = 列向量约定下的转置，所以连续三个数就是一列。
-    Mat4::from_cols_array(&[v[0], v[1], v[2], 0.0, v[3], v[4], v[5], 0.0, v[6], v[7], v[8], 0.0, v[9], v[10], v[11], 1.0])
+    Mat4::from_cols_array(&[
+        v[0], v[1], v[2], 0.0, v[3], v[4], v[5], 0.0, v[6], v[7], v[8], 0.0, v[9], v[10], v[11],
+        1.0,
+    ])
 }
 
 /// 一个属性组。
 enum Group {
     Base(Vec<(String, Vec4)>),
     Colors(Vec<Vec4>),
-    Uvs { texture: String, coordinates: Vec<[f32; 2]> },
+    Uvs {
+        texture: String,
+        coordinates: Vec<[f32; 2]>,
+    },
 }
 
 /// 一个 `.model` 文件里的资源（组、物体）。键是 `(文件, id)`。
@@ -78,7 +96,11 @@ struct Document {
 }
 
 /// 解析 3MF。
-pub async fn parse(bytes: Vec<u8>, path: PathBuf, _io: Arc<dyn ResourceIo>) -> Result<Model, LoadError> {
+pub async fn parse(
+    bytes: Vec<u8>,
+    path: PathBuf,
+    _io: Arc<dyn ResourceIo>,
+) -> Result<Model, LoadError> {
     let archive = zip::Archive::open(&bytes)?;
     // 根模型的位置写在 `_rels/.rels` 里；找不到就用约定路径。
     let root_path = archive
@@ -87,7 +109,10 @@ pub async fn parse(bytes: Vec<u8>, path: PathBuf, _io: Arc<dyn ResourceIo>) -> R
         .and_then(|rels| {
             rels.children_named("Relationship")
                 .find(|r| r.attr("Type").is_some_and(|t| t.ends_with("/3dmodel")))
-                .and_then(|r| r.attr("Target").map(|t| t.trim_start_matches('/').to_string()))
+                .and_then(|r| {
+                    r.attr("Target")
+                        .map(|t| t.trim_start_matches('/').to_string())
+                })
         })
         .unwrap_or_else(|| "3D/3dmodel.model".into());
 
@@ -118,23 +143,32 @@ pub async fn parse(bytes: Vec<u8>, path: PathBuf, _io: Arc<dyn ResourceIo>) -> R
     // 贴图：按路径读一次，所有 UV 组共用。
     let mut texture_cache: HashMap<String, Option<Resource<Texture>>> = HashMap::new();
     for (texture_path, _) in document.textures.values() {
-        texture_cache.entry(texture_path.clone()).or_insert_with(|| {
-            archive
-                .read_named(texture_path)
-                .and_then(|b| texture_from_bytes(&format!("{}#{texture_path}", path.display()), &b, false))
-        });
+        texture_cache
+            .entry(texture_path.clone())
+            .or_insert_with(|| {
+                archive.read_named(texture_path).and_then(|b| {
+                    texture_from_bytes(&format!("{}#{texture_path}", path.display()), &b, false)
+                })
+            });
     }
 
     let mut builder = Builder {
         document: &document,
         textures: &texture_cache,
         meshes: Vec::new(),
-        materials: vec![Material::standard().with_base_color(Vec4::new(0.8, 0.8, 0.8, 1.0)).with_roughness(0.5)],
+        materials: vec![
+            Material::standard()
+                .with_base_color(Vec4::new(0.8, 0.8, 0.8, 1.0))
+                .with_roughness(0.5),
+        ],
         material_keys: HashMap::new(),
         nodes: Vec::new(),
         vertex_total: 0,
     };
-    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "3MF".into());
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "3MF".into());
     builder.nodes.push(ModelNode {
         name,
         ..Default::default()
@@ -149,29 +183,55 @@ pub async fn parse(bytes: Vec<u8>, path: PathBuf, _io: Arc<dyn ResourceIo>) -> R
     if builder.meshes.is_empty() {
         return Err(bad("3MF 里没有网格"));
     }
-    Ok(Model::new(builder.meshes, builder.materials, builder.nodes, vec![0]))
+    Ok(Model::new(
+        builder.meshes,
+        builder.materials,
+        builder.nodes,
+        vec![0],
+    ))
 }
 
-fn read_model(root: &xml::Element, file: &str, document: &mut Document, pending: &mut Vec<String>, is_root: bool) {
+fn read_model(
+    root: &xml::Element,
+    file: &str,
+    document: &mut Document,
+    pending: &mut Vec<String>,
+    is_root: bool,
+) {
     let key = |id: &str| (file.to_string(), id.to_string());
     if let Some(resources) = root.child("resources") {
         for element in &resources.children {
-            let Some(id) = element.attr("id") else { continue };
+            let Some(id) = element.attr("id") else {
+                continue;
+            };
             match element.name.as_str() {
                 "basematerials" => {
                     let bases = element
                         .children_named("base")
-                        .map(|b| (b.attr("name").unwrap_or("").to_string(), parse_color(b.attr("displaycolor").unwrap_or("#CCCCCC"))))
+                        .map(|b| {
+                            (
+                                b.attr("name").unwrap_or("").to_string(),
+                                parse_color(b.attr("displaycolor").unwrap_or("#CCCCCC")),
+                            )
+                        })
                         .collect();
                     document.groups.insert(key(id), Group::Base(bases));
                 }
                 "colorgroup" => {
-                    let colors = element.children_named("color").map(|c| parse_color(c.attr("color").unwrap_or("#FFFFFF"))).collect();
+                    let colors = element
+                        .children_named("color")
+                        .map(|c| parse_color(c.attr("color").unwrap_or("#FFFFFF")))
+                        .collect();
                     document.groups.insert(key(id), Group::Colors(colors));
                 }
                 "texture2d" => {
-                    let texture = element.attr("path").unwrap_or("").trim_start_matches('/').to_string();
-                    let clamp = element.attr("tilestyleu") == Some("clamp") || element.attr("tilestylev") == Some("clamp");
+                    let texture = element
+                        .attr("path")
+                        .unwrap_or("")
+                        .trim_start_matches('/')
+                        .to_string();
+                    let clamp = element.attr("tilestyleu") == Some("clamp")
+                        || element.attr("tilestylev") == Some("clamp");
                     document.textures.insert(key(id), (texture, clamp));
                 }
                 "texture2dgroup" => {
@@ -179,9 +239,20 @@ fn read_model(root: &xml::Element, file: &str, document: &mut Document, pending:
                     // 3MF 的 V 朝上（原点左下），引擎朝下。
                     let coordinates = element
                         .children_named("tex2coord")
-                        .map(|t| [t.attr_f32("u").unwrap_or(0.0), 1.0 - t.attr_f32("v").unwrap_or(0.0)])
+                        .map(|t| {
+                            [
+                                t.attr_f32("u").unwrap_or(0.0),
+                                1.0 - t.attr_f32("v").unwrap_or(0.0),
+                            ]
+                        })
                         .collect();
-                    document.groups.insert(key(id), Group::Uvs { texture, coordinates });
+                    document.groups.insert(
+                        key(id),
+                        Group::Uvs {
+                            texture,
+                            coordinates,
+                        },
+                    );
                 }
                 "object" => {
                     if let Some(components) = element.child("components") {
@@ -199,9 +270,16 @@ fn read_model(root: &xml::Element, file: &str, document: &mut Document, pending:
     }
     if is_root && let Some(build) = root.child("build") {
         for item in build.children_named("item") {
-            let file = item.attr("path").map_or_else(|| file.to_string(), |p| p.trim_start_matches('/').to_string());
+            let file = item.attr("path").map_or_else(
+                || file.to_string(),
+                |p| p.trim_start_matches('/').to_string(),
+            );
             if let Some(id) = item.attr("objectid") {
-                document.build.push((file, id.to_string(), parse_transform(item.attr("transform"))));
+                document.build.push((
+                    file,
+                    id.to_string(),
+                    parse_transform(item.attr("transform")),
+                ));
             }
         }
     }
@@ -214,7 +292,10 @@ enum Corner {
     /// 材质组第几项 → 材质表里的序号。
     Material(usize),
     Color(Vec4),
-    Uv { material: usize, uv: [f32; 2] },
+    Uv {
+        material: usize,
+        uv: [f32; 2],
+    },
 }
 
 struct Builder<'a> {
@@ -234,11 +315,17 @@ impl Builder<'_> {
         if let Some(&m) = self.material_keys.get(&key) {
             return m;
         }
-        let (name, color) = match self.document.groups.get(&(file.to_string(), id.to_string())) {
+        let (name, color) = match self
+            .document
+            .groups
+            .get(&(file.to_string(), id.to_string()))
+        {
             Some(Group::Base(bases)) => bases.get(index).cloned().unwrap_or_default(),
             _ => (String::new(), Vec4::splat(0.8)),
         };
-        let mut material = Material::standard().with_base_color(color).with_roughness(0.5);
+        let mut material = Material::standard()
+            .with_base_color(color)
+            .with_roughness(0.5);
         material.set_name(name);
         if color.w < 1.0 {
             material.set_blend_mode(kmaterial::BlendMode::Alpha);
@@ -253,8 +340,13 @@ impl Builder<'_> {
         if let Some(&m) = self.material_keys.get(&key) {
             return m;
         }
-        let mut material = Material::standard().with_base_color(Vec4::ONE).with_roughness(0.6);
-        if let Some((path, clamp)) = self.document.textures.get(&(file.to_string(), texture_id.to_string()))
+        let mut material = Material::standard()
+            .with_base_color(Vec4::ONE)
+            .with_roughness(0.6);
+        if let Some((path, clamp)) = self
+            .document
+            .textures
+            .get(&(file.to_string(), texture_id.to_string()))
             && let Some(Some(texture)) = self.textures.get(path)
         {
             let mut texture = texture.data_ref().expect("内存里建的资源一定就绪").clone();
@@ -264,7 +356,8 @@ impl Builder<'_> {
                 sampler.wrap_v = ktexture::WrapMode::ClampToEdge;
                 texture = texture.with_sampler(sampler);
             }
-            material = material.with_base_color_texture(Resource::new_ok(format!("{path}#{clamp}"), texture));
+            material = material
+                .with_base_color_texture(Resource::new_ok(format!("{path}#{clamp}"), texture));
         }
         self.materials.push(material);
         self.material_keys.insert(key, self.materials.len() - 1);
@@ -272,11 +365,22 @@ impl Builder<'_> {
     }
 
     fn resolve(&mut self, file: &str, pid: Option<&str>, index: Option<usize>) -> Corner {
-        let (Some(pid), Some(index)) = (pid, index) else { return Corner::None };
-        match self.document.groups.get(&(file.to_string(), pid.to_string())) {
+        let (Some(pid), Some(index)) = (pid, index) else {
+            return Corner::None;
+        };
+        match self
+            .document
+            .groups
+            .get(&(file.to_string(), pid.to_string()))
+        {
             Some(Group::Base(_)) => Corner::Material(self.material_for_base(file, pid, index)),
-            Some(Group::Colors(colors)) => colors.get(index).map_or(Corner::None, |c| Corner::Color(*c)),
-            Some(Group::Uvs { texture, coordinates }) => {
+            Some(Group::Colors(colors)) => colors
+                .get(index)
+                .map_or(Corner::None, |c| Corner::Color(*c)),
+            Some(Group::Uvs {
+                texture,
+                coordinates,
+            }) => {
                 let uv = coordinates.get(index).copied().unwrap_or([0.0, 0.0]);
                 let texture = texture.clone();
                 Corner::Uv {
@@ -289,19 +393,35 @@ impl Builder<'_> {
     }
 
     /// 实例化一个物体，返回新节点号。组件递归展开，深度超过 32 视为循环引用。
-    fn object(&mut self, file: &str, id: &str, transform: Mat4, depth: usize) -> Result<Option<usize>, LoadError> {
+    fn object(
+        &mut self,
+        file: &str,
+        id: &str,
+        transform: Mat4,
+        depth: usize,
+    ) -> Result<Option<usize>, LoadError> {
         if depth > 32 {
             return Err(bad("3MF 组件嵌套过深（多半是循环引用）"));
         }
-        let Some(object) = self.document.objects.get(&(file.to_string(), id.to_string())) else {
+        let Some(object) = self
+            .document
+            .objects
+            .get(&(file.to_string(), id.to_string()))
+        else {
             klog::warn!("3MF 引用了不存在的物体 {file}#{id}");
             return Ok(None);
         };
         let (scale, rotation, position) = transform.to_scale_rotation_translation();
         let index = self.nodes.len();
         self.nodes.push(ModelNode {
-            name: object.attr("name").map_or_else(|| format!("Object{id}"), str::to_string),
-            transform: NodeTransform { position, rotation, scale },
+            name: object
+                .attr("name")
+                .map_or_else(|| format!("Object{id}"), str::to_string),
+            transform: NodeTransform {
+                position,
+                rotation,
+                scale,
+            },
             ..Default::default()
         });
 
@@ -310,7 +430,10 @@ impl Builder<'_> {
             self.nodes[index].parts = parts;
         } else if let Some(levelset) = object.child("levelset")
             && let Some(mesh_id) = levelset.attr("meshid")
-            && let Some(source) = self.document.objects.get(&(file.to_string(), mesh_id.to_string()))
+            && let Some(source) = self
+                .document
+                .objects
+                .get(&(file.to_string(), mesh_id.to_string()))
             && let Some(mesh) = source.child("mesh")
         {
             klog::warn!("3MF 物体 {id} 是隐式函数（levelset），不求值，画它的包围网格 {mesh_id}");
@@ -320,9 +443,19 @@ impl Builder<'_> {
         if let Some(components) = object.child("components") {
             let mut children = Vec::new();
             for component in components.children_named("component") {
-                let component_file = component.attr("path").map_or_else(|| file.to_string(), |p| p.trim_start_matches('/').to_string());
-                let Some(object_id) = component.attr("objectid") else { continue };
-                if let Some(child) = self.object(&component_file, object_id, parse_transform(component.attr("transform")), depth + 1)? {
+                let component_file = component.attr("path").map_or_else(
+                    || file.to_string(),
+                    |p| p.trim_start_matches('/').to_string(),
+                );
+                let Some(object_id) = component.attr("objectid") else {
+                    continue;
+                };
+                if let Some(child) = self.object(
+                    &component_file,
+                    object_id,
+                    parse_transform(component.attr("transform")),
+                    depth + 1,
+                )? {
                     children.push(child);
                 }
             }
@@ -331,12 +464,23 @@ impl Builder<'_> {
         Ok(Some(index))
     }
 
-    fn mesh(&mut self, file: &str, object: &xml::Element, mesh: &xml::Element) -> Result<Vec<MeshPart>, LoadError> {
+    fn mesh(
+        &mut self,
+        file: &str,
+        object: &xml::Element,
+        mesh: &xml::Element,
+    ) -> Result<Vec<MeshPart>, LoadError> {
         let positions: Vec<Vec3> = mesh
             .child("vertices")
             .map(|v| {
                 v.children_named("vertex")
-                    .map(|p| Vec3::new(p.attr_f32("x").unwrap_or(0.0), p.attr_f32("y").unwrap_or(0.0), p.attr_f32("z").unwrap_or(0.0)))
+                    .map(|p| {
+                        Vec3::new(
+                            p.attr_f32("x").unwrap_or(0.0),
+                            p.attr_f32("y").unwrap_or(0.0),
+                            p.attr_f32("z").unwrap_or(0.0),
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -347,20 +491,40 @@ impl Builder<'_> {
         let mut batches: HashMap<Option<usize>, (Vec<Vertex>, bool)> = HashMap::new();
         let triangles = mesh.child("triangles");
         for triangle in triangles.iter().flat_map(|t| t.children_named("triangle")) {
-            let v = [triangle.attr_usize("v1"), triangle.attr_usize("v2"), triangle.attr_usize("v3")];
-            let Some(v) = v.iter().map(|i| i.and_then(|i| positions.get(i).copied())).collect::<Option<Vec<_>>>() else {
+            let v = [
+                triangle.attr_usize("v1"),
+                triangle.attr_usize("v2"),
+                triangle.attr_usize("v3"),
+            ];
+            let Some(v) = v
+                .iter()
+                .map(|i| i.and_then(|i| positions.get(i).copied()))
+                .collect::<Option<Vec<_>>>()
+            else {
                 return Err(bad("3MF 三角形引用了不存在的顶点"));
             };
             let pid = triangle.attr("pid").or(object_pid);
-            let p1 = triangle.attr_usize("p1").or(if triangle.attr("pid").is_none() { object_index } else { None });
+            let p1 = triangle
+                .attr_usize("p1")
+                .or(if triangle.attr("pid").is_none() {
+                    object_index
+                } else {
+                    None
+                });
             let p2 = triangle.attr_usize("p2").or(p1);
             let p3 = triangle.attr_usize("p3").or(p1);
-            let corners = [self.resolve(file, pid, p1), self.resolve(file, pid, p2), self.resolve(file, pid, p3)];
+            let corners = [
+                self.resolve(file, pid, p1),
+                self.resolve(file, pid, p2),
+                self.resolve(file, pid, p3),
+            ];
             let material = match corners[0] {
                 Corner::Material(m) | Corner::Uv { material: m, .. } => Some(m),
                 _ => None,
             };
-            let batch = batches.entry(material).or_insert_with(|| (Vec::new(), false));
+            let batch = batches
+                .entry(material)
+                .or_insert_with(|| (Vec::new(), false));
             for (k, corner) in corners.iter().enumerate() {
                 let (color, uv) = match *corner {
                     Corner::Color(c) => {
@@ -398,7 +562,11 @@ impl Builder<'_> {
             let material = match key {
                 Some(m) => m,
                 None if colored => {
-                    self.materials.push(Material::standard().with_base_color(Vec4::ONE).with_roughness(0.5));
+                    self.materials.push(
+                        Material::standard()
+                            .with_base_color(Vec4::ONE)
+                            .with_roughness(0.5),
+                    );
                     self.materials.len() - 1
                 }
                 None => 0,

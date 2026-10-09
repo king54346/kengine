@@ -102,7 +102,7 @@ pub use menu::{Layout as MenuLayout, MenuAction, MenuKey};
 pub use popover::{Align, Placement, Side};
 pub use slider::{Orientation, Slider, TrackClick};
 pub use text_edit::TextEdit;
-pub use widgets::{Theme, WidgetUi};
+pub use widgets::{Theme, WidgetUi, srgb};
 
 /// 常用类型的集中导出。
 pub mod prelude {

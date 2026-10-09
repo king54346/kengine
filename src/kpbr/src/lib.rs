@@ -18,11 +18,14 @@
 
 #![warn(missing_docs)]
 
+pub mod phong;
 pub mod physical;
 pub mod points;
+pub mod shadow_catcher;
+pub mod ultrahdr;
 pub mod unlit;
 pub mod wireframe;
-pub mod ultrahdr;
+pub mod wood;
 
 pub mod brdf;
 pub mod hdr;
@@ -139,8 +142,8 @@ impl Environment {
     /// 真实场景的光照分布——窗户的方向、树荫下的绿色反射、傍晚天空的
     /// 渐变，这些只能从实拍来。
     ///
-    /// [`Environment::sky`] 仍然保留：它负责画背景（HDR 的镜面部分
-    /// 还没接进着色器，见 `next.md`）。想让背景也用 HDR 得等那一步。
+    /// [`Environment::sky`] 仍然保留：没装 HDR 时它负责画背景和环境光。
+    /// 装了 HDR 之后背景就是那张图（`Scene::set_background_blurriness` 可以把它模糊掉）。
     ///
     /// 采样数比程序化天空高：实拍图里有窗户、灯这类很亮很小的区域，
     /// 采样不够会让它们时有时无。**这是一次 96×96 的球面积分，

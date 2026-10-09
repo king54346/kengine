@@ -10,8 +10,17 @@
 //! ```text
 //! "KPAK" | 版本 u32 | 目录长度 u32 | 目录 | 数据区
 //!                                     ↑
-//!            [路径长度 u32 | 路径 UTF-8 | 偏移 u64 | 长度 u64] × N
+//!   [路径长度 u32 | 路径 UTF-8 | 偏移 u64 | 存储长度 u64 | 原始长度 u64 | 标志 u32] × N
 //! ```
+//!
+//! 标志的第 0 位表示这一项用 deflate 压过（[`PackWriter::compressed`] 打开）。
+//! 版本 1 的包（没有后两个字段、从不压缩）照样能读。
+//!
+//! # 压缩
+//!
+//! 逐项压、逐项解：读一个资源只解它自己，不用把整个包解开。压完省不到
+//! 一成的项（JPG、PNG、OGG 这些本来就压过的）原样存——解压要花时间，
+//! 省不了几个字节就不值得。
 //!
 //! 目录放在**前面**：读包时只需要顺序读一小段就能建好索引，
 //! 不必先跳到文件末尾——这一点在将来接网络流式读取时会变得重要。
@@ -32,13 +41,16 @@
 use crate::{error::LoadError, io::ResourceIo};
 use fxhash::FxHashMap;
 use ktask::BoxedFuture;
-use std::{path::Path, sync::Arc};
+use std::{borrow::Cow, io::Read, path::Path, sync::Arc};
 
 /// 包文件的魔数。
 pub const PACK_MAGIC: &[u8; 4] = b"KPAK";
 
 /// 包格式版本。
-pub const PACK_VERSION: u32 = 1;
+pub const PACK_VERSION: u32 = 2;
+
+/// 目录项标志：这一项用 deflate 压过。
+const FLAG_DEFLATE: u32 = 1;
 
 /// 把路径统一成包内的规范形式。
 ///
@@ -52,12 +64,23 @@ fn normalize(path: &Path) -> String {
 #[derive(Debug, Default)]
 pub struct PackWriter {
     entries: Vec<(String, Vec<u8>)>,
+    /// 写出时逐项尝试 deflate。
+    compress: bool,
 }
 
 impl PackWriter {
     /// 新建一个空包。
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 写出时逐项 deflate 压缩（省不到一成的项原样存）。
+    ///
+    /// 场景、着色器、glTF 的 JSON、未压缩的音频这些文本 / 原始数据通常能省
+    /// 一半以上；已经压过的图片、音频几乎不变，会被自动跳过。
+    pub fn compressed(mut self) -> Self {
+        self.compress = true;
+        self
     }
 
     /// 放入一份内容。同名项后放的会覆盖先放的。
@@ -124,15 +147,33 @@ impl PackWriter {
         let mut entries = self.entries;
         entries.sort_by(|a, b| a.0.cmp(&b.0));
 
+        // 每项最终存什么：(存储的字节, 原始长度, 标志)。
+        let stored: Vec<(Cow<'_, [u8]>, u64, u32)> = entries
+            .iter()
+            .map(|(_, contents)| {
+                let raw = contents.len() as u64;
+                if self.compress && contents.len() >= 64 {
+                    let packed = deflate(contents);
+                    // 省不到一成就不压：解压的时间换不回几个字节。
+                    if (packed.len() as f64) < contents.len() as f64 * 0.9 {
+                        return (Cow::Owned(packed), raw, FLAG_DEFLATE);
+                    }
+                }
+                (Cow::Borrowed(contents.as_slice()), raw, 0)
+            })
+            .collect();
+
         let mut directory = Vec::new();
         let mut offset: u64 = 0;
-        for (name, contents) in &entries {
+        for ((name, _), (bytes, raw, flags)) in entries.iter().zip(&stored) {
             let name = name.as_bytes();
             directory.extend_from_slice(&(name.len() as u32).to_le_bytes());
             directory.extend_from_slice(name);
             directory.extend_from_slice(&offset.to_le_bytes());
-            directory.extend_from_slice(&(contents.len() as u64).to_le_bytes());
-            offset += contents.len() as u64;
+            directory.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            directory.extend_from_slice(&raw.to_le_bytes());
+            directory.extend_from_slice(&flags.to_le_bytes());
+            offset += bytes.len() as u64;
         }
 
         let mut out = Vec::with_capacity(16 + directory.len() + offset as usize);
@@ -140,8 +181,8 @@ impl PackWriter {
         out.extend_from_slice(&PACK_VERSION.to_le_bytes());
         out.extend_from_slice(&(directory.len() as u32).to_le_bytes());
         out.extend_from_slice(&directory);
-        for (_, contents) in &entries {
-            out.extend_from_slice(contents);
+        for (bytes, _, _) in &stored {
+            out.extend_from_slice(bytes);
         }
         out
     }
@@ -159,8 +200,8 @@ impl PackWriter {
 /// 那时只需要换这一个类型的实现。
 pub struct PackResourceIo {
     data: Vec<u8>,
-    /// 路径 → 数据区里的 `(偏移, 长度)`。
-    index: FxHashMap<String, (usize, usize)>,
+    /// 路径 → 数据区里的这一项。
+    index: FxHashMap<String, Entry>,
     /// 数据区在 `data` 里的起始位置。
     body: usize,
 }
@@ -172,6 +213,28 @@ impl std::fmt::Debug for PackResourceIo {
             .field("bytes", &self.data.len())
             .finish()
     }
+}
+
+/// 目录里的一项。
+#[derive(Debug, Clone, Copy)]
+struct Entry {
+    /// 在数据区里的偏移。
+    offset: usize,
+    /// 存在包里的字节数（压过的话是压缩后的）。
+    stored: usize,
+    /// 原始字节数。
+    raw: usize,
+    flags: u32,
+}
+
+/// deflate 压一段字节。
+fn deflate(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder =
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    // 写进 Vec 不会失败。
+    let _ = encoder.write_all(bytes);
+    encoder.finish().unwrap_or_default()
 }
 
 /// 解析资源包时出的错。
@@ -187,6 +250,8 @@ pub enum PackError {
     BadPath,
     /// 某一项声明的范围超出了数据区。
     OutOfBounds(String),
+    /// 某一项的压缩数据解不开，或者解出来的长度不对。
+    Corrupt(String),
 }
 
 impl std::fmt::Display for PackError {
@@ -197,6 +262,7 @@ impl std::fmt::Display for PackError {
             Self::Truncated => write!(f, "资源包被截断了"),
             Self::BadPath => write!(f, "资源包里有非 UTF-8 的路径"),
             Self::OutOfBounds(name) => write!(f, "「{name}」声明的数据范围超出了包"),
+            Self::Corrupt(name) => write!(f, "「{name}」的压缩数据损坏"),
         }
     }
 }
@@ -218,9 +284,11 @@ impl PackResourceIo {
             return Err(PackError::BadMagic);
         }
         let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
-        if version != PACK_VERSION {
+        // 版本 1：没有原始长度和标志两个字段，从不压缩。照样能读。
+        if version != 1 && version != PACK_VERSION {
             return Err(PackError::UnsupportedVersion(version));
         }
+        let extra = if version >= 2 { 12 } else { 0 };
         let directory_len = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
         let body = 12 + directory_len;
         if data.len() < body {
@@ -237,7 +305,7 @@ impl PackResourceIo {
                 u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
             cursor += 4;
 
-            if cursor + name_len + 16 > body {
+            if cursor + name_len + 16 + extra > body {
                 return Err(PackError::Truncated);
             }
             let name = std::str::from_utf8(&data[cursor..cursor + name_len])
@@ -247,14 +315,34 @@ impl PackResourceIo {
 
             let offset = u64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap()) as usize;
             cursor += 8;
-            let length = u64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap()) as usize;
+            let stored = u64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap()) as usize;
             cursor += 8;
+            let (raw, flags) = if version >= 2 {
+                let raw = u64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap()) as usize;
+                let flags = u32::from_le_bytes(data[cursor + 8..cursor + 12].try_into().unwrap());
+                cursor += 12;
+                (raw, flags)
+            } else {
+                (stored, 0)
+            };
 
             // 越界的项要在打开包的时候就发现，而不是等到某个资源被请求时才炸。
-            if body + offset + length > data.len() {
+            if body
+                .checked_add(offset)
+                .and_then(|v| v.checked_add(stored))
+                .is_none_or(|end| end > data.len())
+            {
                 return Err(PackError::OutOfBounds(name));
             }
-            index.insert(name, (offset, length));
+            index.insert(
+                name,
+                Entry {
+                    offset,
+                    stored,
+                    raw,
+                    flags,
+                },
+            );
         }
 
         Ok(Self { data, index, body })
@@ -281,10 +369,33 @@ impl PackResourceIo {
         self.index.keys().map(String::as_str)
     }
 
-    /// 取某一项的字节切片。
-    pub fn get(&self, path: &Path) -> Option<&[u8]> {
-        let (offset, length) = *self.index.get(&normalize(path))?;
-        Some(&self.data[self.body + offset..self.body + offset + length])
+    /// 取某一项的内容。没压缩的直接借包里的那一段，压过的现解一份。
+    ///
+    /// 解不开（包损坏）时返回 [`None`] 并记一条日志。
+    pub fn get(&self, path: &Path) -> Option<Cow<'_, [u8]>> {
+        let name = normalize(path);
+        let entry = *self.index.get(&name)?;
+        let bytes = &self.data[self.body + entry.offset..self.body + entry.offset + entry.stored];
+        if entry.flags & FLAG_DEFLATE == 0 {
+            return Some(Cow::Borrowed(bytes));
+        }
+        let mut out = Vec::with_capacity(entry.raw);
+        let ok = flate2::read::DeflateDecoder::new(bytes)
+            .take(entry.raw as u64 + 1)
+            .read_to_end(&mut out)
+            .is_ok();
+        if !ok || out.len() != entry.raw {
+            klog::error!("{}", PackError::Corrupt(name));
+            return None;
+        }
+        Some(Cow::Owned(out))
+    }
+
+    /// 某一项在包里是不是压过的。
+    pub fn is_compressed(&self, path: &Path) -> bool {
+        self.index
+            .get(&normalize(path))
+            .is_some_and(|e| e.flags & FLAG_DEFLATE != 0)
     }
 }
 
@@ -292,7 +403,7 @@ impl ResourceIo for PackResourceIo {
     fn load_file<'a>(&'a self, path: &'a Path) -> BoxedFuture<'a, Result<Vec<u8>, LoadError>> {
         Box::pin(async move {
             self.get(path)
-                .map(<[u8]>::to_vec)
+                .map(Cow::into_owned)
                 .ok_or_else(|| LoadError::Io {
                     path: path.to_path_buf(),
                     source: Arc::new(std::io::Error::new(
@@ -399,6 +510,75 @@ mod test {
 
     fn read(io: &dyn ResourceIo, path: &str) -> Result<Vec<u8>, LoadError> {
         ktask::block_on(io.load_file(Path::new(path)))
+    }
+
+    #[test]
+    fn a_compressed_pack_roundtrips_and_skips_incompressible_entries() {
+        let text = "hello kengine ".repeat(500).into_bytes();
+        // 伪随机字节：压不动，应当原样存。
+        let mut state = 0x1234_5678u32;
+        let noise: Vec<u8> = (0..4096)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect();
+        let mut writer = PackWriter::new().compressed();
+        writer.add("text.json", text.clone());
+        writer.add("noise.bin", noise.clone());
+        writer.add("tiny.txt", b"hi".to_vec());
+        let bytes = writer.finish();
+        assert!(
+            bytes.len() < text.len() / 4 + noise.len() + 200,
+            "文本没被压缩：{} 字节",
+            bytes.len()
+        );
+
+        let io = PackResourceIo::from_bytes(&bytes).unwrap();
+        assert!(io.is_compressed(Path::new("text.json")));
+        assert!(
+            !io.is_compressed(Path::new("noise.bin")),
+            "压不动的项该原样存"
+        );
+        assert!(!io.is_compressed(Path::new("tiny.txt")), "太小的项不值得压");
+        assert_eq!(read(&io, "text.json").unwrap(), text);
+        assert_eq!(read(&io, "noise.bin").unwrap(), noise);
+        assert_eq!(read(&io, "tiny.txt").unwrap(), b"hi");
+    }
+
+    #[test]
+    fn a_version_1_pack_still_opens() {
+        // 手工拼一个旧格式的包：目录项只有 路径 + 偏移 + 长度。
+        let name = b"a.txt";
+        let mut directory = Vec::new();
+        directory.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        directory.extend_from_slice(name);
+        directory.extend_from_slice(&0u64.to_le_bytes());
+        directory.extend_from_slice(&5u64.to_le_bytes());
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(PACK_MAGIC);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&(directory.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&directory);
+        bytes.extend_from_slice(b"hello");
+
+        let io = PackResourceIo::from_bytes(&bytes).unwrap();
+        assert_eq!(read(&io, "a.txt").unwrap(), b"hello");
+    }
+
+    #[test]
+    fn corrupt_compressed_data_fails_the_read_not_the_process() {
+        let mut writer = PackWriter::new().compressed();
+        writer.add("text.json", "abc".repeat(1000).into_bytes());
+        let mut bytes = writer.finish();
+        let last = bytes.len() - 10;
+        for b in &mut bytes[last..] {
+            *b ^= 0xff;
+        }
+        let io = PackResourceIo::from_bytes(&bytes).unwrap();
+        assert!(read(&io, "text.json").is_err());
     }
 
     #[test]
