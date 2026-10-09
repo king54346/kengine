@@ -330,3 +330,57 @@ fn gltf_extension_samples_load() {
         }
     }
 }
+
+#[test]
+fn every_vrml_sample_imports() {
+    let Some(root) = assets() else {
+        eprintln!("跳过：没有 examples/threejs 资源");
+        return;
+    };
+    let io: std::sync::Arc<dyn kengine::kasset::ResourceIo> = std::sync::Arc::new(kengine::kasset::FsResourceIo);
+    for name in [
+        "camera", "creaseAngle", "crystal", "elevationGrid1", "elevationGrid2", "extrusion1", "extrusion2",
+        "extrusion3", "house", "lines", "linesTransparent", "meshWithLines", "meshWithTexture", "multilineString",
+        "pixelTexture", "points",
+    ] {
+        let path = root.join(format!("models/vrml/{name}.wrl"));
+        let bytes = std::fs::read(&path).unwrap();
+        let scene = ktask::block_on(kimport::vrml::load(bytes, path, io.clone()))
+            .unwrap_or_else(|error| panic!("{name}.wrl 导入失败：{error}"));
+        let (min, max) = scene.bounds;
+        assert!(min.is_finite() && max.is_finite() && min.cmple(max).all(), "{name}：包围盒不对 {min:?} {max:?}");
+        let has_content =
+            scene.model.triangle_count() > 0 || scene.lines.is_some() || scene.points.is_some();
+        assert!(has_content, "{name}：什么都没读出来");
+        for mesh in scene.model.meshes() {
+            assert!(mesh.is_valid(), "{name}：生成了越界的网格");
+        }
+        eprintln!(
+            "{name}: {} 三角形 / {} 网格 / {} 材质 / {} 线段 / {} 点 / 背景 {}",
+            scene.model.triangle_count(),
+            scene.model.meshes().len(),
+            scene.model.materials().len(),
+            scene.lines.as_ref().map_or(0, |l| l.segment_count()),
+            scene.points.as_ref().map_or(0, |p| p.len()),
+            scene.background.is_some(),
+        );
+    }
+}
+
+#[test]
+fn vrml_house_has_its_textures_and_mesh_with_texture_reads_the_gif() {
+    let scene = import!(kimport::vrml::load, "models/vrml/meshWithTexture.wrl");
+    assert!(
+        scene.model.materials().iter().any(|m| m.base_color_texture().is_some()),
+        "map.gif 该被解码并挂上"
+    );
+    let house = import!(kimport::vrml::load, "models/vrml/house.wrl");
+    assert!(house.model.triangle_count() > 1_000);
+    assert!(house.background.is_some());
+}
+
+#[test]
+fn xyz_reads_the_helix() {
+    let cloud = import!(kimport::xyz::load, "models/xyz/helix_201.xyz");
+    assert_eq!(cloud.len(), 201);
+}

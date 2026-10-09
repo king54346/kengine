@@ -282,3 +282,22 @@ remote 上、把这类"写了但没验证过"的角落找出来跑一遍。
 cpal/symphonia→kaudio、boa→kscript、ab_glyph→kfont、taffy→kui）、
 纯 Rust 工具链（这也是选 rapier 不选 Jolt、选 cpal 不选 OpenAL、选 boa 不选
 rquickjs/deno_core 的唯一理由）、2D 不走节点组件（立即模式精灵）。
+
+## 九、three.js `webgl_loader_*` 第二批（md2_control … lod，25 个）
+
+25 个里有 22 个（`loader_md2_control` 到 `loader_vox`）前几轮已经移植并注册，
+这次核实后真正缺的是 `loader_vrml`、`loader_xyz`、`lod` 三个，
+对应补的引擎能力：
+
+| 缺口 | 补在哪 | 测试 |
+|---|---|---|
+| VRML 97 导入 | `kimport::vrml`：通用语法层（DEF/USE、跨行字符串、ROUTE/PROTO/脚本接口跳过）+ 建场景层（IFS 逐面/逐顶点属性、ccw/solid/convex/creaseAngle、ElevationGrid、Extrusion 含凹端盖、线、点、Background 渐变、PixelTexture） | 20 条单元 + 16 个真实样本全部导入 |
+| XYZ 点云 | `kimport::xyz`，产物复用 `pcd::PointCloud` | 4 条单元 + helix 样本 |
+| 场景级 LOD | `kscene::Lod`：在 `Scene::update` 第一趟里按活动相机距离选级，只影响 `global_visible`、不改写用户 `visible`；滞回；可冻结；可序列化 | 11 条（含同帧切级、存读往返） |
+| 线框 | `Mesh::wireframe` + `kpbr::wireframe`：重心坐标进 `uv1`、表面钩子按 `fwidth` 丢片元，照常受光，不依赖 `POLYGON_MODE_LINE` | 几何 + 着色器拼接校验 |
+| 二十面体球 / 圆锥 | `Mesh::icosphere`、`Mesh::cone` | 三角形数、绕序朝外 |
+| 不受光材质 | `kpbr::unlit::UnlitMaterial`（原来是 `loader_common.rs` 里内联的钩子，每块贴图各建一份着色器资源；现在全进程共用一份） | 着色器拼接校验 |
+| GIF 解码 | `ktexture` 自带 GIF 首帧解码（`image` 的 gif 特性要的 `gif` 版本和锁定的依赖树对不上，LZW 用已有的 `weezl`） | 调色板/透明色/隔行/截断 |
+
+**未做**：VRML 的灯光、Viewpoint、Text、Inline、PROTO 实例化、ROUTE 驱动的交互
+动画（`house.wrl` 的门不会开）；GIF 只取首帧；线框在阴影与 SSAO 预通道里是实心的。

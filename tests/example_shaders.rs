@@ -70,6 +70,50 @@ fn every_example_hook_compiles() {
             "new/lights_custom.wgsl",
             include_str!("../examples/kengine/new/lights_custom.wgsl"),
         ),
+        (
+            "terrain_splat.wgsl",
+            include_str!("../examples/terrain_splat.wgsl"),
+        ),
+        (
+            "new/materials_toon.wgsl",
+            include_str!("../examples/kengine/new/materials_toon.wgsl"),
+        ),
+        (
+            "new/materials_matcap.wgsl",
+            include_str!("../examples/kengine/new/materials_matcap.wgsl"),
+        ),
+        (
+            "new/materials_basic.wgsl",
+            include_str!("../examples/kengine/new/materials_basic.wgsl"),
+        ),
+        (
+            "new/materialx_noise.wgsl",
+            include_str!("../examples/kengine/new/materialx_noise.wgsl"),
+        ),
+        (
+            "new/materials_alphahash.wgsl",
+            include_str!("../examples/kengine/new/materials_alphahash.wgsl"),
+        ),
+        (
+            "new/materials_transmission.wgsl",
+            include_str!("../examples/kengine/new/materials_transmission.wgsl"),
+        ),
+        (
+            "new/materials_sss.wgsl",
+            include_str!("../examples/kengine/new/materials_sss.wgsl"),
+        ),
+        (
+            "new/materials_displacementmap.wgsl",
+            include_str!("../examples/kengine/new/materials_displacementmap.wgsl"),
+        ),
+        (
+            "new/materials_lightmap.wgsl",
+            include_str!("../examples/kengine/new/materials_lightmap.wgsl"),
+        ),
+        (
+            "new/loader_nrrd.wgsl",
+            include_str!("../examples/kengine/new/loader_nrrd.wgsl"),
+        ),
     ] {
         check(name, source);
     }
