@@ -1,7 +1,7 @@
 //! 物理世界：刚体 / 碰撞体 / 关节的容器，以及步进与查询的入口。
 
 use crate::{
-    BodyHandle, ColliderHandle, JointHandle,
+    BodyHandle, ColliderHandle, JointHandle, MultibodyJointHandle,
     body::{BodyMut, BodyRef, RigidBodyDesc},
     collider::{ColliderDesc, ColliderMut, ColliderRef, ColliderShape, InteractionGroups},
     convert::{from_rv, to_rp, to_rv},
@@ -393,9 +393,50 @@ impl PhysicsWorld {
         self.inner.impulse_joints().any(|(h, _)| h == handle.0)
     }
 
-    /// 世界里的关节数量。
+    /// 世界里的关节数量（impulse joints，不含多体关节）。
     pub fn joint_count(&self) -> usize {
         self.inner.impulse_joints().count()
+    }
+
+    // ───────────────────── 多体关节 ─────────────────────
+
+    /// 用多体关节把两个刚体连成运动学链上的一环。
+    ///
+    /// 同一份 [`JointDesc`] 两种关节通用：自由度、限位、锚点的语义完全一样，
+    /// 区别只在求解器走哪条路。多体链整条一起解，长链不会被越拉越长，
+    /// 适合布娃娃的脊柱、四肢这种链式结构；代价是成链规则更严：
+    ///
+    /// - `body2` 必须是链的末端（还不是任何链上的一环）；
+    /// - 不能成环。
+    ///
+    /// 违反时返回 `None`，世界里什么都没加。调用方这时应回落到
+    /// [`add_joint`](Self::add_joint)。
+    pub fn add_multibody_joint(
+        &mut self,
+        body1: BodyHandle,
+        body2: BodyHandle,
+        desc: &JointDesc,
+    ) -> Option<MultibodyJointHandle> {
+        self.inner
+            .insert_multibody_joint(body1.0, body2.0, desc.build())
+            .map(MultibodyJointHandle)
+    }
+
+    /// 删一个多体关节。
+    pub fn remove_multibody_joint(&mut self, handle: MultibodyJointHandle) {
+        self.inner.remove_multibody_joint(handle.0);
+    }
+
+    /// 多体关节是否还存在。
+    pub fn has_multibody_joint(&self, handle: MultibodyJointHandle) -> bool {
+        self.inner
+            .multibody_joints()
+            .any(|(h, _, _, _)| h == handle.0)
+    }
+
+    /// 世界里的多体关节数量。
+    pub fn multibody_joint_count(&self) -> usize {
+        self.inner.multibody_joints().count()
     }
 
     // ───────────────────────── 查询 ─────────────────────────
@@ -1297,6 +1338,111 @@ mod test {
 
         assert_eq!(world.stats().body_count, 2);
         assert_eq!(world.stats().collider_count, 2);
+    }
+
+    #[test]
+    fn multibody_joints_form_a_chain_that_holds_together() {
+        use crate::JointDesc;
+
+        let mut world = PhysicsWorld::new();
+        let root = world.add_body(&RigidBodyDesc::fixed().with_position(Vec3::Y * 10.0), 0);
+        let mid = world.add_body(&RigidBodyDesc::dynamic().with_position(Vec3::Y * 9.0), 1);
+        let tip = world.add_body(&RigidBodyDesc::dynamic().with_position(Vec3::Y * 8.0), 2);
+        for b in [mid, tip] {
+            world
+                .add_collider(&ColliderDesc::ball(0.3), Some(b), 0)
+                .unwrap();
+        }
+
+        let j1 = world
+            .add_multibody_joint(
+                root,
+                mid,
+                &JointDesc::spherical(Vec3::NEG_Y * 0.5, Vec3::Y * 0.5, Default::default()),
+            )
+            .expect("root → mid 该成链");
+        let j2 = world
+            .add_multibody_joint(
+                mid,
+                tip,
+                &JointDesc::spherical(Vec3::NEG_Y * 0.5, Vec3::Y * 0.5, Default::default()),
+            )
+            .expect("mid → tip 该成链");
+
+        assert!(world.has_multibody_joint(j1));
+        assert!(world.has_multibody_joint(j2));
+        assert_eq!(world.multibody_joint_count(), 2);
+        // 多体关节不占用 impulse 计数。
+        assert_eq!(world.joint_count(), 0);
+
+        step_for(&mut world, 2.0);
+
+        let mid_p = world.body(mid).unwrap().position();
+        let tip_p = world.body(tip).unwrap().position();
+        assert!((mid_p.y - 9.0).abs() < 0.3, "链节 mid 掉了：{mid_p:?}");
+        assert!((tip_p.y - 8.0).abs() < 0.5, "链节 tip 掉了：{tip_p:?}");
+        assert!(
+            ((mid_p - tip_p).length() - 1.0).abs() < 0.15,
+            "链节被拉长了：{mid_p:?} vs {tip_p:?}"
+        );
+    }
+
+    #[test]
+    fn multibody_joints_reject_cycles_and_reused_chain_links() {
+        use crate::JointDesc;
+
+        let mut world = PhysicsWorld::new();
+        let a = world.add_body(&RigidBodyDesc::dynamic(), 0);
+        let b = world.add_body(&RigidBodyDesc::dynamic(), 1);
+        let desc = || JointDesc::fixed(Vec3::ZERO, Vec3::ZERO);
+
+        world
+            .add_multibody_joint(a, b, &desc())
+            .expect("a → b 该成链");
+        // b 已经是链上的一环，不能再当 body2 接第二条边（成环）。
+        assert!(
+            world.add_multibody_joint(b, a, &desc()).is_none(),
+            "成环的关节该返回 None"
+        );
+        assert_eq!(world.multibody_joint_count(), 1);
+    }
+
+    #[test]
+    fn removing_a_multibody_joint_frees_its_bodies() {
+        use crate::JointDesc;
+
+        let mut world = PhysicsWorld::new();
+        let a = world.add_body(&RigidBodyDesc::dynamic(), 0);
+        let b = world.add_body(&RigidBodyDesc::dynamic(), 1);
+        let desc = JointDesc::fixed(Vec3::ZERO, Vec3::ZERO);
+
+        let j = world
+            .add_multibody_joint(a, b, &desc)
+            .expect("a → b 该成链");
+        world.remove_multibody_joint(j);
+        assert!(!world.has_multibody_joint(j));
+        assert_eq!(world.multibody_joint_count(), 0);
+        // 链散了，b 又是自由身，可以重新成链。
+        assert!(
+            world.add_multibody_joint(a, b, &desc).is_some(),
+            "删掉之后该能重新成链"
+        );
+    }
+
+    #[test]
+    fn removing_a_body_cleans_up_its_multibody_joints() {
+        use crate::JointDesc;
+
+        let mut world = PhysicsWorld::new();
+        let a = world.add_body(&RigidBodyDesc::dynamic(), 0);
+        let b = world.add_body(&RigidBodyDesc::dynamic(), 1);
+        let j = world
+            .add_multibody_joint(a, b, &JointDesc::fixed(Vec3::ZERO, Vec3::ZERO))
+            .expect("a → b 该成链");
+
+        world.remove_body(a);
+        assert!(!world.has_multibody_joint(j));
+        assert_eq!(world.multibody_joint_count(), 0);
     }
 
     #[test]

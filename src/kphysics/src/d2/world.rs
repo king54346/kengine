@@ -23,6 +23,14 @@ pub struct BodyHandle(pub(crate) rapier2d::dynamics::RigidBodyHandle);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct JointHandle(pub(crate) rapier2d::dynamics::ImpulseJointHandle);
 
+/// 2D 多体关节句柄（multibody joint：运动学链上的一环）。
+///
+/// 与 [`JointHandle`] 是两个独立的命名空间，不要混用。插入返回 `None`
+/// 表示这次连接会构成非法链（成环、或 `body2` 已经是链上的一环），
+/// 调用方应回落到普通关节。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MultibodyJointHandle(pub(crate) rapier2d::dynamics::MultibodyJointHandle);
+
 /// 2D 碰撞体的句柄。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ColliderHandle(pub(crate) rapier2d::geometry::ColliderHandle);
@@ -443,9 +451,43 @@ impl PhysicsWorld {
         self.inner.impulse_joints().any(|(h, _)| h == handle.0)
     }
 
-    /// 世界里的关节数量。
+    /// 世界里的关节数量（只计 impulse joints，不含 multibody）。
     pub fn joint_count(&self) -> usize {
         self.inner.impulse_joints().count()
+    }
+
+    /// 把两个刚体连成一条运动学链上的一环（multibody joint）。
+    ///
+    /// 连接两端都还没有链：各建一条新链，把 `body1` 当根。
+    /// 返回 `None` 表示这次连接会构成非法链（成环、或 `body2` 已经是
+    /// 链上的一环：rapier 要求 `body2` 必须是某条链的根），调用方应
+    /// 回落到 [`PhysicsWorld::add_joint`]。
+    pub fn add_multibody_joint(
+        &mut self,
+        body1: BodyHandle,
+        body2: BodyHandle,
+        desc: &JointDesc,
+    ) -> Option<MultibodyJointHandle> {
+        self.inner
+            .insert_multibody_joint(body1.0, body2.0, desc.build())
+            .map(MultibodyJointHandle)
+    }
+
+    /// 删一个多体关节。删完链可能断成几截，这是 rapier 的正常行为。
+    pub fn remove_multibody_joint(&mut self, handle: MultibodyJointHandle) {
+        self.inner.remove_multibody_joint(handle.0);
+    }
+
+    /// 多体关节是否还存在。
+    pub fn has_multibody_joint(&self, handle: MultibodyJointHandle) -> bool {
+        self.inner
+            .multibody_joints()
+            .any(|(h, _, _, _)| h == handle.0)
+    }
+
+    /// 世界里的多体关节数量。
+    pub fn multibody_joint_count(&self) -> usize {
+        self.inner.multibody_joints().count()
     }
 
     // ───────────────────────── 查询 ─────────────────────────

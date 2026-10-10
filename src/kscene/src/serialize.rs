@@ -140,6 +140,14 @@ impl Visit for Joint {
             self.set_bodies(body1, body2);
         }
 
+        // 后加的字段，老存档里没有：读不到就当普通关节。
+        let mut multibody = self.is_multibody();
+        if multibody.visit("Multibody", &mut region).is_ok() {
+            self.set_multibody(multibody);
+        } else if region.is_reading() {
+            self.set_multibody(false);
+        }
+
         Ok(())
     }
 }
@@ -1060,6 +1068,39 @@ mod test {
 
         restored.step_physics(1.0 / 60.0);
         assert_eq!(restored.physics().joint_count(), 1, "关节没被重建出来");
+    }
+
+    #[test]
+    fn a_multibody_flag_survives_a_roundtrip() {
+        // `Multibody` 是后加的字段：存了再读回来，标记该还在；
+        // 读回来跑一步，该建出多体句柄而不是普通句柄。
+        let mut scene = Scene::new();
+        let a = scene.add_node(Node::new("a").with_rigid_body(RigidBody::fixed()));
+        let b = scene.add_node(
+            Node::new("b")
+                .with_position(Vec3::X)
+                .with_rigid_body(RigidBody::dynamic())
+                .with_collider(Collider::ball(0.3)),
+        );
+        let joint = scene.add_node(Node::new("joint").with_joint(Joint::multibody(
+            a,
+            b,
+            JointDesc::fixed(Vec3::X, Vec3::ZERO),
+        )));
+
+        let mut restored = roundtrip(&mut scene);
+
+        let component = restored[joint].joint().unwrap();
+        assert!(component.is_multibody(), "多体标记在往返中丢了");
+
+        restored.step_physics(1.0 / 60.0);
+        let component = restored[joint].joint().unwrap();
+        assert!(
+            component.native_multibody().is_some(),
+            "读档后该建出多体句柄"
+        );
+        assert_eq!(restored.physics().multibody_joint_count(), 1);
+        assert_eq!(restored.physics().joint_count(), 0);
     }
 
     #[test]

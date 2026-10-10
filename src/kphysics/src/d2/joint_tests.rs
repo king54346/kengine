@@ -183,6 +183,111 @@ fn removing_a_joint_lets_the_body_go() {
 }
 
 #[test]
+fn multibody_joints_form_a_chain_that_holds_together() {
+    // 三节链：固定根 + 两节动态，铰链串起来。跑两秒，链节该还吊在原处，
+    // 节距不变——这是「多体求解器真的在约束」最直接的判据。
+    let mut world = PhysicsWorld::new();
+    let root = world.add_body(
+        &RigidBodyDesc::fixed().with_position(Vec2::new(0.0, 2.0)),
+        0,
+    );
+    let mid = world.add_body(
+        &RigidBodyDesc::dynamic().with_position(Vec2::new(0.0, 1.0)),
+        1,
+    );
+    let tip = world.add_body(&RigidBodyDesc::dynamic().with_position(Vec2::ZERO), 2);
+    for b in [mid, tip] {
+        world
+            .add_collider(&ColliderDesc::ball(0.2), Some(b), 0)
+            .expect("链节该建得出来");
+    }
+
+    let j1 = world
+        .add_multibody_joint(
+            root,
+            mid,
+            &JointDesc::revolute(Vec2::new(0.0, -0.5), Vec2::new(0.0, 0.5), None),
+        )
+        .expect("root → mid 该成链");
+    let j2 = world
+        .add_multibody_joint(
+            mid,
+            tip,
+            &JointDesc::revolute(Vec2::new(0.0, -0.5), Vec2::new(0.0, 0.5), None),
+        )
+        .expect("mid → tip 该成链");
+
+    assert!(world.has_multibody_joint(j1));
+    assert!(world.has_multibody_joint(j2));
+    assert_eq!(world.multibody_joint_count(), 2);
+    assert_eq!(world.joint_count(), 0);
+
+    simulate(&mut world, 120);
+
+    let mid_p = world.body(mid).expect("mid 还在").position();
+    let tip_p = world.body(tip).expect("tip 还在").position();
+    assert!(
+        mid_p.distance(Vec2::new(0.0, 1.0)) < 0.3,
+        "链节 mid 掉了：{mid_p:?}"
+    );
+    assert!(tip_p.distance(Vec2::ZERO) < 0.5, "链节 tip 掉了：{tip_p:?}");
+    assert!(
+        (mid_p.distance(tip_p) - 1.0).abs() < 0.15,
+        "链节被拉长了：{mid_p:?} vs {tip_p:?}"
+    );
+}
+
+#[test]
+fn multibody_joints_reject_cycles() {
+    let mut world = PhysicsWorld::new();
+    let a = world.add_body(&RigidBodyDesc::dynamic(), 0);
+    let b = world.add_body(&RigidBodyDesc::dynamic(), 1);
+    let desc = || JointDesc::fixed(Vec2::ZERO, Vec2::ZERO);
+
+    world
+        .add_multibody_joint(a, b, &desc())
+        .expect("a → b 该成链");
+    assert!(
+        world.add_multibody_joint(b, a, &desc()).is_none(),
+        "成环的关节该返回 None"
+    );
+    assert_eq!(world.multibody_joint_count(), 1);
+}
+
+#[test]
+fn removing_a_multibody_joint_frees_its_bodies() {
+    let mut world = PhysicsWorld::new();
+    let a = world.add_body(&RigidBodyDesc::dynamic(), 0);
+    let b = world.add_body(&RigidBodyDesc::dynamic(), 1);
+    let desc = JointDesc::fixed(Vec2::ZERO, Vec2::ZERO);
+
+    let j = world
+        .add_multibody_joint(a, b, &desc)
+        .expect("a → b 该成链");
+    world.remove_multibody_joint(j);
+    assert!(!world.has_multibody_joint(j));
+    assert_eq!(world.multibody_joint_count(), 0);
+    assert!(
+        world.add_multibody_joint(a, b, &desc).is_some(),
+        "删掉之后该能重新成链"
+    );
+}
+
+#[test]
+fn removing_a_body_cleans_up_its_multibody_joints() {
+    let mut world = PhysicsWorld::new();
+    let a = world.add_body(&RigidBodyDesc::dynamic(), 0);
+    let b = world.add_body(&RigidBodyDesc::dynamic(), 1);
+    let j = world
+        .add_multibody_joint(a, b, &JointDesc::fixed(Vec2::ZERO, Vec2::ZERO))
+        .expect("a → b 该成链");
+
+    world.remove_body(a);
+    assert!(!world.has_multibody_joint(j));
+    assert_eq!(world.multibody_joint_count(), 0);
+}
+
+#[test]
 fn jointed_bodies_do_not_push_each_other_by_default() {
     // 连在一起的两块通常是重叠的（车轮陷在轮拱里）。默认开着碰撞的话
     // 它们会一直互相推，关节和碰撞打架，整个东西抖个不停。

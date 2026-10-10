@@ -95,15 +95,23 @@ pub struct BodyHandle(pub(crate) rapier3d::dynamics::RigidBodyHandle);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ColliderHandle(pub(crate) rapier3d::geometry::ColliderHandle);
 
-/// 关节句柄。
+/// 关节句柄（impulse joint：两个刚体之间的单约束）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct JointHandle(pub(crate) rapier3d::dynamics::ImpulseJointHandle);
+
+/// 多体关节句柄（multibody joint：运动学链上的一环）。
+///
+/// 与 [`JointHandle`] 是两个独立的命名空间：同一个数字在两边可以同时存在、
+/// 互不相干，不要混用。`None` 的插入结果表示这次连接会构成非法链
+/// （成环、或 `body2` 已经是链上的一环），调用方应回落到普通关节。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MultibodyJointHandle(pub(crate) rapier3d::dynamics::MultibodyJointHandle);
 
 /// 常用类型的集中导出。
 pub mod prelude {
     pub use crate::{
         BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, CollisionEvent, InteractionGroups,
-        JointDesc, JointHandle, JointKind, PhysicsWorld, RayCastOptions, RayHit, RigidBodyDesc,
-        RigidBodyType, SphericalLimits,
+        JointDesc, JointHandle, JointKind, MultibodyJointHandle, PhysicsWorld, RayCastOptions,
+        RayHit, RigidBodyDesc, RigidBodyType, SphericalLimits,
     };
 }

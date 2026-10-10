@@ -62,6 +62,6 @@ pub use collider::{ColliderDesc, ColliderMut, ColliderRef, ColliderShape};
 pub use debug::PhysicsDebugOptions2d;
 pub use joint::{JointDesc, JointKind};
 pub use world::{
-    BodyHandle, ColliderHandle, CollisionEvent2d, ContactForceEvent2d, JointHandle, PhysicsWorld,
-    RayCastOptions, RayHit, ShapeCastOptions, ShapeHit,
+    BodyHandle, ColliderHandle, CollisionEvent2d, ContactForceEvent2d, JointHandle,
+    MultibodyJointHandle, PhysicsWorld, RayCastOptions, RayHit, ShapeCastOptions, ShapeHit,
 };

@@ -23,8 +23,8 @@
 use kcore::pool::Handle;
 use kmath::{Quat, Vec3};
 use kphysics::{
-    BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, JointDesc, JointHandle, PhysicsWorld,
-    RigidBodyDesc, RigidBodyType,
+    BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, JointDesc, JointHandle,
+    MultibodyJointHandle, PhysicsWorld, RigidBodyDesc, RigidBodyType,
 };
 
 use crate::Node;
@@ -407,6 +407,12 @@ pub struct Joint {
     body1: Handle<Node>,
     body2: Handle<Node>,
     native: Option<JointHandle>,
+    native_mb: Option<MultibodyJointHandle>,
+    /// 为 true 时走多体关节（运动学链），整条链一起解，长链不拉长。
+    ///
+    /// 多体成链更严：`body2` 必须是链的末端、不能成环。建链失败时
+    /// 同步会回落到普通关节，保证不断连。
+    multibody: bool,
     /// 描述或两端刚体变了，需要重建原生关节。
     ///
     /// 关节没有「原地改参数」的路径——rapier 的 `GenericJoint` 是值语义，
@@ -422,7 +428,32 @@ impl Joint {
             body1,
             body2,
             native: None,
+            native_mb: None,
+            multibody: false,
             dirty: false,
+        }
+    }
+
+    /// 多体版本：走运动学链求解，适合布娃娃脊柱、四肢这种链式结构。
+    ///
+    /// 成链失败（成环、`body2` 已是链上一环）时同步回落到普通关节。
+    pub fn multibody(body1: Handle<Node>, body2: Handle<Node>, desc: JointDesc) -> Self {
+        let mut joint = Self::new(body1, body2, desc);
+        joint.multibody = true;
+        joint.dirty = true;
+        joint
+    }
+
+    /// 是否走多体链。
+    pub fn is_multibody(&self) -> bool {
+        self.multibody
+    }
+
+    /// 切换多体/普通。下次同步时重建原生关节。
+    pub fn set_multibody(&mut self, multibody: bool) {
+        if self.multibody != multibody {
+            self.multibody = multibody;
+            self.dirty = true;
         }
     }
 
@@ -454,13 +485,22 @@ impl Joint {
         self.dirty = true;
     }
 
-    /// 对应的原生关节句柄。
+    /// 对应的原生关节句柄（普通关节）。
     pub fn native(&self) -> Option<JointHandle> {
         self.native
     }
 
+    /// 对应的原生多体关节句柄。`None` 表示还没建链、或回落到了普通关节。
+    pub fn native_multibody(&self) -> Option<MultibodyJointHandle> {
+        self.native_mb
+    }
+
     pub(crate) fn native_mut(&mut self) -> &mut Option<JointHandle> {
         &mut self.native
+    }
+
+    pub(crate) fn native_mb_mut(&mut self) -> &mut Option<MultibodyJointHandle> {
+        &mut self.native_mb
     }
 
     pub(crate) fn take_dirty(&mut self) -> bool {
@@ -923,6 +963,153 @@ mod scene_test {
             "绳长最多偏了 {worst_radius_error}"
         );
         assert!(lowest < 6.5, "摆锤最低只荡到 {lowest}");
+    }
+
+    #[test]
+    fn a_multibody_joint_builds_a_kinematic_chain() {
+        // 三节链全部用多体关节串起来：跑起来不散，槽位落在 `native_mb`，
+        // 普通槽位保持空——这是在验证同步分支真的走了多体的那条路。
+        let mut scene = Scene::new();
+        let root = scene.add_node(
+            Node::new("root")
+                .with_position(Vec3::Y * 10.0)
+                .with_rigid_body(RigidBody::fixed()),
+        );
+        let mid = scene.add_node(
+            Node::new("mid")
+                .with_position(Vec3::Y * 9.0)
+                .with_rigid_body(RigidBody::dynamic())
+                .with_collider(Collider::ball(0.3)),
+        );
+        let tip = scene.add_node(
+            Node::new("tip")
+                .with_position(Vec3::Y * 8.0)
+                .with_rigid_body(RigidBody::dynamic())
+                .with_collider(Collider::ball(0.3)),
+        );
+        let fixed = || JointDesc::fixed(Vec3::NEG_Y * 0.5, Vec3::Y * 0.5);
+        let j1 = scene.add_node(Node::new("j1").with_joint(Joint::multibody(root, mid, fixed())));
+        let j2 = scene.add_node(Node::new("j2").with_joint(Joint::multibody(mid, tip, fixed())));
+
+        run(&mut scene, 2.0);
+
+        for j in [j1, j2] {
+            let joint = scene
+                .try_get(j)
+                .unwrap()
+                .joint
+                .as_ref()
+                .expect("关节节点还在");
+            assert!(
+                joint.native_multibody().is_some(),
+                "多体关节该建出原生多体句柄"
+            );
+            assert!(joint.native().is_none(), "多体关节不该占用普通槽位");
+        }
+        assert_eq!(scene.physics().multibody_joint_count(), 2);
+        assert_eq!(scene.physics().joint_count(), 0);
+
+        let mid_p = scene.try_get(mid).unwrap().transform.position;
+        let tip_p = scene.try_get(tip).unwrap().transform.position;
+        assert!((mid_p.y - 9.0).abs() < 0.3, "链节 mid 掉了：{mid_p:?}");
+        assert!((tip_p.y - 8.0).abs() < 0.5, "链节 tip 掉了：{tip_p:?}");
+    }
+
+    #[test]
+    fn a_failed_multibody_chain_falls_back_to_a_normal_joint() {
+        // b → a 要成环，多体建链必然失败。同步该回落到普通关节，
+        // 约束不断：两个球跑 2 秒不能散。
+        let mut scene = Scene::new();
+        let a = scene.add_node(
+            Node::new("a")
+                .with_position(Vec3::Y * 10.0)
+                .with_rigid_body(RigidBody::fixed()),
+        );
+        let b = scene.add_node(
+            Node::new("b")
+                .with_position(Vec3::new(1.0, 10.0, 0.0))
+                .with_rigid_body(RigidBody::dynamic())
+                .with_collider(Collider::ball(0.3)),
+        );
+        let desc = JointDesc::fixed(Vec3::X, Vec3::ZERO);
+        scene.add_node(Node::new("fence").with_joint(Joint::multibody(a, b, desc.clone())));
+        // 先让 a → b 成链，再来一条 b → a：环，多体必拒。
+        let fallback = scene.add_node(Node::new("back").with_joint(Joint::multibody(b, a, desc)));
+
+        run(&mut scene, 2.0);
+
+        let joint = scene
+            .try_get(fallback)
+            .unwrap()
+            .joint
+            .as_ref()
+            .expect("关节节点还在");
+        assert!(
+            joint.native_multibody().is_none(),
+            "成环的边不该建出多体句柄"
+        );
+        assert!(joint.native().is_some(), "成环的边该回落到普通关节");
+
+        let p = scene.try_get(b).unwrap().transform.position;
+        assert!(
+            (p - Vec3::new(1.0, 10.0, 0.0)).length() < 0.2,
+            "回落的关节没拉住，B 跑到了 {p:?}"
+        );
+    }
+
+    #[test]
+    fn switching_a_joint_between_multibody_and_normal_rebuilds_it() {
+        // 同一个关节节点：multibody → 普通 → multibody，每次切换
+        // 原生槽位都该跟着翻面，且始终有且仅有一边有值。
+        let mut scene = Scene::new();
+        let a = scene.add_node(
+            Node::new("a")
+                .with_position(Vec3::Y * 10.0)
+                .with_rigid_body(RigidBody::fixed()),
+        );
+        let b = scene.add_node(
+            Node::new("b")
+                .with_position(Vec3::new(1.0, 10.0, 0.0))
+                .with_rigid_body(RigidBody::dynamic())
+                .with_collider(Collider::ball(0.3)),
+        );
+        let j = scene.add_node(Node::new("j").with_joint(Joint::multibody(
+            a,
+            b,
+            JointDesc::fixed(Vec3::X, Vec3::ZERO),
+        )));
+
+        scene.step_physics(1.0 / 60.0);
+        scene.update();
+        let joint = scene.try_get(j).unwrap().joint.as_ref().unwrap();
+        assert!(joint.native_multibody().is_some());
+        assert!(joint.native().is_none());
+
+        scene
+            .try_get_mut(j)
+            .unwrap()
+            .joint
+            .as_mut()
+            .unwrap()
+            .set_multibody(false);
+        scene.step_physics(1.0 / 60.0);
+        scene.update();
+        let joint = scene.try_get(j).unwrap().joint.as_ref().unwrap();
+        assert!(joint.native_multibody().is_none());
+        assert!(joint.native().is_some());
+
+        scene
+            .try_get_mut(j)
+            .unwrap()
+            .joint
+            .as_mut()
+            .unwrap()
+            .set_multibody(true);
+        scene.step_physics(1.0 / 60.0);
+        scene.update();
+        let joint = scene.try_get(j).unwrap().joint.as_ref().unwrap();
+        assert!(joint.native_multibody().is_some());
+        assert!(joint.native().is_none());
     }
 
     #[test]

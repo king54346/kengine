@@ -566,6 +566,7 @@ impl Scene {
             return;
         };
         let joint = node.joint.as_mut().and_then(|j| j.native());
+        let joint_mb = node.joint.as_mut().and_then(|j| j.native_multibody());
         let collider = node.collider.as_mut().and_then(|c| c.native());
         let body = node.rigid_body.as_mut().and_then(|b| b.native());
 
@@ -573,6 +574,9 @@ impl Scene {
         // 碰撞体与关节，反过来先删刚体的话，后面两步就是在用失效句柄操作。
         if let Some(joint) = joint {
             self.physics.remove_joint(joint);
+        }
+        if let Some(joint_mb) = joint_mb {
+            self.physics.remove_multibody_joint(joint_mb);
         }
         if let Some(collider) = collider {
             self.physics.remove_collider(collider);
@@ -2204,7 +2208,7 @@ impl Scene {
                 .and_then(|n| n.rigid_body.as_ref())
                 .and_then(|b| b.native());
 
-            let (dirty, already_built, desc, old) = {
+            let (dirty, already_built, desc, want_mb, old, old_mb) = {
                 let Ok(node) = self.nodes.try_borrow_mut(handle) else {
                     continue;
                 };
@@ -2214,10 +2218,16 @@ impl Scene {
                 let dirty = joint.take_dirty();
                 (
                     dirty,
-                    joint.native().is_some(),
+                    joint.native().is_some() || joint.native_multibody().is_some(),
                     joint.desc_ref().clone(),
+                    joint.is_multibody(),
                     if dirty {
                         joint.native_mut().take()
+                    } else {
+                        None
+                    },
+                    if dirty {
+                        joint.native_mb_mut().take()
                     } else {
                         None
                     },
@@ -2236,11 +2246,24 @@ impl Scene {
             if let Some(old) = old {
                 self.physics.remove_joint(old);
             }
-            let new_native = self.physics.add_joint(native1, native2, &desc);
+            if let Some(old_mb) = old_mb {
+                self.physics.remove_multibody_joint(old_mb);
+            }
+            // 多体成链失败（成环、`body2` 已是链上一环）时回落到普通关节，
+            // 保证不断连：约束弱一点总比整个关节凭空消失好。
+            let (new_native, new_mb) = if want_mb {
+                match self.physics.add_multibody_joint(native1, native2, &desc) {
+                    Some(mb) => (None, Some(mb)),
+                    None => (Some(self.physics.add_joint(native1, native2, &desc)), None),
+                }
+            } else {
+                (Some(self.physics.add_joint(native1, native2, &desc)), None)
+            };
             if let Ok(node) = self.nodes.try_borrow_mut(handle)
                 && let Some(joint) = node.joint.as_deref_mut()
             {
-                *joint.native_mut() = Some(new_native);
+                *joint.native_mut() = new_native;
+                *joint.native_mb_mut() = new_mb;
             }
         }
     }
