@@ -19,7 +19,7 @@
 |---|---|
 | crate | 35 个（`src/k*`），约 17 万行 Rust + WGSL + JS |
 | 测试 | `cargo test --workspace`：**2968 项全绿**（含文档测试，2026-10-05）；另有 34 项 `#[ignore]`（截图回归、要显卡的），`-- --ignored` 跑也全绿 |
-| 例子 | 226 个（`examples/`，其中 179 个是 three.js 移植，在 `examples/kengine/new/`；`ocean`、`water_island`、`meadow` 是 kcomponents 的完整场景；`vfx` 是技能特效沙盒（ThreeJSVFX-Demo / LinearAbilityCastingThreeJS 的移植，六个技能已完成）；`xunxian` 是寻仙角色换装（zj + 武器 + 法宝，资源在 `assets/unpack2`）） |
+| 例子 | 226 个（`examples/`，其中 179 个是 three.js 移植，在 `examples/kengine/new/`；`ocean`、`water_island`、`meadow` 是 kcomponents 的完整场景；`vfx` 是技能特效沙盒（ThreeJSVFX-Demo / LinearAbilityCastingThreeJS 的移植，六个技能已完成）；`xunxian` 是寻仙角色换装与骑乘，站在小桑村里（zj + 武器 + 法宝 + 坐骑 + 地图；资源在 `assets/unpack2`）） |
 | 基准 | 6 组（`benches/`，说明见 `benches/README.md`） |
 | 集成测试 | 7 个（`tests/`：例子着色器编译校验、例子截图回归、无头截图、demo 脚本、导入器样本……） |
 | CI | `.github/workflows/ci.yml`（fmt → clippy `-D warnings` → Linux + Windows test → bench --no-run → `video` 特性能编）。**还没在 remote 上真正跑过**；2026-10-05 发现这个文件其实不在仓库里（文档一直写着有），按 HISTORY 的记录重写了一份。照现状 fmt 那关必红（267 个文件没格式化） |
@@ -53,7 +53,7 @@
 | kaudio | 音频（cpal + symphonia）：整段 / 流式来源（可 seek）、3D 空间音频 |
 | kgltf | glTF 2.0 导入（含 Draco、meshopt、KTX2、各 KHR 材质扩展、变体） |
 | kimport | 其余格式：OBJ STL PLY FBX Collada 3MF AMF 3DS VOX KMZ USD/USDZ LDraw IFC 3DM VRML SVG Lottie MaterialX TTF 立体字…… |
-| kxunxian | 寻仙解包资源直读：`.cct` 角色配置 / `.cmf` 材质表 / `.pmf` 网格 / `.psf` 骨架 / `.paf` 动作；按装扮拼玩家角色（zj 衣柜），武器 wqa、法宝 fba 挂到挂点骨骼上，上下半身动作合并 |
+| kxunxian | 寻仙解包资源直读：`.cct` 角色配置 / `.cmf` 材质表 / `.pmf` 网格 / `.psf` 骨架 / `.paf` 动作；按装扮拼玩家角色（zj 衣柜），武器 wqa、法宝 fba 挂到挂点骨骼上，上下半身动作合并，也可以拼「A 的上半身 + B 的下半身」（骑乘放技能）；挂点可以导出成空节点（骑手 `ride_tun` 对坐骑 `ride_0`）；读地图场景 `scn/`（256 米单元的高度图、预混地表、水面、天空、`.ort`/`.sit`/`.cty` 三层物件摆放、`<Phy>` / `<Projectee>` 碰撞网格、地表分层混合——照游戏 `pge_core.dll` 里的地形 HLSL 写的材质钩子） |
 | kfont | 字体加载、光栅化、排版、矢量轮廓（ab_glyph） |
 | klocale | 本地化：Fluent（`.ftl`）子集的字符串表、当前语言 + 回退链、`tr!` / 脚本 `tr()`（零依赖，解析器自写） |
 | knav | 导航：2.5D 格子烘焙（边缘按代理半径腐蚀）、A* + 视线拉直、动态挡区 / 代价（零依赖） |

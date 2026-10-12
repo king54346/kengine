@@ -67,6 +67,32 @@ impl Renderer {
             morph_weight_count,
             time,
         } = input;
+        // 阴影图按用到的层数懒建（一开始是 1×1 的占位）。换了新的，场景绑定组里指着的还是旧视图，跟着重建。
+        let mut regrown = false;
+        if cascades.len() > self.shadow.layer_capacity {
+            (self.shadow.depth_view, self.shadow.layer_views) = create_shadow_layers(
+                &self.device,
+                "kengine shadow map",
+                settings.resolution.max(256),
+                cascades.len() as u32,
+            );
+            self.shadow.layer_capacity = cascades.len();
+            regrown = true;
+        }
+        if local_faces.len() > self.shadow.local_layer_capacity {
+            (self.shadow.local_depth_view, self.shadow.local_layer_views) = create_shadow_layers(
+                &self.device,
+                "kengine local shadow map",
+                self.shadow.local_resolution,
+                local_faces.len() as u32,
+            );
+            self.shadow.local_layer_capacity = local_faces.len();
+            regrown = true;
+        }
+        if regrown {
+            self.rebuild_scene_bind_groups();
+        }
+
         // 深度 pass 有自己的一份骨骼矩阵缓冲：它与主 pass 分属不同的绑定组布局，
         // 共用一个缓冲反而要多传一层引用。数据是同一份，写两遍。
         let shadow_joints_grew = joint_count as u64 > self.shadow.joint_capacity;

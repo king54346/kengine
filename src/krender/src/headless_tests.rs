@@ -247,6 +247,51 @@ fn a_cutout_hook_cuts_the_shadow_too() {
 }
 
 #[test]
+fn texture_alpha_cutoff_cuts_the_shadow_too() {
+    use kasset::Resource;
+    use kmaterial::Material;
+    use ktexture::Texture;
+    // 按底色贴图的 alpha 剪裁（`Physical::alpha_cutoff`，羽毛、头发、树叶都靠它）：贴图整张 alpha = 0，
+    // 方块应该整个被裁掉，影子也是。回归：阴影 pass 的片元阶段曾经只拿材质底色常量（alpha 恒为 1），
+    // 没乘底色贴图，于是镂空的翅膀投下整块实心的影子。
+    let cube = |transparent: bool| {
+        let alpha = if transparent { 0 } else { 255 };
+        let texture = Texture::solid(4, 4, [200, 120, 80, alpha]);
+        let mut material = Material::default()
+            .with_base_color_texture(Resource::new_ok(format!("alpha {alpha}"), texture));
+        kpbr::physical::Physical {
+            alpha_cutoff: 0.5,
+            ..Default::default()
+        }
+        .apply(&mut material);
+        Node::new("Cube")
+            .with_mesh(Mesh::cube())
+            .with_material(material)
+            .with_position(Vec3::new(3.0, 0.5, 0.0))
+    };
+    let Some(cut) = shadow_scene_pixels(cube(true), true) else {
+        eprintln!("没有可用的显卡适配器，跳过");
+        return;
+    };
+    let solid = shadow_scene_pixels(cube(false), true).unwrap();
+    let empty = shadow_scene_pixels(
+        Node::new("Nothing").with_position(Vec3::new(3.0, 0.5, 0.0)),
+        true,
+    )
+    .unwrap();
+    let cube_and_shadow = changed_pixels(&solid, &empty);
+    assert!(
+        cube_and_shadow > 40,
+        "对照场景里方块和影子只占 {cube_and_shadow} 个像素"
+    );
+    let leftover = changed_pixels(&cut, &empty);
+    assert!(
+        leftover * 10 < cube_and_shadow,
+        "贴图 alpha 为 0 的方块还留着影子：和空场景有 {leftover} 个像素不同（方块 + 影子占 {cube_and_shadow} 个）"
+    );
+}
+
+#[test]
 fn a_shadow_radius_softens_the_edge() {
     use kmaterial::Material;
     use kmath::Vec4;

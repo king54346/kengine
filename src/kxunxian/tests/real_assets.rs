@@ -33,6 +33,7 @@ fn builds_dressed_and_armed_character() {
         .map(String::from)
         .to_vec(),
         equips: ["e_wqa_101_2", "e_fba_101"].map(String::from).to_vec(),
+        markers: vec!["ride_tun".into()],
     };
     let model = library.build(&character, &outfit);
     // 每个部件一块网格，武器一块、法宝一块。
@@ -55,6 +56,15 @@ fn builds_dressed_and_armed_character() {
     let hand = character.bone("Bip01 R Hand").unwrap();
     let mount = model.find_node("e_wqa_101_2").unwrap();
     assert!(model.nodes()[hand].children.contains(&mount));
+    // 挂点标记是空节点，挂在骨盆下面（`ride_tun` 的骨骼号是 1）。
+    let marker = model.find_node("ride_tun").unwrap();
+    assert!(model.nodes()[marker].parts.is_empty());
+    assert!(
+        model
+            .nodes()
+            .iter()
+            .any(|node| node.children.contains(&marker))
+    );
     // 每块网格都拿到了贴图。
     for material in model.materials() {
         assert!(material.base_color_texture().is_some(), "有材质没贴图");
@@ -73,4 +83,29 @@ fn builds_dressed_and_armed_character() {
             "{code} 没有右手轨道"
         );
     }
+
+    // 骑乘放技能：上半身攻击、下半身坐姿。下半身（左大腿）和坐姿一样，上半身（右手）和攻击一样。
+    let layered = library
+        .layered_animation(&character, "gj01", "qczz01", "ride_gj01")
+        .unwrap();
+    let ride = library.animation(&character, "qczz01").unwrap();
+    let attack = library.animation(&character, "gj01").unwrap();
+    let thigh = character.bone("Bip01 L Thigh").unwrap();
+    let rotation = |clip: &kanim::AnimationClip, target: usize| {
+        clip.tracks()
+            .iter()
+            .find(|track| {
+                track.target == target && matches!(track.channel, kanim::Channel::Rotation(_))
+            })
+            .map(|track| format!("{:?}", track.channel))
+    };
+    assert!(rotation(&layered, thigh).is_some());
+    assert_eq!(rotation(&layered, thigh), rotation(&ride, thigh));
+    assert_eq!(rotation(&layered, hand), rotation(&attack, hand));
+
+    // 坐骑：怪物骨架，动作是单文件。
+    let mount = library.character("gw_cwbailang_919").unwrap();
+    let run = library.animation(&mount, "pb01").unwrap();
+    assert!(run.duration() > 0.1);
+    assert!(mount.def.hinges.contains_key("ride_0"));
 }

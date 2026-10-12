@@ -52,6 +52,11 @@ mod character_tests;
 mod collider;
 mod convert;
 mod debug;
+/// 和 3D 同一份修正（parry2d 有同样的 bug）。
+mod halfspace_fix {
+    use rapier2d as rapier;
+    include!("../halfspace_fix.rs");
+}
 mod joint;
 mod visit;
 mod world;

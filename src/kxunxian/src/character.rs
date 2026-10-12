@@ -48,11 +48,11 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// 沿 Z 镜像（左手系 ↔ 右手系）。
-fn mirror(v: Vec3) -> Vec3 {
+pub(crate) fn mirror(v: Vec3) -> Vec3 {
     Vec3::new(v.x, v.y, -v.z)
 }
 
-fn mirror_rotation(q: Quat) -> Quat {
+pub(crate) fn mirror_rotation(q: Quat) -> Quat {
     Quat::from_xyzw(-q.x, -q.y, q.z, q.w)
 }
 
@@ -61,6 +61,9 @@ fn mirror_rotation(q: Quat) -> Quat {
 pub struct Outfit {
     pub parts: Vec<String>,
     pub equips: Vec<String>,
+    /// 要做成空节点暴露出来的挂点（节点名就是挂点名）：坐骑的座位 `ride_0`、骑手的 `ride_tun` 这类，
+    /// 游戏逻辑按它们的世界变换把两个模型对上。
+    pub markers: Vec<String>,
 }
 
 /// 一个已经读好的角色：配置 + 骨架。
@@ -110,11 +113,20 @@ impl Library {
     ///
     /// 源数据有大小写和拼写不一致（`textrue`、`.DDS`、`skelton`），按「原样 → 小写 → 修正拼写」依次试。
     pub fn resolve(&self, raw: &str) -> Option<PathBuf> {
-        let relative = raw
-            .trim()
-            .trim_start_matches("$(res)")
-            .trim_start_matches(['\\', '/'])
-            .replace('\\', "/");
+        let raw = raw.trim();
+        // `$(res)` / `$(Res)` 前缀；个别文件写的是美术机器上的绝对路径（`d:\filetools\resource\obj\...`），
+        // 取 `resource` 之后的部分。
+        let raw = if raw
+            .get(..6)
+            .is_some_and(|p| p.eq_ignore_ascii_case("$(res)"))
+        {
+            &raw[6..]
+        } else if let Some(at) = raw.to_ascii_lowercase().find("\\resource\\") {
+            &raw[at + "\\resource".len()..]
+        } else {
+            raw
+        };
+        let relative = raw.trim_start_matches(['\\', '/']).replace('\\', "/");
         if relative.is_empty() {
             return None;
         }
@@ -129,7 +141,7 @@ impl Library {
             .find(|path| path.is_file())
     }
 
-    fn read(&self, raw: &str) -> Result<(PathBuf, Vec<u8>), Error> {
+    pub(crate) fn read(&self, raw: &str) -> Result<(PathBuf, Vec<u8>), Error> {
         let path = self
             .resolve(raw)
             .ok_or_else(|| Error::Missing(raw.to_string()))?;
@@ -186,7 +198,7 @@ impl Library {
         Some(table)
     }
 
-    fn mesh(&mut self, raw: &str) -> Result<Arc<PmfMesh>, Error> {
+    pub(crate) fn mesh(&mut self, raw: &str) -> Result<Arc<PmfMesh>, Error> {
         let path = self
             .resolve(raw)
             .ok_or_else(|| Error::Missing(raw.to_string()))?;
@@ -200,7 +212,7 @@ impl Library {
         Ok(mesh)
     }
 
-    fn texture(&mut self, raw: &str) -> Option<Resource<Texture>> {
+    pub(crate) fn texture(&mut self, raw: &str) -> Option<Resource<Texture>> {
         // 文件名前缀写错的（`m_yf637hw_001_h.dds` 实际只有 `c_` / `f_` 版本）换个前缀再找。
         let path = self.resolve(raw).or_else(|| {
             prefix_variants(raw)
@@ -270,34 +282,55 @@ impl Library {
         material
     }
 
-    /// 读一段动作并合并上下半身。
+    /// 读一个动作文件（按配置里的动作名，或者 `animation/<name>.paf`）。没有这个文件返回 `Ok(None)`。
+    fn paf(&mut self, character: &Character, name: &str) -> Result<Option<PafAnimation>, Error> {
+        let raw = match character.def.animations.get(name) {
+            Some(raw) => raw.clone(),
+            None => format!("cha/special/{}/animation/{name}.paf", character.name),
+        };
+        let Ok((path, bytes)) = self.read(&raw) else {
+            return Ok(None);
+        };
+        parse_paf(&bytes)
+            .map(Some)
+            .map_err(|error| Error::Format(path, error))
+    }
+
+    /// 读一段动作。
     ///
-    /// 一个完整动作分成两个文件：`<code>_tk.paf` 驱动上半身，`<code>_ca.paf` 驱动下半身（根、骨盆、腿），
-    /// 两边的骨骼不重叠。只有一半的动作（比如表情）就只用那一半。
+    /// 玩家角色的一个完整动作分成两个文件：`<code>_tk.paf` 驱动上半身，`<code>_ca.paf` 驱动下半身
+    /// （根、骨盆、腿），两边的骨骼不重叠，这里合成一个。怪物、坐骑的动作是单个 `<code>.paf`。
     pub fn animation(&mut self, character: &Character, code: &str) -> Result<AnimationClip, Error> {
-        let mut merged: Option<PafAnimation> = None;
-        for half in ["tk", "ca"] {
-            let name = format!("{code}_{half}");
-            let raw = match character.def.animations.get(&name) {
-                Some(raw) => raw.clone(),
-                None => format!("cha/special/{}/animation/{name}.paf", character.name),
-            };
-            let Ok((path, bytes)) = self.read(&raw) else {
-                continue;
-            };
-            let animation = parse_paf(&bytes).map_err(|error| Error::Format(path, error))?;
-            match merged.as_mut() {
-                None => merged = Some(animation),
-                Some(merged) => {
-                    for (bone, track) in animation.tracks {
-                        merged.tracks.entry(bone).or_insert(track);
-                    }
-                    merged.duration = merged.duration.max(animation.duration);
+        self.layered_animation(character, code, code, code)
+    }
+
+    /// 上半身放 `upper` 的 `_tk`、下半身放 `lower` 的 `_ca`，合成一个剪辑叫 `name`。
+    ///
+    /// 骑乘时放技能就靠它：上半身是技能，下半身保持坐姿。两个文件驱动的骨骼本来就不重叠，
+    /// 所以不需要动画遮罩，拼起来就是对的。哪一半都没有（单文件动作）时退回 `<upper>.paf`。
+    pub fn layered_animation(
+        &mut self,
+        character: &Character,
+        upper: &str,
+        lower: &str,
+        name: &str,
+    ) -> Result<AnimationClip, Error> {
+        let top = self.paf(character, &format!("{upper}_tk"))?;
+        let bottom = self.paf(character, &format!("{lower}_ca"))?;
+        let animation = match (top, bottom) {
+            (Some(mut top), Some(bottom)) => {
+                for (bone, track) in bottom.tracks {
+                    top.tracks.entry(bone).or_insert(track);
                 }
+                top.duration = top.duration.max(bottom.duration);
+                top
             }
-        }
-        let animation = merged.ok_or_else(|| Error::Unknown(format!("动作 {code}")))?;
-        Ok(clip(code, &animation, character.bones.len()))
+            (Some(half), None) | (None, Some(half)) => half,
+            (None, None) => self
+                .paf(character, upper)?
+                .ok_or_else(|| Error::Unknown(format!("动作 {upper}")))?,
+        };
+        Ok(clip(name, &animation, character.bones.len()))
     }
 
     /// 拼出角色模型。读不到的部件跳过并记日志（源数据里确实有几个坏文件），不让整个角色失败。
@@ -374,6 +407,31 @@ impl Library {
             meshes.push(mesh);
             materials.push(material);
             roots.push(index);
+        }
+
+        // ---- 挂点标记：空节点，给游戏逻辑取世界变换 ----
+        for marker in &outfit.markers {
+            let Some(hinge) = def.hinges.get(marker).copied() else {
+                klog::warn!("{} 没有挂点 {marker}", character.name);
+                continue;
+            };
+            let index = nodes.len();
+            nodes.push(ModelNode {
+                name: marker.clone(),
+                transform: NodeTransform {
+                    position: mirror(hinge.translation),
+                    rotation: mirror_rotation(hinge.rotation),
+                    scale: Vec3::ONE,
+                },
+                ..Default::default()
+            });
+            match usize::try_from(hinge.bone)
+                .ok()
+                .filter(|&bone| bone < bones.len())
+            {
+                Some(bone) => nodes[bone].children.push(index),
+                None => roots.push(index),
+            }
         }
 
         // ---- 装备：刚体网格，挂在挂点上 ----
@@ -531,7 +589,7 @@ fn lookup_material(
 }
 
 /// `.pmf` → 引擎网格（换手系、反绕序、补法线）。`joint_count` 为 0 表示当刚体用，忽略蒙皮数据。
-fn convert_mesh(pmf: &PmfMesh, joint_count: usize) -> Option<Mesh> {
+pub(crate) fn convert_mesh(pmf: &PmfMesh, joint_count: usize) -> Option<Mesh> {
     let positions: Vec<Vec3> = pmf.positions.iter().map(|&p| mirror(p)).collect();
     let mut indices = pmf.indices.clone();
     for triangle in indices.chunks_exact_mut(3) {

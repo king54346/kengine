@@ -580,3 +580,58 @@ fn walking_on_flat_ground_never_stalls() {
     assert!(stalls.is_empty(), "踩在平地上却走不动的帧：{stalls:?}");
     assert!(x > 7.5, "2 米/秒走四秒只到 x = {x}");
 }
+
+// ── 半空间 ──
+
+/// 一块在 y=`height` 的无限大地面（半空间）。
+fn add_half_space(world: &mut PhysicsWorld, height: f32) {
+    let body = world.add_body(
+        &RigidBodyDesc::fixed().with_position(Vec3::new(0.0, height, 0.0)),
+        3,
+    );
+    world.add_collider(
+        &ColliderDesc::new(ColliderShape::HalfSpace { normal: Vec3::Y }),
+        Some(body),
+        3,
+    );
+}
+
+#[test]
+fn a_distant_half_space_does_not_push_the_character_up() {
+    // parry 0.30 的「形状 × 半空间」接触查询漏了一次逆变换，离半空间多远都算成陷在里面；
+    // 角色控制器每次解穿透都会把角色往上推（0.25 × 身高一帧）。站在地面上的角色本该一动不动，
+    // 没修的时候一秒钟能飞上天十几米。修正在 `halfspace_fix`。
+    let mut world = world_with_ground();
+    add_half_space(&mut world, -30.0);
+    let body = add_character(&mut world, Vec3::new(0.0, STAND_Y, 0.0));
+
+    walk(
+        &mut world,
+        &CharacterController::default(),
+        body,
+        Vec3::ZERO,
+        60,
+    );
+
+    let y = position(&world, body).y;
+    assert!((y - STAND_Y).abs() < 0.1, "该站在 {STAND_Y} 附近，实测 {y}");
+}
+
+#[test]
+fn a_character_lands_on_a_half_space() {
+    let mut world = PhysicsWorld::new();
+    add_half_space(&mut world, 0.0);
+    let body = add_character(&mut world, Vec3::new(0.0, 5.0, 0.0));
+
+    let last = walk(
+        &mut world,
+        &CharacterController::default(),
+        body,
+        Vec3::ZERO,
+        180,
+    );
+
+    assert!(last.grounded, "该落地了");
+    let y = position(&world, body).y;
+    assert!((y - STAND_Y).abs() < 0.1, "该站在 {STAND_Y} 附近，实测 {y}");
+}

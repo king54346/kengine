@@ -11,6 +11,7 @@
 //! let outfit = kxunxian::Outfit {
 //!     parts: vec!["m_yf001_st_001".into(), "m_kz001_kz_001".into()],
 //!     equips: vec!["e_wqa_101".into(), "e_fba_101".into()],
+//!     ..Default::default()
 //! };
 //! let model = library.build(&character, &outfit);
 //! let idle = library.animation(&character, "zl01")?;
@@ -20,9 +21,15 @@
 
 pub mod config;
 pub mod formats;
+pub mod scene;
+mod terrain;
 pub mod xml;
 
 mod character;
 
 pub use character::{Character, Error, Library, Outfit};
 pub use config::{CharacterDef, EquipDef, Hinge, MaterialDef, ModelDef};
+pub use scene::{
+    Blend, Collider, Mark, Placement, SceneData, Sky, StaticPart, TerrainLayer, Unit,
+    group_placements,
+};

@@ -733,6 +733,10 @@ pub struct RenderStats {
     pub gpu_meshes: u32,
     /// 显存里留着的贴图数。
     pub gpu_textures: u32,
+    /// 显存里网格的顶点、索引缓冲一共多少字节。
+    pub gpu_mesh_bytes: u64,
+    /// 显存里贴图（含 mip 链）一共多少字节。
+    pub gpu_texture_bytes: u64,
 }
 
 impl RenderStats {
@@ -1455,6 +1459,10 @@ struct ShadowResources {
     depth_view: wgpu::TextureView,
     /// 每层一个视图，渲染时当深度附件。
     layer_views: Vec<wgpu::TextureView>,
+    /// 主阴影图实际建了几层（0 = 还是 1×1 的占位）。按用到的层数懒建，见 [`create_shadow_resources`]。
+    layer_capacity: usize,
+    /// 同上，额外投影光源的阴影图。
+    local_layer_capacity: usize,
     /// 额外投影光源的阴影图（整个数组的视图）。
     local_depth_view: wgpu::TextureView,
     /// 同上，每层一个视图。
@@ -3775,6 +3783,20 @@ impl Renderer {
             cull_micros,
             gpu_meshes: self.meshes.len() as u32,
             gpu_textures: self.gpu_textures.len() as u32,
+            gpu_mesh_bytes: self
+                .meshes
+                .values()
+                .map(|mesh| {
+                    mesh.vertex_buffer.size()
+                        + mesh.index_buffer.size()
+                        + mesh.skin_buffer.as_ref().map_or(0, wgpu::Buffer::size)
+                })
+                .sum(),
+            gpu_texture_bytes: self
+                .gpu_textures
+                .values()
+                .map(|(texture, _)| texture_bytes(&texture.texture))
+                .sum(),
             ..RenderStats::default()
         };
 
@@ -5180,20 +5202,23 @@ fn shadow_sampling_source() -> &'static str {
     include_str!("shadow_sample.wgsl")
 }
 
-/// 建立阴影贴图、深度管线与相关绑定组。
-fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> ShadowResources {
-    let resolution = settings.resolution.max(256);
-
-    // 每级级联一层。分成独立的纹理数组而不是一张大图切格子：
-    // 切格子的话相邻级的纹素会在边界处互相渗色，采样到隔壁级的深度，
-    // 表现为级联交界处一圈错误的阴影。
+/// 一张 `layers` 层、边长 `resolution` 的阴影深度图：整个数组的视图（采样用）和每层一个视图（渲染用）。
+///
+/// 每级级联一层。分成独立的纹理数组而不是一张大图切格子：
+/// 切格子的话相邻级的纹素会在边界处互相渗色，采样到隔壁级的深度，
+/// 表现为级联交界处一圈错误的阴影。
+fn create_shadow_layers(
+    device: &wgpu::Device,
+    label: &str,
+    resolution: u32,
+    layers: u32,
+) -> (wgpu::TextureView, Vec<wgpu::TextureView>) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("kengine shadow map"),
+        label: Some(label),
         size: wgpu::Extent3d {
             width: resolution,
             height: resolution,
-            // 方向光的级联用不满；点光的立方体要六层。
-            depth_or_array_layers: klight::cascade::MAX_SHADOW_LAYERS as u32,
+            depth_or_array_layers: layers,
         },
         mip_level_count: 1,
         sample_count: 1,
@@ -5202,16 +5227,16 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
-    // 采样用的是整个数组的视图。
-    let depth_view = texture.create_view(&wgpu::TextureViewDescriptor {
+    // 采样用的是整个数组的视图（只有一层也得显式要 `D2Array`，不然 wgpu 给的是 `D2`）。
+    let array = texture.create_view(&wgpu::TextureViewDescriptor {
         dimension: Some(wgpu::TextureViewDimension::D2Array),
         ..Default::default()
     });
     // 渲染时每层一个视图：一次 pass 只能挂一层当深度附件。
-    let layer_views: Vec<wgpu::TextureView> = (0..klight::cascade::MAX_SHADOW_LAYERS as u32)
+    let views = (0..layers)
         .map(|layer| {
             texture.create_view(&wgpu::TextureViewDescriptor {
-                label: Some("kengine shadow layer"),
+                label: Some(label),
                 dimension: Some(wgpu::TextureViewDimension::D2),
                 base_array_layer: layer,
                 array_layer_count: Some(1),
@@ -5219,43 +5244,24 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
             })
         })
         .collect();
+    (array, views)
+}
+
+/// 建立阴影贴图、深度管线与相关绑定组。
+fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> ShadowResources {
+    // 阴影图先只放 1×1 的占位，第一次真要画时才按用到的层数建（见 `ShadowResources::ensure_layers`）：
+    // 满配是主光源 2048² × 6 层 + 额外光源 1024² × 12 层，将近 150 MB 显存，
+    // 而常见的场景只有一个方向光、几级级联，额外光源的那张根本用不上。
+    let (depth_view, layer_views) = create_shadow_layers(device, "kengine shadow map", 1, 1);
+    let (local_depth_view, local_layer_views) =
+        create_shadow_layers(device, "kengine local shadow map", 1, 1);
+    let local_resolution = (settings.resolution.max(256) / 2).max(256);
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("kengine shadow shader"),
         source: wgpu::ShaderSource::Wgsl(shadow_shader_source().into()),
     });
 
-    // 额外投影光源（聚光 / 点光）的阴影图：单独一张，分辨率减半。
-    let local_resolution = (resolution / 2).max(256);
-    let local_texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("kengine local shadow map"),
-        size: wgpu::Extent3d {
-            width: local_resolution,
-            height: local_resolution,
-            depth_or_array_layers: LOCAL_SHADOW_LAYERS as u32,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Depth32Float,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let local_depth_view = local_texture.create_view(&wgpu::TextureViewDescriptor {
-        dimension: Some(wgpu::TextureViewDimension::D2Array),
-        ..Default::default()
-    });
-    let local_layer_views: Vec<wgpu::TextureView> = (0..LOCAL_SHADOW_LAYERS as u32)
-        .map(|layer| {
-            local_texture.create_view(&wgpu::TextureViewDescriptor {
-                label: Some("kengine local shadow layer"),
-                dimension: Some(wgpu::TextureViewDimension::D2),
-                base_array_layer: layer,
-                array_layer_count: Some(1),
-                ..Default::default()
-            })
-        })
-        .collect();
     let local_matrices = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("kengine local shadow matrices"),
         size: (size_of::<[[f32; 4]; 4]>() * LOCAL_SHADOW_LAYERS) as u64,
@@ -5418,6 +5424,8 @@ fn create_shadow_resources(device: &wgpu::Device, settings: ShadowSettings) -> S
         pipeline,
         depth_view,
         layer_views,
+        layer_capacity: 0,
+        local_layer_capacity: 0,
         local_depth_view,
         local_layer_views,
         local_matrices,
@@ -6060,6 +6068,22 @@ fn half_from_f32(value: f32) -> u16 {
         return sign;
     }
     sign | ((exponent as u16) << 10) | ((mantissa >> 13) as u16)
+}
+
+/// 一块纹理连同 mip 链占多少显存（按格式的块大小算）。
+fn texture_bytes(texture: &wgpu::Texture) -> u64 {
+    let format = texture.format();
+    let (block_width, block_height) = format.block_dimensions();
+    let block_bytes = u64::from(format.block_copy_size(None).unwrap_or(4));
+    let size = texture.size();
+    (0..texture.mip_level_count())
+        .map(|level| {
+            let level = size.mip_level_size(level, texture.dimension());
+            let blocks_x = u64::from(level.width.div_ceil(block_width));
+            let blocks_y = u64::from(level.height.div_ceil(block_height));
+            blocks_x * blocks_y * u64::from(level.depth_or_array_layers) * block_bytes
+        })
+        .sum()
 }
 
 /// 上传一张贴图，连同按其采样设置建好的采样器一起返回。

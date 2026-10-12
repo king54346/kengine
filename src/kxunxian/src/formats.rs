@@ -91,6 +91,8 @@ pub struct PmfMesh {
     /// 文件里有法线就读（长度不对的话调用方自己重算）。
     pub normals: Vec<Vec3>,
     pub uvs: Vec<Vec2>,
+    /// 第二套 UV（建筑的光照贴图用）；只有一套时为空。
+    pub uvs2: Vec<Vec2>,
     pub indices: Vec<u32>,
     /// 有蒙皮时每顶点四个权重（已归一化）和四个骨骼序号。
     pub weights: Vec<[f32; 4]>,
@@ -175,6 +177,12 @@ pub fn parse_pmf(data: &[u8]) -> Result<PmfMesh, FormatError> {
         let mut uv = Reader::at(data, base + remainder);
         for _ in 0..vertex_count {
             mesh.uvs.push(Vec2::new(uv.f32()?, uv.f32()?));
+        }
+        // 第二套紧跟在第一套后面，同样是全部顶点一整块。
+        if uv_sets > 1 {
+            for _ in 0..vertex_count {
+                mesh.uvs2.push(Vec2::new(uv.f32()?, uv.f32()?));
+            }
         }
     }
     let mut indices = Reader::at(data, data.len() - index_bytes);

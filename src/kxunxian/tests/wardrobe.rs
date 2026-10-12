@@ -47,7 +47,7 @@ fn every_wardrobe_part_gets_a_texture() {
             &character,
             &Outfit {
                 parts,
-                equips: Vec::new(),
+                ..Default::default()
             },
         );
         for node in model.nodes() {

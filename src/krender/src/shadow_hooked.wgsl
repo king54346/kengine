@@ -40,6 +40,8 @@ struct HookedShadowOutput {
     // 实例的颜色和自定义数据（实例化节点；普通物体是白色和 0）。片元阶段不读实例缓冲，靠这两项。
     @location(5) @interpolate(flat) instance_color: vec4<f32>,
     @location(6) @interpolate(flat) instance_data: vec4<f32>,
+    // 顶点色：主 pass 的底色是 `材质底色 × 底色贴图 × 顶点色`，这里照乘。
+    @location(7) color: vec3<f32>,
 };
 
 // 钩子改过的 uv 写回 `in`，镂空钩子在片元里看到的和主画面同一套 uv。
@@ -74,6 +76,7 @@ fn hooked_shadow_output(in: VertexInput, model: mat4x4<f32>, position: vec3<f32>
     let extra = instance_of(instance);
     out.instance_color = extra.color;
     out.instance_data = extra.data;
+    out.color = in.color;
     return out;
 }
 
@@ -129,7 +132,11 @@ fn shadow_hooked_fs(in: HookedShadowOutput) {
     surface.bitangent = vec3<f32>(0.0, 0.0, 1.0);
     surface.params = object.params;
     surface.instance_data = in.instance_data;
-    surface.base_color = object.base_color;
+    // 底色要和主 pass 一样乘上底色贴图：按 alpha 剪裁的钩子（`Physical::alpha_cutoff`、头发、羽毛、
+    // 树叶）判断的就是 `base_color.a`。只给材质常量的话 alpha 恒为 1，影子一个像素都裁不掉——
+    // 镂空的翅膀投下来的是整块实心的影子。
+    let sampled = textureSample(base_color_texture, base_color_sampler, surface.uv);
+    surface.base_color = object.base_color * sampled * vec4<f32>(in.color, 1.0);
     surface.normal = surface.geometric_normal;
     surface.metallic = object.metallic;
     surface.roughness = object.roughness;

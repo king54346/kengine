@@ -201,6 +201,8 @@ impl PhysicsWorld {
         let (force_tx, contact_force_rx) = mpsc::channel();
         let inner = rp::PhysicsWorld {
             gravity: to_rv(Vec2::new(0.0, -9.81)),
+            // parry 的「形状 × 半空间」接触查询算反了，见 `halfspace_fix`。
+            narrow_phase: super::halfspace_fix::narrow_phase(),
             ..Default::default()
         };
 

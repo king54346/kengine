@@ -330,3 +330,20 @@ fn the_2d_and_3d_controllers_share_their_parameter_types() {
     };
     assert!(controller.autostep.is_some());
 }
+
+#[test]
+fn a_distant_half_space_does_not_push_the_character_up() {
+    // 同 3D 那边同名测试：parry 的「形状 × 半空间」接触查询算反了，修正在 `halfspace_fix`。
+    let mut world = world_with_ground();
+    let floor = world.add_body(
+        &RigidBodyDesc::fixed().with_position(Vec2::new(0.0, -30.0)),
+        3,
+    );
+    world.add_collider(&ColliderDesc::half_space(Vec2::Y), Some(floor), 3);
+    let body = add_character(&mut world, Vec2::new(0.0, STAND_Y));
+
+    walk(&mut world, &CharacterController::default(), body, 0.0, 60);
+
+    let y = position(&world, body).y;
+    assert!((y - STAND_Y).abs() < 0.1, "该站在 {STAND_Y} 附近，实测 {y}");
+}

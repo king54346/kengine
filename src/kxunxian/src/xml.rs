@@ -13,6 +13,8 @@ pub struct Element {
     pub text: String,
     /// 是否是结束标签（`</Material>`）。
     pub closing: bool,
+    /// 是否是自闭合标签（`<Fit/>`）：没有对应的结束标签，跟踪层级时要知道。
+    pub self_closing: bool,
 }
 
 impl Element {
@@ -68,6 +70,7 @@ pub fn elements(text: &str) -> Vec<Element> {
         let inner = &rest[..end];
         rest = &rest[end + 1..];
         let closing = inner.starts_with('/');
+        let self_closing = !closing && inner.ends_with('/');
         let inner = inner.trim_start_matches('/').trim_end_matches('/');
         let tag_end = inner
             .find(|c: char| c.is_whitespace())
@@ -75,6 +78,7 @@ pub fn elements(text: &str) -> Vec<Element> {
         let mut element = Element {
             tag: inner[..tag_end].to_string(),
             closing,
+            self_closing,
             ..Default::default()
         };
         let mut attrs = &inner[tag_end..];

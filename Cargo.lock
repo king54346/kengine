@@ -2415,6 +2415,7 @@ dependencies = [
  "kmath",
  "kmesh",
  "kpbr",
+ "kshader",
  "ktexture",
 ]
 

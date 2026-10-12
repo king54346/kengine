@@ -54,6 +54,11 @@ mod convert;
 pub mod d2;
 mod debug;
 mod events;
+/// parry 半空间接触查询的修正，见文件里的说明。
+mod halfspace_fix {
+    use rapier3d as rapier;
+    include!("halfspace_fix.rs");
+}
 mod joint;
 mod query;
 mod soft;

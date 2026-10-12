@@ -12,4 +12,5 @@ kmaterial = { path = "../kmaterial" }
 kmath = { path = "../kmath" }
 kmesh = { path = "../kmesh" }
 kpbr = { path = "../kpbr" }
+kshader = { path = "../kshader" }
 ktexture = { path = "../ktexture" }

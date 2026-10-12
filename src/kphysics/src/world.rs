@@ -102,7 +102,11 @@ impl PhysicsWorld {
         let (force_tx, contact_force_rx) = mpsc::channel();
 
         Self {
-            inner: rp::PhysicsWorld::new(),
+            // 换掉默认窄相：parry 的「形状 × 半空间」接触查询算反了，见 `halfspace_fix`。
+            inner: rp::PhysicsWorld {
+                narrow_phase: crate::halfspace_fix::narrow_phase(),
+                ..Default::default()
+            },
             enabled: true,
             event_handler: rp::ChannelEventCollector::new(collision_tx, force_tx),
             collision_rx,
