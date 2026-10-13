@@ -44,9 +44,10 @@ pub use instance::Instance;
 pub use knav::{GroundSample, NavGrid, NavGridSettings};
 pub use kphysics::d2;
 pub use kphysics::{
-    BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, CollisionEvent, InteractionGroups,
-    JointDesc, JointHandle, JointKind, PhysicsWorld, RayCastOptions, RayHit, RigidBodyDesc,
-    RigidBodyType, ShapeCastOptions, SphericalLimits,
+    BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, CollisionEvent, FractureOptions,
+    FracturePieceGeometry, FracturePieces, FracturePlane, InteractionGroups, JointDesc,
+    JointHandle, JointKind, PhysicsWorld, RayCastOptions, RayHit, RigidBodyDesc, RigidBodyType,
+    ShapeCastOptions, SphericalLimits,
 };
 pub use ksprite::{SortMode, SpriteInstance, SpriteRegion};
 pub use kterrain::{Brush, Terrain};
@@ -2441,6 +2442,196 @@ impl Scene {
     pub fn node_of_physics_user_data(&self, data: u128) -> Option<Handle<Node>> {
         let handle = Handle::<Node>::decode_from_u128(data);
         self.nodes.is_valid_handle(handle).then_some(handle)
+    }
+
+    /// 用世界空间平面把一个节点切成两块（真切割碎裂）。
+    ///
+    /// 之前示例里的碎裂是删一加八——碎块形状与撞击方向无关。
+    /// 这里走 [`PhysicsWorld::fracture_collider`]：按一个 [`FracturePlane`] 切（撞击碎裂用
+    /// [`FracturePlane::from_impact`]：过撞击点、包含撞击方向），母体两侧各自重建凸包，生成两个继承速度与
+    /// 材质的子刚体，场景侧给它们包上新节点（网格、材质、刚体、碰撞体）。
+    ///
+    /// # 只支持「刚体 + 碰撞体同节点」的简单物体
+    ///
+    /// 复合体（碰撞体挂在子节点、或一个刚体带多个碰撞体）直接返回 `None`：
+    /// 切完之后多出来的碰撞体挂到哪块上都会改变质量分布，不如明确拒绝。
+    /// 母体是静态 / 运动学刚体也没关系，碎块一律动态（静止的东西被切了
+    /// 还静止就太假了）。
+    ///
+    /// # 失败时只多两个空节点
+    ///
+    /// 平面没切到、切出薄片、凸包重建失败都返回 `None`。实现上先建了两个
+    /// 占位子节点才有句柄可填进 `user_data`（原生侧没有事后改 user_data
+    /// 的 setter），失败时会把它们删掉，母节点与物理世界保持原样。
+    ///
+    /// # 传进来的变换
+    ///
+    /// 碎块挂在母体的父节点下（与母体同级），位姿取自切完后子刚体的世界
+    /// 位姿，网格按真实米制尺寸生成，所以节点缩放恒为 1——母体的缩放不会
+    /// 遗传。母体的材质会克隆给两块，网格不会（形状已经不一样了）。
+    /// 母节点的子节点（如果有）跟着母体一起删掉，不会过继。
+    pub fn fracture_node(
+        &mut self,
+        handle: Handle<Node>,
+        plane: &FracturePlane,
+        opts: &FractureOptions,
+    ) -> Option<[Handle<Node>; 2]> {
+        if handle == self.root {
+            return None;
+        }
+        // 母体原生可能还没建出来（这一帧刚加的节点）：先同步一次，
+        // 保证后面读到的是与场景一致的刚体 / 碰撞体。
+        self.sync_to_physics();
+        // 快照：借用立马释放，后面又加节点又切世界，不能一直借着。
+        let (parent, name, material, body_desc, collider_desc, collider_native) = {
+            let node = self.try_get(handle)?;
+            let body_native = node.rigid_body.as_ref()?.native()?;
+            let collider_native = node.collider.as_ref()?.native()?;
+            // 碰撞体必须就挂在这个刚体上，复合体拒绝。
+            if self.physics.collider_parent(collider_native)? != body_native {
+                return None;
+            }
+            (
+                node.parent,
+                node.name.clone(),
+                node.material.clone(),
+                node.rigid_body.as_ref()?.desc().clone(),
+                node.collider.as_ref()?.desc_ref().clone(),
+                collider_native,
+            )
+        };
+
+        // 占位子节点：先占句柄——原生 user_data 没有事后改的 setter，
+        // 调用 `fracture_collider` 之前必须把最终句柄填进 opts。
+        // 网格与形状切完再填；这之间没有同步（都在本函数内），
+        // 不会有原生对象被提前建出来。
+        let piece_body_desc = {
+            let mut desc = body_desc;
+            desc.body_type = RigidBodyType::Dynamic;
+            desc
+        };
+        let make_shard = |index: usize| {
+            let mut node = Node::new(format!("{name}-shard-{index}"))
+                .with_rigid_body(RigidBody::new(piece_body_desc.clone()))
+                .with_collider(Collider::new(collider_desc.clone()));
+            if let Some(material) = material.clone() {
+                node = node.with_material(material);
+            }
+            node
+        };
+        // 占位节点持有的是母体描述的克隆，切完后再回填真实形状。
+        let shard_a = make_shard(0);
+        let shard_b = make_shard(1);
+        let children = [
+            self.add_node_with_parent(shard_a, parent),
+            self.add_node_with_parent(shard_b, parent),
+        ];
+
+        let mut opts = opts.clone();
+        opts.child_user_data = Some([children[0].encode_to_u128(), children[1].encode_to_u128()]);
+        opts.child_collider_user_data =
+            Some([children[0].encode_to_u128(), children[1].encode_to_u128()]);
+
+        let Some(pieces) = self
+            .physics
+            .fracture_collider(collider_native, plane, &opts)
+        else {
+            // 切失败：占位节点删掉，母体没动过，世界原样。
+            self.remove_node(children[0]);
+            self.remove_node(children[1]);
+            return None;
+        };
+
+        // 阈值与物理侧同规则：非负显式指定（0 = 静默），负值继承母体。
+        let threshold = if opts.child_contact_threshold >= 0.0 {
+            opts.child_contact_threshold
+        } else {
+            collider_desc.contact_force_threshold
+        };
+
+        for (index, child) in children.iter().enumerate() {
+            let body = pieces.bodies[index];
+            let collider = pieces.colliders[index];
+            let geometry = &pieces.geometry[index];
+            let (position, rotation) = self.physics.body(body)?.pose();
+            let (linvel, angvel, sleeping) = {
+                let native = self.physics.body(body)?;
+                (native.linvel(), native.angvel(), native.is_sleeping())
+            };
+            let mesh = Self::shard_mesh(geometry);
+            // 子刚体位姿是世界空间的，节点变换是相对父节点的，换算回去。
+            // 网格已是真实米制尺寸，缩放恒为 1，不继承母体缩放。
+            let world = Mat4::from_rotation_translation(rotation, position);
+            let local = if self.nodes.is_valid_handle(parent) {
+                self.world_matrix(parent).inverse() * world
+            } else {
+                world
+            };
+            let mut transform = Transform::from_matrix(local);
+            transform.scale = Vec3::ONE;
+
+            let Ok(node) = self.nodes.try_borrow_mut(*child) else {
+                // 节点凭空没了（正常流程走不到这里）：回滚已切的世界。
+                self.physics.remove_collider(collider);
+                self.physics.remove_body(body);
+                self.remove_node(children[(index + 1) % 2]);
+                self.remove_node(handle);
+                return None;
+            };
+            node.transform = transform;
+            node.set_mesh(mesh);
+            if let Some(body_component) = node.rigid_body.as_deref_mut() {
+                let desc = body_component.desc_mut();
+                desc.body_type = RigidBodyType::Dynamic;
+                desc.position = position;
+                desc.rotation = rotation;
+                desc.linvel = linvel;
+                desc.angvel = angvel;
+                body_component.set_native(Some(body));
+                body_component.read_back(linvel, angvel, sleeping);
+            }
+            if let Some(collider_component) = node.collider.as_deref_mut() {
+                // 直接改 desc 的形状字段，不走 `set_shape`：后者会标
+                // shape_dirty，下次同步就把刚建好的原生碰撞体重建一遍
+                // （句柄换掉、白费一次凸包构建）。`desc_mut` 只标
+                // desc_dirty，同步时顶多重推一遍摩擦之类的数值，无害。
+                let desc = collider_component.desc_mut();
+                desc.shape =
+                    ColliderShape::ConvexHull(std::sync::Arc::new(geometry.points.clone()));
+                desc.position = Vec3::ZERO;
+                desc.rotation = Quat::IDENTITY;
+                desc.contact_force_threshold = threshold;
+                *collider_component.native_mut() = Some(collider);
+                collider_component.set_bound_to(Some(body));
+            }
+        }
+
+        // 母体删掉。物理侧母体刚体已被 `fracture_collider` 删掉，
+        // 这里的重复删除走 rapier set 层返回 None，不 panic。
+        self.remove_node(handle);
+        Some(children)
+    }
+
+    /// 按碎块几何建渲染网格：顶点在子刚体局部空间，平面着色——每个三角形自己一套顶点、用面法线。
+    ///
+    /// 凸包的一个角被几个互相垂直的面共用，按顶点平均法线的话，方方正正的碎块
+    /// 会被着色成圆鼓鼓的一团；切面也该是平的。
+    pub(crate) fn shard_mesh(geometry: &FracturePieceGeometry) -> Mesh {
+        let count = geometry.points.len();
+        let mut vertices = Vec::with_capacity(geometry.indices.len());
+        for triangle in geometry.indices.chunks_exact(3) {
+            let [a, b, c] = [triangle[0], triangle[1], triangle[2]].map(|i| i as usize);
+            if a >= count || b >= count || c >= count {
+                continue;
+            }
+            let [pa, pb, pc] = [geometry.points[a], geometry.points[b], geometry.points[c]];
+            let Some(normal) = (pb - pa).cross(pc - pa).try_normalize() else {
+                continue;
+            };
+            vertices.extend([pa, pb, pc].map(|p| Vertex::new(p, normal, [0.0, 0.0])));
+        }
+        let indices = (0..vertices.len() as u32).collect();
+        Mesh::new(vertices, indices)
     }
 }
 

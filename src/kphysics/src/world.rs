@@ -15,7 +15,7 @@ use rapier3d::{
     pipeline as rp,
     prelude::{QueryFilter, Ray},
 };
-use std::{sync::mpsc, time::Duration, time::Instant};
+use std::{collections::HashMap, sync::Arc, sync::mpsc, time::Duration, time::Instant};
 
 /// 一次步进的耗时统计。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -76,6 +76,59 @@ pub struct PhysicsWorld {
     stats: PhysicsStats,
     /// 自上次步进以来有没有增删过刚体 / 碰撞体。
     query_structures_stale: bool,
+    /// 求解用的线程池，见 [`set_solver_threads`](Self::set_solver_threads)。
+    solver: Arc<rayon::ThreadPool>,
+}
+
+/// 「自动」最多开几个求解线程。rayon 在十几个线程间分发、同步的开销比省下的还多（见
+/// [`PhysicsWorld::set_solver_threads`] 里的数）。
+pub const AUTO_SOLVER_THREADS: usize = 4;
+
+/// 线程数为 `threads` 的求解线程池。同样线程数的世界共用一个——测试、编辑器里一建就是几十个世界，
+/// 一个世界一个池的话线程会多到离谱。
+pub(crate) fn solver_pool(threads: usize) -> Arc<rayon::ThreadPool> {
+    static POOLS: std::sync::OnceLock<std::sync::Mutex<HashMap<usize, Arc<rayon::ThreadPool>>>> =
+        std::sync::OnceLock::new();
+    let threads = threads.max(1);
+    let mut pools = POOLS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    pools
+        .entry(threads)
+        .or_insert_with(|| {
+            Arc::new(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .thread_name(|index| format!("kphysics-solver-{index}"))
+                    .build()
+                    .expect("建不出物理求解线程池"),
+            )
+        })
+        .clone()
+}
+
+/// 见 [`PhysicsWorld::point_query`]。
+pub(crate) struct PointQuery<'a>(&'a rp::PhysicsWorld);
+
+impl PointQuery<'_> {
+    /// 离 `point` 最近的碰撞体表面点（`solid = false`，所有分组）：`(表面点, 在不在里面, 所属刚体)`。
+    pub(crate) fn project(
+        &self,
+        point: Vec3,
+        max_distance: f32,
+    ) -> Option<(Vec3, bool, Option<BodyHandle>)> {
+        let filter = QueryFilter::new().groups(InteractionGroups::ALL.to_rapier());
+        let (handle, projection) =
+            self.0
+                .project_point(to_rv(point), max_distance, false, filter)?;
+        let body = self.0.colliders.get(handle).and_then(|c| c.parent());
+        Some((
+            from_rv(projection.point),
+            projection.is_inside,
+            body.map(BodyHandle),
+        ))
+    }
 }
 
 impl Default for PhysicsWorld {
@@ -115,7 +168,33 @@ impl PhysicsWorld {
             contact_force_events: Vec::new(),
             stats: PhysicsStats::default(),
             query_structures_stale: false,
+            solver: solver_pool(1),
         }
+    }
+
+    /// 求解用几个线程（默认 1）。`0` 是自动：核数减一（留一个给主线程），最多 [`AUTO_SOLVER_THREADS`] 个。
+    ///
+    /// rapier 的并行（宽相、窄相、约束求解）全写死在 rayon 上，换不成引擎的 ktask，所以 rayon 关在
+    /// 这个 crate 里：线程数相同的世界共用一个池，[`step`](Self::step) 时把整步放进去跑，
+    /// rapier 不会再自己开一个按核数满开的全局池。
+    ///
+    /// 默认 1 个线程：结果逐位可复现，小场景也没有分发的开销。几百个物体扎堆碰的场景再开
+    /// （`benches/physics.rs` 的 `stacked_threads`，16 线程的笔记本上：500 个箱子 1 线程 1.04 ms、
+    /// 4 线程 0.62 ms、开满 15 线程 0.73 ms；100 个箱子时开多线程反而慢一倍）。
+    pub fn set_solver_threads(&mut self, threads: usize) {
+        let threads = if threads == 0 {
+            ktask::available_parallelism()
+                .saturating_sub(1)
+                .clamp(1, AUTO_SOLVER_THREADS)
+        } else {
+            threads
+        };
+        self.solver = solver_pool(threads);
+    }
+
+    /// 求解用几个线程。
+    pub fn solver_threads(&self) -> usize {
+        self.solver.current_num_threads()
     }
 
     /// 当前重力。
@@ -186,7 +265,8 @@ impl PhysicsWorld {
         self.inner.integration_parameters.dt = dt.max(0.0);
 
         let start = Instant::now();
-        self.inner.step_with_events(&(), &self.event_handler);
+        let (inner, events) = (&mut self.inner, &self.event_handler);
+        self.solver.install(|| inner.step_with_events(&(), events));
         // rapier 的 `add_force` / `add_torque` 是**持续**的：不清的话每加一次就永久叠上去，
         // 每步都加浮力的船几秒后就被推上天。`BodyMut::add_force` 承诺的是「只作用这一步」，
         // 这里兑现它。
@@ -216,7 +296,8 @@ impl PhysicsWorld {
         }
         // 步长为 0 的一步：碰撞检测跑完、BVH 更新完，但什么都不会动。
         self.inner.integration_parameters.dt = 0.0;
-        self.inner.step_with_events(&(), &self.event_handler);
+        let (inner, events) = (&mut self.inner, &self.event_handler);
+        self.solver.install(|| inner.step_with_events(&(), events));
         self.query_structures_stale = false;
         self.drain_events();
     }
@@ -461,6 +542,12 @@ impl PhysicsWorld {
         filter
     }
 
+    /// 点查询的只读视图，可以跨线程共享（`PhysicsWorld` 本身带着事件通道的接收端，不是 `Sync`）。
+    /// 软体在 ktask 上并行投影粒子用它。
+    pub(crate) fn point_query(&self) -> PointQuery<'_> {
+        PointQuery(&self.inner)
+    }
+
     fn user_data_of(
         &self,
         collider: rapier3d::geometry::ColliderHandle,
@@ -642,6 +729,66 @@ mod test {
     use super::*;
     use crate::{ColliderDesc, RigidBodyType};
     use kmath::Quat;
+
+    /// 一片 10 × 10 的箱子堆（每堆 4 个），跑 3 秒，返回每个箱子最后的高度。
+    fn settle_stacks(threads: usize) -> (usize, Vec<f32>) {
+        let mut world = PhysicsWorld::new();
+        world.set_solver_threads(threads);
+        let ground = world.add_body(&RigidBodyDesc::fixed(), 0);
+        world
+            .add_collider(
+                &ColliderDesc::cuboid(Vec3::new(50.0, 0.5, 50.0)),
+                Some(ground),
+                0,
+            )
+            .unwrap();
+        let mut boxes = Vec::new();
+        for i in 0..10 {
+            for j in 0..10 {
+                for k in 0..4 {
+                    let body = world.add_body(
+                        &RigidBodyDesc::dynamic().with_position(Vec3::new(
+                            i as f32 * 2.0,
+                            1.0 + k as f32 * 1.05,
+                            j as f32 * 2.0,
+                        )),
+                        0,
+                    );
+                    world
+                        .add_collider(&ColliderDesc::cuboid(Vec3::splat(0.5)), Some(body), 0)
+                        .unwrap();
+                    boxes.push(body);
+                }
+            }
+        }
+        for _ in 0..180 {
+            world.step(1.0 / 60.0);
+        }
+        let heights = boxes
+            .iter()
+            .map(|&b| world.body(b).unwrap().position().y)
+            .collect();
+        (world.solver_threads(), heights)
+    }
+
+    #[test]
+    fn a_multi_threaded_solver_settles_stacks_like_a_single_threaded_one() {
+        let (one, single) = settle_stacks(1);
+        let (four, multi) = settle_stacks(4);
+        assert_eq!((one, four), (1, 4));
+        // 四百个箱子都稳稳地落在各自的层上（地面顶在 0.5，底层中心 1.0，每层 1 米），不管几个线程。
+        for heights in [&single, &multi] {
+            for (index, &y) in heights.iter().enumerate() {
+                let layer = (index % 4) as f32;
+                assert!(
+                    (y - (1.0 + layer)).abs() < 0.1,
+                    "第 {index} 个箱子在 y = {y}"
+                );
+            }
+        }
+        // 单线程逐位可复现。
+        assert_eq!(single, settle_stacks(1).1);
+    }
 
     #[test]
     fn forces_only_last_one_step() {

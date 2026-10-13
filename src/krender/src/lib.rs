@@ -12,6 +12,7 @@ mod capture;
 #[cfg(test)]
 mod cascade_batch_tests;
 mod compute;
+mod cull;
 pub mod effects;
 mod frame;
 mod gizmo;
@@ -457,6 +458,8 @@ pub(crate) struct FrameInstances<'a> {
     pub slots: Vec<InstanceSlot>,
     /// 和 `objects` 一一对齐的世界包围盒（阴影逐级剔除按槽的对象下标回查；实例化节点是整组的）。
     pub bounds: Vec<kmath::Aabb>,
+    /// 和 `objects` 一一对齐的网格局部包围盒（GPU 逐实例剔除用）。
+    pub local_bounds: Vec<kmath::Aabb>,
     /// `collect_draws` 收来的实例化节点的实例，[`DrawCall::instances`] 是这里的下标。
     pub lists: Vec<&'a [kscene::Instance]>,
     /// 每份实例在实例数据缓冲里的起点。遮罩 pass 复制出来的绘制项和原件共用一份，不重复上传。
@@ -480,6 +483,7 @@ impl<'a> FrameInstances<'a> {
         let object = self.objects.len() as u32;
         self.objects.push(draw.uniforms);
         self.bounds.push(draw.aabb);
+        self.local_bounds.push(draw.local_aabb);
         let Some(list) = draw.instances else {
             self.slots.push([object, NO_INSTANCE]);
             return 1;
@@ -612,8 +616,10 @@ struct DrawCall {
     ///
     /// 存平方而不是距离：只用来比大小，开方是白花的。
     depth: f32,
-    /// 世界空间包围盒，阴影的逐级剔除要用。
+    /// 世界空间包围盒，阴影的逐级剔除要用。不投影的是空盒子。
     aabb: kmath::Aabb,
+    /// 网格的局部包围盒。实例化节点的 GPU 逐实例剔除要用（实例的包围盒 = 它 × 模型 × 实例矩阵）。
+    local_aabb: kmath::Aabb,
     /// 只画索引缓冲的 `(起点, 数量)`。子网格材质组的产物；
     /// 没有分组的网格恒为 `(0, 整份网格的索引数)`。
     ///
@@ -647,6 +653,8 @@ struct Batch {
     count: u32,
     /// 只画索引缓冲的 `(起点, 数量)`，见 [`DrawCall::index_range`]。
     index_range: (u32, u32),
+    /// 在本帧 GPU 剔除表里的下标（[`cull::NO_BATCH`] = 没进表，直接绘制）。见 [`cull`]。
+    cull: u32,
 }
 
 /// 交换链怎么出帧。
@@ -867,6 +875,7 @@ fn build_batches_into(draws: &[DrawCall], out: &mut FrameInstances, reorder: boo
                     first: out.slots.len() as u32 - added,
                     count: added,
                     index_range: draw.index_range,
+                    cull: cull::NO_BATCH,
                 }),
             }
         }
@@ -923,6 +932,7 @@ fn build_opaque_batches(draws: &[DrawCall], out: &mut FrameInstances) -> Vec<Bat
                 first: out.slots.len() as u32 - added,
                 count: added,
                 index_range: draw.index_range,
+                cull: cull::NO_BATCH,
             }),
         }
     }
@@ -976,9 +986,18 @@ pub struct Renderer {
     object_bind_group: wgpu::BindGroup,
     /// 当前对象缓冲能容纳的对象数。
     object_capacity: u64,
-    /// 实例槽（每个 GPU 实例一个，见 [`InstanceSlot`]）。
+    /// 实例槽（每个 GPU 实例一个，见 [`InstanceSlot`]）。各个 pass 绑的就是它。
+    ///
+    /// 开着 GPU 剔除时它是压紧结果：一个视图一段（相机、阴影各层），CPU 写的原始槽在
+    /// [`cull::GpuCull`] 里。见 [`cull`]。
     slot_buffer: wgpu::Buffer,
     slot_capacity: u64,
+    /// GPU 逐实例剔除 + 间接绘制。适配器不支持 `INDIRECT_FIRST_INSTANCE` 时为 `None`。
+    gpu_cull: Option<cull::GpuCull>,
+    /// 要不要用 GPU 剔除（有 `gpu_cull` 时默认开）。见 [`Renderer::set_gpu_culling`]。
+    gpu_culling: bool,
+    /// 本帧用了 GPU 剔除：各个 pass 按批次的 `cull` 下标走间接绘制。
+    cull_active: bool,
     /// 实例数据（`kscene::Instance`，每个实例 96 字节）。
     instance_buffer: wgpu::Buffer,
     instance_capacity: u64,
@@ -1446,7 +1465,7 @@ impl MaterialPipelines {
 /// 这一套和主 pass 一样先过顶点钩子。
 struct HookedPasses {
     shadow: [wgpu::RenderPipeline; 2],
-    prepass: [wgpu::RenderPipeline; 2],
+    prepass: ssao::PrepassPipelines,
 }
 
 /// 阴影 pass 所需的一组 GPU 资源。
@@ -1554,10 +1573,13 @@ impl Renderer {
                 label: Some("kengine device"),
                 // 时间戳查询给剖析器用，有就开、没有不强求。
                 // 管线缓存同理：支持就开，冷启动少编几十条管线。
+                // 间接绘制的 `first_instance` 不为 0 要 `INDIRECT_FIRST_INSTANCE`：有就开 GPU 剔除，
+                // 没有就照旧在 CPU 上剔（见 `cull`）。
                 required_features: adapter.features()
                     & (wgpu::Features::TIMESTAMP_QUERY
                         | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
-                        | wgpu::Features::PIPELINE_CACHE),
+                        | wgpu::Features::PIPELINE_CACHE
+                        | wgpu::Features::INDIRECT_FIRST_INSTANCE),
                 required_limits: required_limits(&adapter),
                 ..Default::default()
             })
@@ -1565,6 +1587,10 @@ impl Renderer {
             .unwrap();
 
         let gpu_timer = gpu_profile::GpuTimer::new(&device, &queue);
+        let gpu_cull = device
+            .features()
+            .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
+            .then(|| cull::GpuCull::new(&device));
         // 无头渲染器（测试、基准）不碰用户的缓存目录。
         let pipeline_cache = if surface.is_some() {
             pipeline_cache::DiskPipelineCache::open(&device, &adapter)
@@ -2277,6 +2303,9 @@ impl Renderer {
             object_capacity: Self::INITIAL_CAPACITY,
             slot_buffer,
             slot_capacity: Self::INITIAL_CAPACITY,
+            gpu_cull,
+            gpu_culling: true,
+            cull_active: false,
             instance_buffer,
             instance_capacity: Self::INITIAL_CAPACITY,
             instance_generation: 0,
@@ -2645,7 +2674,8 @@ impl Renderer {
         id
     }
 
-    /// 建带顶点钩子的材质在阴影 pass、预通道里用的四条管线。
+    /// 建带钩子的材质（顶点钩子、镂空）在阴影 pass、预通道里用的管线：阴影 静态 / 蒙皮，
+    /// 预通道再乘上单面 / 双面。
     ///
     /// 包在错误作用域里：钩子读了 `globals`（阴影管线的 group 0 是光空间矩阵，不是它）之类的
     /// 情况建不出来，wgpu 默认会直接 panic。这里退回普通深度管线，记一条警告。
@@ -2705,26 +2735,19 @@ impl Renderer {
                     constants,
                 ),
             ],
-            prepass: [
-                ssao::create_prepass_pipeline(
-                    &self.device,
-                    &prepass_layout,
-                    module,
-                    "prepass_vs",
-                    &static_buffers,
-                    "kengine hooked prepass",
-                    constants,
-                ),
-                ssao::create_prepass_pipeline(
-                    &self.device,
-                    &prepass_layout,
-                    module,
-                    "prepass_vs_skinned",
-                    &skinned_buffers,
-                    "kengine hooked skinned prepass",
-                    constants,
-                ),
-            ],
+            // 镂空材质的预通道也跑表面钩子，裁掉的地方不写（`prepass_cutout_fs`）。
+            prepass: ssao::PrepassPipelines::new(
+                &self.device,
+                &prepass_layout,
+                module,
+                if cutout {
+                    "prepass_cutout_fs"
+                } else {
+                    "prepass_fs"
+                },
+                "kengine hooked prepass",
+                constants,
+            ),
         };
         match pollster::block_on(scope.pop()) {
             None => Some(passes),
@@ -2896,6 +2919,20 @@ impl Renderer {
     /// 而不是墙上的钟。固定步长渲染（截图回归、录像）时用；`None` 恢复。
     pub fn set_time_override(&mut self, time: Option<(f32, f32)>) {
         self.time_override = time;
+    }
+
+    /// 开关 GPU 逐实例剔除 + 间接绘制（默认开）。适配器不支持（没有 `INDIRECT_FIRST_INSTANCE`）时
+    /// 开了也不生效，见 [`gpu_culling`](Self::gpu_culling)。
+    ///
+    /// 开着时实例化节点按**实例**剔视锥、每层阴影各剔各的，CPU 不再逐级剔阴影；关掉退回
+    /// CPU 那条路（实例化节点整组判一次）。两条路画出来应当一样，关掉是给排查问题用的。
+    pub fn set_gpu_culling(&mut self, enabled: bool) {
+        self.gpu_culling = enabled;
+    }
+
+    /// GPU 剔除实际在不在用：开着，而且适配器支持。
+    pub fn gpu_culling(&self) -> bool {
+        self.gpu_culling && self.gpu_cull.is_some()
     }
 
     /// 额外投影光源最多用几层阴影图，上限 [`LOCAL_SHADOW_LAYERS`]（默认用满）。
@@ -3824,19 +3861,42 @@ impl Renderer {
         // ── 批处理：同网格同贴图的对象合并成一次绘制 ──
         // 对象数据每个绘制项一份，槽每个 GPU 实例一个（实例化节点一个绘制项 N 个槽）。
         let mut frame_instances = FrameInstances::new(instance_lists);
-        let batches = build_batches(&draws, &mut frame_instances);
+        let mut batches = build_batches(&draws, &mut frame_instances);
         // 半透明的批次接在不透明的后面，共用同一个实例数组——
         // 实例下标是全局的，两边分开建数组的话下标会撞。
-        let transparent_batches =
+        let mut transparent_batches =
             build_transparent_batches(&mut transparent_draws, &mut frame_instances);
         // 遮罩的实例接在最后。不重排——遮罩 pass 只关心画没画上，不在乎顺序。
-        let mask_batches = if mask_needed {
+        let mut mask_batches = if mask_needed {
             build_batches_into(&mask_draws, &mut frame_instances, false)
         } else {
             Vec::new()
         };
         stats.draw_calls = (batches.len() + transparent_batches.len() + mask_batches.len()) as u32;
-        self.upload_frame_buffers(&joints, &morph_weights, &frame_instances);
+        // GPU 逐实例剔除：相机一个视图，阴影每层一个（见 `cull`）。
+        let shadow_views: Vec<cull::ShadowView> = if shadow_enabled {
+            cascades
+                .iter()
+                .map(|cascade| cull::ShadowView {
+                    matrix: cascade.matrix,
+                    resolution: settings.resolution.max(256),
+                })
+                .chain(local_faces.iter().map(|matrix| cull::ShadowView {
+                    matrix: *matrix,
+                    resolution: self.shadow.local_resolution,
+                }))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let cull_views = self.prepare_gpu_cull(
+            &frame_instances,
+            [&mut batches, &mut transparent_batches, &mut mask_batches],
+            view_proj,
+            &shadow_views,
+            settings.min_shadow_texels,
+        );
+        self.upload_frame_buffers(&joints, &morph_weights, &frame_instances, cull_views);
 
         self.queue.write_buffer(
             &self.sky_buffer,
@@ -4005,6 +4065,19 @@ impl Renderer {
             let _ = self.device.poll(wgpu::PollType::Poll);
             timer.begin_frame();
             timer.mark(&mut encoder, "阴影");
+        }
+
+        // ── GPU 逐实例剔除：相机和每层阴影的可见槽压紧、写间接参数 ──
+        // 排在所有画几何的 pass 之前：它们绑的槽缓冲就是这里写的。
+        if self.cull_active
+            && let Some(cull) = self.gpu_cull.as_ref()
+        {
+            cull.encode(
+                &self.device,
+                &mut encoder,
+                &self.slot_buffer,
+                &self.instance_buffer,
+            );
         }
 
         // ── 阴影深度 pass ──
@@ -6641,6 +6714,7 @@ mod test {
             skinned: false,
             depth: 0.0,
             aabb: kmath::Aabb::new(kmath::Vec3::ZERO, kmath::Vec3::ONE),
+            local_aabb: kmath::Aabb::new(kmath::Vec3::ZERO, kmath::Vec3::ONE),
             index_range: (0, 36),
             instances: None,
             uniforms: ObjectUniforms::zeroed(),

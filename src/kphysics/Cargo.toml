@@ -8,6 +8,11 @@ kcore = { path = "../kcore" }
 kmath = { path = "../kmath" }
 kmesh = { path = "../kmesh" }
 # debug-render：把碰撞体/关节/接触点拆成线段，只要求一个「画线」回调。
-rapier3d = { version = "0.35", features = ["debug-render"] }
+# parallel：多线程求解。rapier 的并行全写死在 rayon 上（par_iter / broadcast / scope），换不成 ktask；
+# rayon 关在这个 crate 里，线程池由 `PhysicsWorld::set_solver_threads` 管，默认 1 个线程。
+rapier3d = { version = "0.35", features = ["debug-render", "parallel"] }
 # 2D 物理。和 rapier3d 是同一个引擎的两个维度版本，所以仍然关在这一个 crate 里。
-rapier2d = { version = "0.35", features = ["debug-render"] }
+rapier2d = { version = "0.35", features = ["debug-render", "parallel"] }
+rayon = "1"
+# 软体自己的逐粒子碰撞查询走引擎的任务池。
+ktask = { path = "../ktask" }

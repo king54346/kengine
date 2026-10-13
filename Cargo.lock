@@ -2219,8 +2219,10 @@ dependencies = [
  "kcore",
  "kmath",
  "kmesh",
+ "ktask",
  "rapier2d",
  "rapier3d",
+ "rayon",
 ]
 
 [[package]]
@@ -3290,6 +3292,7 @@ dependencies = [
  "num-derive",
  "num-traits",
  "ordered-float",
+ "rayon",
  "simba",
  "slab",
  "smallvec",
@@ -3316,6 +3319,7 @@ dependencies = [
  "num-derive",
  "num-traits",
  "ordered-float",
+ "rayon",
  "rstar",
  "simba",
  "slab",
@@ -3684,6 +3688,7 @@ dependencies = [
  "num-traits",
  "parry2d",
  "profiling",
+ "rayon",
  "serde",
  "simba",
  "static_assertions",
@@ -3706,6 +3711,7 @@ dependencies = [
  "num-traits",
  "parry3d",
  "profiling",
+ "rayon",
  "serde",
  "simba",
  "static_assertions",

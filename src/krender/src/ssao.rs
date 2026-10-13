@@ -175,9 +175,8 @@ struct Targets {
 pub(crate) struct Ssao {
     pub(crate) settings: SsaoSettings,
 
-    /// 预通道的两条管线：静态与蒙皮。顶点布局不同，只能分开。
-    prepass_pipeline: wgpu::RenderPipeline,
-    prepass_skinned_pipeline: wgpu::RenderPipeline,
+    /// 预通道的管线：静态 / 蒙皮（顶点布局不同）× 单面 / 双面。
+    prepass: PrepassPipelines,
 
     ssao_pipeline: wgpu::RenderPipeline,
     ssao_layout: wgpu::BindGroupLayout,
@@ -226,25 +225,12 @@ impl Ssao {
             ),
         });
 
-        let prepass_pipeline = create_prepass_pipeline(
+        let prepass = PrepassPipelines::new(
             device,
             &prepass_layout,
             &prepass_module,
-            "prepass_vs",
-            &[Option::from(crate::vertex_layout())],
+            "prepass_fs",
             "kengine prepass pipeline",
-            &[],
-        );
-        let prepass_skinned_pipeline = create_prepass_pipeline(
-            device,
-            &prepass_layout,
-            &prepass_module,
-            "prepass_vs_skinned",
-            &[
-                Option::from(crate::vertex_layout()),
-                Option::from(crate::skin_layout()),
-            ],
-            "kengine prepass skinned pipeline",
             &[],
         );
 
@@ -277,8 +263,7 @@ impl Ssao {
 
         Self {
             settings: SsaoSettings::default(),
-            prepass_pipeline,
-            prepass_skinned_pipeline,
+            prepass,
             ssao_pipeline,
             ssao_layout,
             params_buffer,
@@ -412,12 +397,12 @@ impl Ssao {
     }
 
     /// 按批次选预通道的管线。
-    pub(crate) fn prepass_pipeline(&self, skinned: bool) -> &wgpu::RenderPipeline {
-        if skinned {
-            &self.prepass_skinned_pipeline
-        } else {
-            &self.prepass_pipeline
-        }
+    pub(crate) fn prepass_pipeline(
+        &self,
+        skinned: bool,
+        double_sided: bool,
+    ) -> &wgpu::RenderPipeline {
+        self.prepass.pick(skinned, double_sided)
     }
 
     /// 开一个预通道。返回的 pass 由调用方填绘制命令。
@@ -801,13 +786,61 @@ pub(crate) fn prepass_source(geometry_prelude: &str) -> String {
     )
 }
 
-/// `constants` 是材质着色器的 `override` 取值（带顶点钩子的材质用；普通预通道给空）。
-pub(crate) fn create_prepass_pipeline(
+/// 预通道的一组管线：`[单面, 双面][静态, 蒙皮]`。
+///
+/// 双面那套不剔背面：双面材质（树叶、布帘）从背面看时，主 pass 画的是背面，预通道也得有它——
+/// 不然那一点的深度、法线、运动向量是后面的东西，SSAO 和 TAA 在那里全对不上。
+pub(crate) struct PrepassPipelines([[wgpu::RenderPipeline; 2]; 2]);
+
+impl PrepassPipelines {
+    /// `fragment` 是片元入口：普通的 `prepass_fs`，镂空材质的 `prepass_cutout_fs`（`shadow_hooked.wgsl`）。
+    /// `constants` 是材质着色器的 `override` 取值（带钩子的材质用；普通预通道给空）。
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        layout: &wgpu::PipelineLayout,
+        module: &wgpu::ShaderModule,
+        fragment: &str,
+        label: &str,
+        constants: &[(&str, f64)],
+    ) -> Self {
+        let static_buffers = [Option::from(crate::vertex_layout())];
+        let skinned_buffers = [
+            Option::from(crate::vertex_layout()),
+            Option::from(crate::skin_layout()),
+        ];
+        Self([false, true].map(|double_sided| {
+            [
+                ("prepass_vs", &static_buffers[..]),
+                ("prepass_vs_skinned", &skinned_buffers[..]),
+            ]
+            .map(|(vertex, buffers)| {
+                create_prepass_pipeline(
+                    device,
+                    layout,
+                    module,
+                    (vertex, fragment),
+                    buffers,
+                    double_sided,
+                    label,
+                    constants,
+                )
+            })
+        }))
+    }
+
+    pub(crate) fn pick(&self, skinned: bool, double_sided: bool) -> &wgpu::RenderPipeline {
+        &self.0[usize::from(double_sided)][usize::from(skinned)]
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_prepass_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     module: &wgpu::ShaderModule,
-    entry_point: &str,
+    (entry_point, fragment): (&str, &str),
     buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
+    double_sided: bool,
     label: &str,
     constants: &[(&str, f64)],
 ) -> wgpu::RenderPipeline {
@@ -826,7 +859,7 @@ pub(crate) fn create_prepass_pipeline(
         },
         fragment: Some(wgpu::FragmentState {
             module,
-            entry_point: Some("prepass_fs"),
+            entry_point: Some(fragment),
             compilation_options,
             targets: &[
                 Some(wgpu::ColorTargetState {
@@ -852,7 +885,7 @@ pub(crate) fn create_prepass_pipeline(
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
+            cull_mode: (!double_sided).then_some(wgpu::Face::Back),
             polygon_mode: wgpu::PolygonMode::Fill,
             unclipped_depth: false,
             conservative: false,

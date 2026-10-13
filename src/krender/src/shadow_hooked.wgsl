@@ -144,3 +144,37 @@ fn shadow_hooked_fs(in: HookedShadowOutput) {
     surface.emissive = vec3<f32>(0.0);
     surface = material_surface(surface);
 }
+
+// 镂空材质的预通道：和阴影一样先把表面钩子跑一遍，钩子 discard 了这一点就不写深度、法线、运动向量。
+// 不跑的话预通道里是整块面片：树叶透明的那一圈挡住了后面的地面，TAA 在那里拿叶子的运动向量去对齐
+// 历史，镜头一平移，叶子、布帘的边缘就拖影、抖动；SSAO 也会在空处算出一圈遮蔽。
+// 这里在主 pass 的相机下，视线方向、屏幕坐标都是真的。
+@fragment
+fn prepass_cutout_fs(in: PrepassOutput, @builtin(front_facing) front_facing: bool) -> PrepassTargets {
+    let object = tinted_object(in.instance, in.instance_color);
+    var surface: Surface;
+    surface.world_position = in.world_position;
+    let normal = normalize(in.world_normal);
+    surface.geometric_normal = select(-normal, normal, front_facing);
+    surface.front_facing = front_facing;
+    surface.uv = in.uv * object.uv_transform.xy + object.uv_transform.zw;
+    surface.uv1 = in.uv1;
+    surface.view_direction = normalize(globals.camera_position.xyz - in.world_position);
+    surface.screen_uv = in.clip_position.xy / max(globals.frame_params.zw, vec2<f32>(1.0));
+    surface.time = globals.frame_params.x;
+    surface.view_depth = linearize_depth(in.clip_position.z);
+    surface.tangent = vec3<f32>(1.0, 0.0, 0.0);
+    surface.bitangent = vec3<f32>(0.0, 0.0, 1.0);
+    surface.params = object.params;
+    surface.instance_data = in.instance_data;
+    // 和阴影入口同理：按 alpha 裁的钩子看的是乘过底色贴图的 `base_color.a`。
+    let sampled = textureSample(base_color_texture, base_color_sampler, surface.uv);
+    surface.base_color = object.base_color * sampled * vec4<f32>(in.color, 1.0);
+    surface.normal = surface.geometric_normal;
+    surface.metallic = object.metallic;
+    surface.roughness = object.roughness;
+    surface.occlusion = 1.0;
+    surface.emissive = vec3<f32>(0.0);
+    surface = material_surface(surface);
+    return prepass_targets(in, front_facing);
+}

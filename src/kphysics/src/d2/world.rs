@@ -146,6 +146,8 @@ pub struct PhysicsWorld {
     contact_force_events: Vec<ContactForceEvent2d>,
     /// 自上次步进以来有没有增删过刚体 / 碰撞体。
     query_structures_stale: bool,
+    /// 求解线程池，和 3D 共用同一组（见 [`crate::PhysicsWorld::set_solver_threads`]）。
+    solver: std::sync::Arc<rayon::ThreadPool>,
 }
 
 /// 2D 的碰撞事件。
@@ -215,7 +217,24 @@ impl PhysicsWorld {
             collision_events: Vec::new(),
             contact_force_events: Vec::new(),
             query_structures_stale: false,
+            solver: crate::world::solver_pool(1),
         }
+    }
+    /// 求解用几个线程（默认 1，`0` 是自动），同 [`crate::PhysicsWorld::set_solver_threads`]。
+    pub fn set_solver_threads(&mut self, threads: usize) {
+        let threads = if threads == 0 {
+            ktask::available_parallelism()
+                .saturating_sub(1)
+                .clamp(1, crate::world::AUTO_SOLVER_THREADS)
+        } else {
+            threads
+        };
+        self.solver = crate::world::solver_pool(threads);
+    }
+
+    /// 求解用几个线程。
+    pub fn solver_threads(&self) -> usize {
+        self.solver.current_num_threads()
     }
 
     /// 重力。
@@ -384,7 +403,8 @@ impl PhysicsWorld {
         }
 
         self.inner.integration_parameters.dt = dt;
-        self.inner.step_with_events(&(), &self.event_handler);
+        let (inner, events) = (&mut self.inner, &self.event_handler);
+        self.solver.install(|| inner.step_with_events(&(), events));
         // rapier 的力是持续的，`BodyMut::add_force` 承诺的是「下一步生效」——用完就清，
         // 和 3D 那边一样（见 `PhysicsWorld::step`）。
         for (_, body) in self.inner.bodies.iter_mut() {
@@ -588,7 +608,8 @@ impl PhysicsWorld {
         }
         // 步长为 0 的一步：碰撞检测跑完、BVH 更新完，但什么都不会动。
         self.inner.integration_parameters.dt = 0.0;
-        self.inner.step_with_events(&(), &self.event_handler);
+        let (inner, events) = (&mut self.inner, &self.event_handler);
+        self.solver.install(|| inner.step_with_events(&(), events));
         self.query_structures_stale = false;
         self.drain_events();
     }

@@ -54,6 +54,7 @@ mod convert;
 pub mod d2;
 mod debug;
 mod events;
+mod fracture;
 /// parry 半空间接触查询的修正，见文件里的说明。
 mod halfspace_fix {
     use rapier3d as rapier;
@@ -74,11 +75,14 @@ pub use collider::{
 };
 pub use debug::PhysicsDebugOptions;
 pub use events::{CollisionEvent, ContactForceEvent};
+pub use fracture::{
+    FractureOptions, FracturePieceGeometry, FracturePieces, FracturePlane, impact_crack_normal,
+};
 pub use joint::{JointDesc, JointKind, SphericalLimits};
 pub use query::{PointProjection, RayCastOptions, RayHit, ShapeCastOptions, ShapeHit};
-pub use soft::{SoftBody, SoftBodySettings};
+pub use soft::{Coupling, SoftBody, SoftBodySettings, step_soft_bodies};
 pub use vehicle::{VehicleController, WheelDesc, WheelState, WheelTuning};
-pub use world::{IntegrationParameters, PhysicsStats, PhysicsWorld};
+pub use world::{AUTO_SOLVER_THREADS, IntegrationParameters, PhysicsStats, PhysicsWorld};
 
 /// 从 4×4 世界变换矩阵里取出刚体位姿，返回 `(位置, 朝向)`，**丢弃缩放**。
 ///
@@ -115,8 +119,9 @@ pub struct MultibodyJointHandle(pub(crate) rapier3d::dynamics::MultibodyJointHan
 /// 常用类型的集中导出。
 pub mod prelude {
     pub use crate::{
-        BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, CollisionEvent, InteractionGroups,
-        JointDesc, JointHandle, JointKind, MultibodyJointHandle, PhysicsWorld, RayCastOptions,
-        RayHit, RigidBodyDesc, RigidBodyType, SphericalLimits,
+        BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, CollisionEvent, FractureOptions,
+        FracturePieceGeometry, FracturePieces, FracturePlane, InteractionGroups, JointDesc,
+        JointHandle, JointKind, MultibodyJointHandle, PhysicsWorld, RayCastOptions, RayHit,
+        RigidBodyDesc, RigidBodyType, SphericalLimits,
     };
 }

@@ -297,6 +297,21 @@ impl CoefficientCombineRule {
         }
     }
 
+    /// 从 rapier 的合成规则读回。`ClampedSum` 与 `GeometricMean`
+    /// 在 kphysics 侧没有对应项（几乎没人用），回落成 `Average`——
+    /// 判定走的是「序号更大者胜」，而这两位序号本就排在后面，
+    /// 真碰上了按平均处理偏差最小。
+    pub(crate) fn from_rapier(rule: rapier3d::dynamics::CoefficientCombineRule) -> Self {
+        use rapier3d::dynamics::CoefficientCombineRule as R;
+        match rule {
+            R::Average => CoefficientCombineRule::Average,
+            R::Min => CoefficientCombineRule::Min,
+            R::Multiply => CoefficientCombineRule::Multiply,
+            R::Max => CoefficientCombineRule::Max,
+            _ => CoefficientCombineRule::Average,
+        }
+    }
+
     /// 同上，2D 版。rapier2d 和 rapier3d 的这个枚举是两个不同的类型，
     /// 尽管长得一模一样。
     pub(crate) fn to_rapier2d(self) -> rapier2d::dynamics::CoefficientCombineRule {
@@ -363,7 +378,6 @@ impl InteractionGroups {
         )
     }
 
-    /// 同上，2D 版。
     pub(crate) fn to_rapier2d(self) -> rapier2d::geometry::InteractionGroups {
         use rapier2d::geometry as rg2;
         rg2::InteractionGroups::new(
@@ -371,6 +385,17 @@ impl InteractionGroups {
             rg2::Group::from_bits_truncate(self.filter),
             Default::default(),
         )
+    }
+
+    /// 从 rapier 的分组读回。
+    ///
+    /// rapier 侧的 `Group` 只有 32 位可用（`u32::MAX` 全开），
+    /// 与这边的 `u32` 一一对应，按位搬回来即可。
+    pub(crate) fn from_rapier(groups: rg::InteractionGroups) -> Self {
+        Self {
+            memberships: groups.memberships.into(),
+            filter: groups.filter.into(),
+        }
     }
 }
 
@@ -575,6 +600,23 @@ impl ColliderRef<'_> {
     /// 按当前密度算出的质量。
     pub fn mass(&self) -> f32 {
         self.0.mass()
+    }
+
+    /// 是否上报碰撞开始 / 结束事件。
+    pub fn emits_collision_events(&self) -> bool {
+        self.0
+            .active_events()
+            .contains(rapier3d::pipeline::ActiveEvents::COLLISION_EVENTS)
+    }
+
+    /// 上报接触力事件的阈值（牛顿）。0 表示不上报。
+    pub fn contact_force_threshold(&self) -> f32 {
+        self.0.contact_force_event_threshold()
+    }
+
+    /// 是否启用。
+    pub fn is_enabled(&self) -> bool {
+        self.0.is_enabled()
     }
 
     /// 用户数据。

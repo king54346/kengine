@@ -487,7 +487,8 @@ impl Library {
             return Vec::new();
         };
         let elements = xml::elements(&text);
-        let mut parts = Vec::new();
+        // (网格, 材质, 要不要双面)，按文件里的顺序——也就是绘制的先后。
+        let mut pieces = Vec::new();
         let mut index = 0;
         while index < elements.len() {
             let element = &elements[index];
@@ -533,14 +534,15 @@ impl Library {
                 ..Default::default()
             }
             .apply(&mut material);
-            if !dual {
-                parts.push(StaticPart { mesh, material });
-                continue;
-            }
-            // 要双面画的部件里，布帘、屏风、晾的布这类常常是正反两面各建一份、贴在同一个平面上：再双面画，
-            // 正面三角形的背面和反面三角形的正面落在同一深度上打架，镜头一动（TAA 的亚像素抖动也算）就闪。
-            // 这些自带背面的三角形拆出来单面画，其余的照旧双面。
-            let (single, double) = split_back_to_back(&mesh);
+            pieces.push((mesh, material, dual));
+        }
+        // 物件里常有贴在同一平面上的几层面片：布帘、屏风、晾的布是正反两面各建一份，
+        // 花瓶、摊子上是一层花纹叠在底子上（同一块网格里的，也有分成两块的）。深度缓冲分不清
+        // 它们谁在前，镜头一动（TAA 的亚像素抖动也算）就闪。所有块一起理顺，见 [`untangle`]。
+        let meshes: Vec<(&Mesh, bool)> =
+            pieces.iter().map(|(mesh, _, dual)| (mesh, *dual)).collect();
+        let mut parts = Vec::new();
+        for ((single, double), (_, material, _)) in untangle(&meshes).into_iter().zip(&pieces) {
             if let Some(single) = single {
                 parts.push(StaticPart {
                     mesh: single,
@@ -550,7 +552,7 @@ impl Library {
             if let Some(double) = double {
                 parts.push(StaticPart {
                     mesh: double,
-                    material: material.with_double_sided(),
+                    material: material.clone().with_double_sided(),
                 });
             }
         }
@@ -558,85 +560,216 @@ impl Library {
     }
 }
 
-/// 把网格分成「背靠背」和其余两份，各自只留用到的顶点。哪份没有三角形就是 `None`。
-///
-/// 背靠背：和另一个三角形共面、朝向相反、互相盖住（一个的重心落在另一个里面）。两面的剖分常常不一样
-/// （同一块布，正面沿这条对角线切、反面沿那条切），所以不能只比顶点。
-fn split_back_to_back(mesh: &Mesh) -> (Option<Mesh>, Option<Mesh>) {
-    /// 共面的容差（米）：两层面片离得比这还近，深度缓冲就分不清谁在前了。
-    const PLANE: f32 = 0.003;
-    let vertices = mesh.vertices();
-    let indices = mesh.indices();
-    struct Face {
-        corners: [Vec3; 3],
-        normal: Vec3,
-        centroid: Vec3,
+/// 共面的容差（米）：两层面片离得比这还近，就当贴在同一个平面上。
+const PLANE: f32 = 0.003;
+/// 贴在一起的面片每层错开多少（米）。深度是 32 位浮点、近平面 0.1 米：20 米处能分辨 0.25 毫米，
+/// 80 米处 4 毫米（再远进了雾）。几毫米的位移肉眼看不出来。
+const LAYER: f32 = 0.004;
+
+/// 网格里的一个三角形（退化的没有）。
+struct Face {
+    corners: [Vec3; 3],
+    normal: Vec3,
+    centroid: Vec3,
+}
+
+impl Face {
+    fn new(corners: [Vec3; 3]) -> Option<Self> {
+        let normal = (corners[1] - corners[0])
+            .cross(corners[2] - corners[0])
+            .try_normalize()?;
+        Some(Self {
+            corners,
+            normal,
+            centroid: (corners[0] + corners[1] + corners[2]) / 3.0,
+        })
     }
-    let faces: Vec<Option<Face>> = indices
-        .chunks_exact(3)
-        .map(|t| {
-            let corners = [0, 1, 2].map(|k| vertices[t[k] as usize].position());
-            let normal = (corners[1] - corners[0])
-                .cross(corners[2] - corners[0])
-                .try_normalize()?;
-            let centroid = (corners[0] + corners[1] + corners[2]) / 3.0;
-            Some(Face {
-                corners,
-                normal,
-                centroid,
+
+    /// 粗筛用的桶：平面到原点的距离，不分正反（法线相反的两面也落进同一个桶），5 厘米一格。
+    /// 不能按 [`PLANE`] 分：两片差一两度、局部贴在一起的面片，离原点一米远时这个距离就差出几厘米。
+    fn bucket(&self) -> i64 {
+        (self.normal.dot(self.corners[0]).abs() / 0.05).round() as i64
+    }
+
+    /// `other` 和自己在不在同一个平面上（朝向不论）。
+    fn coplanar(&self, other: &Face) -> bool {
+        self.normal.dot(other.normal).abs() > 0.999
+            && other
+                .corners
+                .iter()
+                .all(|&p| (p - self.corners[0]).dot(self.normal).abs() < PLANE)
+    }
+
+    /// `p`（在这个平面上）落不落在三角形里。
+    fn contains(&self, p: Vec3) -> bool {
+        (0..3).all(|k| {
+            let (a, b) = (self.corners[k], self.corners[(k + 1) % 3]);
+            (b - a).cross(p - a).dot(self.normal) >= -1e-6
+        })
+    }
+
+    /// 同一平面上的两个三角形有没有重叠的面积（只共一条边、一个点的不算）：
+    /// 投到平面里用分离轴判，两个三角形的六条边各一根轴。
+    fn overlaps(&self, other: &Face) -> bool {
+        const EPS: f32 = 1e-4;
+        let u = (self.corners[1] - self.corners[0]).normalize();
+        let v = self.normal.cross(u);
+        let flat = |f: &Face| f.corners.map(|p| (p.dot(u), p.dot(v)));
+        let (a, b) = (flat(self), flat(other));
+        let range = |t: &[(f32, f32); 3], axis: (f32, f32)| {
+            let d = t.map(|p| p.0 * axis.0 + p.1 * axis.1);
+            (d[0].min(d[1]).min(d[2]), d[0].max(d[1]).max(d[2]))
+        };
+        [a, b].iter().all(|t| {
+            (0..3).all(|k| {
+                let (p, q) = (t[k], t[(k + 1) % 3]);
+                let length = ((q.0 - p.0).powi(2) + (q.1 - p.1).powi(2)).sqrt();
+                if length < 1e-9 {
+                    return true;
+                }
+                let axis = (-(q.1 - p.1) / length, (q.0 - p.0) / length);
+                let (a_min, a_max) = range(&a, axis);
+                let (b_min, b_max) = range(&b, axis);
+                a_max > b_min + EPS && b_max > a_min + EPS
             })
         })
+    }
+}
+
+/// 把一个物件的几块网格理顺，每块分成要单面画、要双面画的两份（各自只留用到的顶点，没有三角形
+/// 就是 `None`），顺序同 `meshes`。每块带着材质要不要双面；不要的话全进单面那份。
+///
+/// 贴在同一平面上、互相盖住的三角形（同一块里的、不同块之间的都算），深度缓冲分不出前后：
+/// - 背靠背（朝向相反、一个的重心落在另一个里面）：这块面片自己就带着背面。两面的剖分常常不一样
+///   （同一块布，正面沿这条对角线切、反面沿那条切），所以不比顶点、比形状。这些单面画就不打架了。
+/// - 同朝向的（底子上叠一层花纹）：按原来的绘制顺序（块的先后、块里三角形的先后），后画的沿法线
+///   往前挪一层（[`LAYER`]）。原版 D3D 深度相等时是后画的盖住先画的，这样挪出来的前后和原版一样。
+/// - 还要双面画的正反重叠（只盖住一部分的）：两面各沿自己的法线往外挪半层，
+///   从哪边看都是朝着自己的那面在前。
+///
+/// 不在一个平面上、斜着穿过去的两片（夹角一两度）只在交线附近一窄条打架，这里不管。
+fn untangle(meshes: &[(&Mesh, bool)]) -> Vec<(Option<Mesh>, Option<Mesh>)> {
+    // 所有块的三角形排成一列：(第几块, 块里第几个三角形)。
+    let owners: Vec<(usize, usize)> = meshes
+        .iter()
+        .enumerate()
+        .flat_map(|(m, (mesh, _))| (0..mesh.indices().len() / 3).map(move |t| (m, t)))
         .collect();
-    // 按平面到原点的距离分桶：背靠背的两个三角形法线相反、距离也相反，绝对值一样。
-    let bucket = |f: &Face| (f.normal.dot(f.corners[0]).abs() / PLANE).round() as i64;
+    let faces: Vec<Option<Face>> = owners
+        .iter()
+        .map(|&(m, t)| {
+            let mesh = meshes[m].0;
+            let corner = |k: usize| mesh.vertices()[mesh.indices()[t * 3 + k] as usize].position();
+            Face::new([corner(0), corner(1), corner(2)])
+        })
+        .collect();
     let mut buckets: HashMap<i64, Vec<usize>> = HashMap::new();
     for (i, face) in faces.iter().enumerate() {
         if let Some(face) = face {
-            buckets.entry(bucket(face)).or_default().push(i);
+            buckets.entry(face.bucket()).or_default().push(i);
         }
     }
-    let contains = |f: &Face, p: Vec3| {
-        (0..3).all(|k| {
-            let (a, b) = (f.corners[k], f.corners[(k + 1) % 3]);
-            (b - a).cross(p - a).dot(f.normal) >= -1e-6
-        })
-    };
-    let mut paired = vec![false; faces.len()];
+
+    let count = faces.len();
+    let mut single: Vec<bool> = owners.iter().map(|&(m, _)| !meshes[m].1).collect();
+    let mut layer = vec![0u32; count];
+    // (先画的, 后画的, 背靠背——互相盖住)
+    let mut opposite = Vec::new();
     for (i, face) in faces.iter().enumerate() {
         let Some(a) = face else { continue };
-        let key = bucket(a);
-        for j in (key - 1..=key + 1).flat_map(|k| buckets.get(&k).into_iter().flatten()) {
-            let Some(b) = &faces[*j] else { continue };
-            if a.normal.dot(b.normal) < -0.999
-                && (a.centroid - b.corners[0]).dot(b.normal).abs() < PLANE
-                && (contains(b, a.centroid) || contains(a, b.centroid))
-            {
-                paired[i] = true;
-                break;
+        let key = a.bucket();
+        for &j in (key - 1..=key + 1).flat_map(|k| buckets.get(&k).into_iter().flatten()) {
+            // 只和先画的比：同朝向的层号要等先画的那个定下来。
+            if j >= i {
+                continue;
+            }
+            let Some(b) = &faces[j] else { continue };
+            if !a.coplanar(b) || !a.overlaps(b) {
+                continue;
+            }
+            if a.normal.dot(b.normal) > 0.0 {
+                layer[i] = layer[i].max(layer[j] + 1);
+            } else {
+                opposite.push((j, i, a.contains(b.centroid) || b.contains(a.centroid)));
             }
         }
     }
-    if !paired.contains(&true) {
-        return (None, Some(mesh.clone()));
+    for &(j, i, covered) in &opposite {
+        if covered {
+            single[i] = true;
+            single[j] = true;
+        }
     }
+    let mut outward = vec![false; count];
+    for &(j, i, _) in &opposite {
+        if !(single[i] && single[j]) {
+            outward[i] = true;
+            outward[j] = true;
+        }
+    }
+
+    let mut first = 0;
+    meshes
+        .iter()
+        .map(|(mesh, _)| {
+            let range = first..first + mesh.indices().len() / 3;
+            first = range.end;
+            rebuild(
+                mesh,
+                &faces[range.clone()],
+                &layer[range.clone()],
+                &outward[range.clone()],
+                &single[range],
+            )
+        })
+        .collect()
+}
+
+/// 按 [`untangle`] 定下的层号、外挪、单双面，重新拼出一块网格的单面、双面两份。
+fn rebuild(
+    mesh: &Mesh,
+    faces: &[Option<Face>],
+    layer: &[u32],
+    outward: &[bool],
+    single: &[bool],
+) -> (Option<Mesh>, Option<Mesh>) {
+    let vertices = mesh.vertices();
+    let indices = mesh.indices();
+    // 要挪的三角形另抄一份顶点再挪，不牵动共用这些顶点的邻居（接缝处差几毫米，看不出来）。
+    let mut out_vertices = vertices.to_vec();
+    let mut out_indices = indices.to_vec();
+    for (t, face) in faces.iter().enumerate() {
+        let Some(face) = face else { continue };
+        let offset = layer[t] as f32 * LAYER + if outward[t] { LAYER * 0.5 } else { 0.0 };
+        if offset == 0.0 {
+            continue;
+        }
+        for k in 0..3 {
+            let mut vertex = vertices[indices[t * 3 + k] as usize];
+            vertex.position = (vertex.position() + face.normal * offset).to_array();
+            out_indices[t * 3 + k] = out_vertices.len() as u32;
+            out_vertices.push(vertex);
+        }
+    }
+
     let subset = |keep: bool| {
         let mut remap: HashMap<u32, u32> = HashMap::new();
-        let mut out_vertices = Vec::new();
-        let mut out_indices = Vec::new();
-        for (t, &p) in indices.chunks_exact(3).zip(&paired) {
-            if p != keep {
+        let mut kept_vertices = Vec::new();
+        let mut kept_indices = Vec::new();
+        for (t, &s) in out_indices.chunks_exact(3).zip(single) {
+            if s != keep {
                 continue;
             }
             for &i in t {
                 let next = remap.len() as u32;
                 let index = *remap.entry(i).or_insert_with(|| {
-                    out_vertices.push(vertices[i as usize]);
+                    kept_vertices.push(out_vertices[i as usize]);
                     next
                 });
-                out_indices.push(index);
+                kept_indices.push(index);
             }
         }
-        (!out_indices.is_empty()).then(|| Mesh::new(out_vertices, out_indices))
+        (!kept_indices.is_empty()).then(|| Mesh::new(kept_vertices, kept_indices))
     };
     (subset(true), subset(false))
 }
@@ -1090,6 +1223,22 @@ mod tests {
         }
     }
 
+    fn one(mesh: &Mesh, dual: bool) -> (Option<Mesh>, Option<Mesh>) {
+        untangle(&[(mesh, dual)]).pop().unwrap()
+    }
+
+    /// 两块网格之间叠着的也按块的先后分层：后一块往前挪，先一块不动。
+    #[test]
+    fn stacked_meshes_are_layered_in_order() {
+        let v = |x: f32, z: f32| Vertex::new(Vec3::new(x, 0.0, z), Vec3::Y, [0.0, 0.0]);
+        let base = Mesh::new(vec![v(0.0, 0.0), v(0.0, 4.0), v(4.0, 0.0)], vec![0, 1, 2]);
+        let decal = Mesh::new(vec![v(1.0, 1.0), v(1.0, 2.0), v(2.0, 1.0)], vec![0, 1, 2]);
+        let out = untangle(&[(&base, false), (&decal, true)]);
+        assert_eq!(out[0].0.as_ref().unwrap().vertices()[0].position().y, 0.0);
+        let decal = out[1].1.as_ref().unwrap();
+        assert!((decal.vertices()[0].position().y - LAYER).abs() < 1e-6);
+    }
+
     /// 正反两面各建一份的三角形单独拆出来（单面画），剩下的照旧双面画；两份都只带自己用到的顶点。
     #[test]
     fn back_to_back_triangles_are_split_out() {
@@ -1107,7 +1256,7 @@ mod tests {
             v(5.0, 6.0),
         ];
         let mesh = Mesh::new(vertices, vec![0, 1, 2, 4, 3, 5, 6, 7, 8]);
-        let (single, double) = split_back_to_back(&mesh);
+        let (single, double) = one(&mesh, true);
         let (single, double) = (single.unwrap(), double.unwrap());
         assert_eq!(single.indices().len(), 6);
         assert_eq!(single.vertices().len(), 6);
@@ -1116,12 +1265,71 @@ mod tests {
         // 同一块方布，正面沿 0-3 对角线切、反面沿 1-2 切：顶点对不上，照样认得出来。
         let quad = vec![v(0.0, 0.0), v(1.0, 0.0), v(0.0, 1.0), v(1.0, 1.0)];
         let cloth = Mesh::new(quad, vec![0, 3, 1, 0, 2, 3, 0, 1, 2, 1, 3, 2]);
-        let (single, double) = split_back_to_back(&cloth);
+        let (single, double) = one(&cloth, true);
         assert_eq!(single.unwrap().indices().len(), 12);
         assert!(double.is_none());
-        // 同绕序的重复不算背靠背。
-        let mesh = Mesh::new(mesh.vertices().to_vec(), vec![0, 1, 2, 3, 4, 5]);
-        assert!(split_back_to_back(&mesh).0.is_none());
+        // 不要双面的部件全进单面那份。
+        let (single, double) = one(&mesh, false);
+        assert_eq!(single.unwrap().indices().len(), 9);
+        assert!(double.is_none());
+    }
+
+    /// 同朝向叠在一起的：后画的往前（沿法线）挪一层，先画的不动。
+    #[test]
+    fn stacked_triangles_are_layered_in_draw_order() {
+        let v = |x: f32, z: f32| Vertex::new(Vec3::new(x, 0.0, z), Vec3::Y, [0.0, 0.0]);
+        // 底子一大块，上面叠一小块花纹，再叠一小块；旁边一块只共边的不算重叠。
+        let vertices = vec![
+            v(0.0, 0.0),
+            v(0.0, 4.0),
+            v(4.0, 0.0),
+            v(1.0, 1.0),
+            v(1.0, 2.0),
+            v(2.0, 1.0),
+            v(0.0, 4.0),
+            v(4.0, 4.0),
+            v(4.0, 0.0),
+        ];
+        let mesh = Mesh::new(vertices, vec![0, 1, 2, 3, 4, 5, 3, 4, 5, 6, 7, 8]);
+        let (single, double) = one(&mesh, false);
+        assert!(double.is_none());
+        let single = single.unwrap();
+        let height = |t: usize| {
+            single.vertices()[single.indices()[t * 3] as usize]
+                .position()
+                .y
+        };
+        assert_eq!(height(0), 0.0);
+        assert!((height(1) - LAYER).abs() < 1e-6);
+        assert!((height(2) - 2.0 * LAYER).abs() < 1e-6);
+        assert_eq!(height(3), 0.0);
+    }
+
+    /// 双面部件里只盖住一部分的正反两面：留在双面那份里，各自沿法线往外挪半层。
+    #[test]
+    fn partly_overlapping_back_faces_move_apart() {
+        let v = |x: f32, z: f32| Vertex::new(Vec3::new(x, 0.0, z), Vec3::Y, [0.0, 0.0]);
+        let vertices = vec![
+            v(0.0, 0.0),
+            v(0.0, 2.0),
+            v(2.0, 0.0),
+            v(1.0, 0.2),
+            v(3.0, 0.2),
+            v(1.0, 2.2),
+        ];
+        // 两个三角形朝向相反，各有一截伸出对方外面，谁的重心也不在对方里面。
+        let mesh = Mesh::new(vertices, vec![0, 1, 2, 3, 4, 5]);
+        let (single, double) = one(&mesh, true);
+        assert!(single.is_none());
+        let double = double.unwrap();
+        for t in 0..2 {
+            let corners = [0, 1, 2]
+                .map(|k| double.vertices()[double.indices()[t * 3 + k] as usize].position());
+            let normal = (corners[1] - corners[0])
+                .cross(corners[2] - corners[0])
+                .normalize();
+            assert!((corners[0].dot(normal) - LAYER * 0.5).abs() < 1e-6);
+        }
     }
 
     #[test]

@@ -57,6 +57,13 @@ struct PrepassOutput {
     @location(3) @interpolate(flat) instance: u32,
     // 实例颜色（乘进材质目标里的基础色）。
     @location(4) @interpolate(flat) instance_color: vec4<f32>,
+    // 下面几项只有镂空材质的片元入口（`shadow_hooked.wgsl` 的 `prepass_cutout_fs`）读：
+    // 它要把表面钩子跑一遍，钩子按底色贴图的 alpha 裁剪。普通入口不读，编译器会丢掉。
+    @location(5) world_position: vec3<f32>,
+    @location(6) uv: vec2<f32>,
+    @location(7) uv1: vec2<f32>,
+    @location(8) color: vec3<f32>,
+    @location(9) @interpolate(flat) instance_data: vec4<f32>,
 };
 
 struct PrepassTargets {
@@ -65,13 +72,14 @@ struct PrepassTargets {
     @location(2) material: vec4<f32>,
 };
 
-// 顶点钩子：和主 pass 的 `vs_main` 同样的填法。
-fn prepass_vertex_hook(in: VertexInput, object: ObjectUniforms, instance: u32, position: ptr<function, vec3<f32>>, normal: ptr<function, vec3<f32>>) {
+// 顶点钩子：和主 pass 的 `vs_main` 同样的填法。钩子改过的 uv、顶点色写回 `in`，
+// 镂空材质的片元阶段看到的和主画面同一套。
+fn prepass_vertex_hook(in: ptr<function, VertexInput>, object: ObjectUniforms, instance: u32, position: ptr<function, vec3<f32>>, normal: ptr<function, vec3<f32>>) {
     var vertex_surface: VertexSurface;
-    vertex_surface.uv = in.uv;
-    vertex_surface.uv1 = in.uv1;
-    vertex_surface.tangent = in.tangent;
-    vertex_surface.color = in.color;
+    vertex_surface.uv = (*in).uv;
+    vertex_surface.uv1 = (*in).uv1;
+    vertex_surface.tangent = (*in).tangent;
+    vertex_surface.color = (*in).color;
     vertex_surface.time = globals.frame_params.x;
     vertex_surface.params = object.params;
     vertex_surface.model = object.model;
@@ -81,6 +89,26 @@ fn prepass_vertex_hook(in: VertexInput, object: ObjectUniforms, instance: u32, p
     vertex_surface = material_vertex(vertex_surface);
     *position = vertex_surface.position;
     *normal = vertex_surface.normal;
+    (*in).uv = vertex_surface.uv;
+    (*in).uv1 = vertex_surface.uv1;
+    (*in).color = vertex_surface.color;
+}
+
+// 两个顶点入口共用的收尾：除了法线和上一帧的位置，其余填法一样。
+fn prepass_output(vertex: VertexInput, world_position: vec4<f32>, world_normal: vec3<f32>, previous_position: vec4<f32>, instance: u32) -> PrepassOutput {
+    var out: PrepassOutput;
+    out.clip_position = globals.view_proj * world_position;
+    out.world_normal = world_normal;
+    out.current_clip = globals.clip_view_proj * world_position;
+    out.previous_clip = globals.prev_view_proj * previous_position;
+    out.instance = instance_object_index(instance);
+    out.instance_color = instance_of(instance).color;
+    out.world_position = world_position.xyz;
+    out.uv = vertex.uv;
+    out.uv1 = vertex.uv1;
+    out.color = vertex.color;
+    out.instance_data = instance_of(instance).data;
+    return out;
 }
 
 @vertex
@@ -90,6 +118,7 @@ fn prepass_vs(
     @builtin(instance_index) instance: u32,
 ) -> PrepassOutput {
     let object = instance_object(instance);
+    var vertex = in;
 
     var position = in.position;
     var normal = in.normal;
@@ -101,21 +130,14 @@ fn prepass_vs(
         &position,
         &normal,
     );
-    prepass_vertex_hook(in, object, instance, &position, &normal);
+    prepass_vertex_hook(&vertex, object, instance, &position, &normal);
 
     let world_position = object.model * vec4<f32>(position, 1.0);
     // 形变权重没有上一帧的那份，用本帧的——表情动画的运动向量因此是零。
     // 要做准得多存一份权重，而表情的位移通常小到 TAA 自己兜得住。
     let previous_position = object.prev_model * vec4<f32>(position, 1.0);
-
-    var out: PrepassOutput;
-    out.clip_position = globals.view_proj * world_position;
-    out.world_normal = (object.normal_matrix * vec4<f32>(normal, 0.0)).xyz;
-    out.current_clip = globals.clip_view_proj * world_position;
-    out.previous_clip = globals.prev_view_proj * previous_position;
-    out.instance = instance_object_index(instance);
-    out.instance_color = instance_of(instance).color;
-    return out;
+    let world_normal = (object.normal_matrix * vec4<f32>(normal, 0.0)).xyz;
+    return prepass_output(vertex, world_position, world_normal, previous_position, instance);
 }
 
 @vertex
@@ -126,6 +148,7 @@ fn prepass_vs_skinned(
     @builtin(instance_index) instance: u32,
 ) -> PrepassOutput {
     let object = instance_object(instance);
+    var vertex = in;
 
     var position = in.position;
     var normal = in.normal;
@@ -137,7 +160,7 @@ fn prepass_vs_skinned(
         &position,
         &normal,
     );
-    prepass_vertex_hook(in, object, instance, &position, &normal);
+    prepass_vertex_hook(&vertex, object, instance, &position, &normal);
 
     // 和主 pass 同一个公式，包括那句「蒙皮网格的 model 是单位阵但仍然乘上」。
     // 两边写法不同的话，蒙皮物体的法线会和它自己的着色对不上。
@@ -146,19 +169,17 @@ fn prepass_vs_skinned(
     // 上一帧的骨骼矩阵拼在同一个缓冲里，起点在 `flags.z`。
     let previous_model = object.prev_model * skin_matrix(skin.joints, skin.weights, object.flags.z);
     let previous_position = previous_model * vec4<f32>(position, 1.0);
-
-    var out: PrepassOutput;
-    out.clip_position = globals.view_proj * world_position;
-    out.world_normal = (model * vec4<f32>(normal, 0.0)).xyz;
-    out.current_clip = globals.clip_view_proj * world_position;
-    out.previous_clip = globals.prev_view_proj * previous_position;
-    out.instance = instance_object_index(instance);
-    out.instance_color = instance_of(instance).color;
-    return out;
+    let world_normal = (model * vec4<f32>(normal, 0.0)).xyz;
+    return prepass_output(vertex, world_position, world_normal, previous_position, instance);
 }
 
 @fragment
-fn prepass_fs(in: PrepassOutput) -> PrepassTargets {
+fn prepass_fs(in: PrepassOutput, @builtin(front_facing) front_facing: bool) -> PrepassTargets {
+    return prepass_targets(in, front_facing);
+}
+
+// 三张输出的填法。镂空材质的入口（`prepass_cutout_fs`）先跑表面钩子、没被裁掉再来这里。
+fn prepass_targets(in: PrepassOutput, front_facing: bool) -> PrepassTargets {
     let object = tinted_object(in.instance, in.instance_color);
     var out: PrepassTargets;
     // 存**世界**法线，范围 [-1, 1]，所以目标格式必须是浮点的
@@ -167,7 +188,10 @@ fn prepass_fs(in: PrepassOutput) -> PrepassTargets {
     //
     // 这里不归一化：光栅化的插值会让法线变短，但下游自己会归一。
     // 在这里归一等于每个像素多一次平方根，而下游反正还要再算一次。
-    out.normal = vec4<f32>(in.world_normal, clamp(object.metallic, 0.0, 1.0));
+    //
+    // 双面材质看到的是背面时法线翻过来朝着相机，和主 pass 的着色法线一致。
+    let world_normal = select(-in.world_normal, in.world_normal, front_facing);
+    out.normal = vec4<f32>(world_normal, clamp(object.metallic, 0.0, 1.0));
 
     // w 可能是 0 或负（贴着近平面的顶点插值出来的），除之前兜一下。
     let current = in.current_clip.xy / max(in.current_clip.w, 1e-6);

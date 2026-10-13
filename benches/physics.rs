@@ -137,6 +137,28 @@ fn physics_step(c: &mut Criterion) {
         });
     }
 
+    // 多线程求解（`PhysicsWorld::set_solver_threads`）：同一堆箱子 1 个线程对自动（核数减一）。
+    // 堆满了才有活可分：小场景里分发的开销比省下的多。
+    for (stacks, height) in [(50usize, 10usize), (200, 10)] {
+        for (label, threads) in [("1", 1usize), ("4", 4), ("auto", 0)] {
+            let id = format!("{stacks}x{height}/threads-{label}");
+            group.bench_function(BenchmarkId::new("stacked_threads", &id), |b| {
+                b.iter_batched(
+                    || {
+                        let mut world = stacked(stacks, height);
+                        world.set_solver_threads(threads);
+                        world
+                    },
+                    |mut world| {
+                        world.step(black_box(STEP));
+                        black_box(world.stats().body_count)
+                    },
+                    criterion::BatchSize::LargeInput,
+                );
+            });
+        }
+    }
+
     for links in [16usize, 64] {
         group.bench_with_input(BenchmarkId::new("joints", links), &links, |b, &links| {
             b.iter_batched(

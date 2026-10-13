@@ -10,7 +10,7 @@
 ### 一句话结论
 
 渲染和导入的功能面已经很宽（three.js 的 webgpu / webgl 例子移植了 179 个）；玩法层的硬缺口（手柄、根运动、寻路）
-2026-10 也补上了，剩下的是「更好」：导航网格、避让、逐实例剔除。**眼下最该做的是工程侧**：CI 一次都没在 remote 上跑过
+2026-10 也补上了，剩下的是「更好」：导航网格、避让、计算着色器直接生成实例。**眼下最该做的是工程侧**：CI 一次都没在 remote 上跑过
 （Linux 上编不编得过不知道），`krender/src/lib.rs` 和 `kscene` 都太大。渲染侧剩下的多是「更好」，不急。建议的先后见 [二、还没做的](#二还没做的) 开头。
 
 ## 一、现状
@@ -76,7 +76,7 @@
 |---|---|---|
 | P0 | CI 在 remote 上跑一次 | 成本最低；Linux 能不能编过从没验证过。先 `cargo fmt --all`（267 个文件）再推 |
 | P1 | 导航网格 + 避让 | 格子寻路已经有了（`knav`）；多层地形（桥）、大地图、成群的 NPC 才需要 |
-| P2 | 逐实例剔除 / 间接绘制 | 实例化已经有了（整组剔除）；一组铺满整张地图、或者要 GPU 自己生成实例时才需要 |
+| P2 | 计算着色器生成实例 | GPU 逐实例剔除 + 间接绘制已经有了（见三）；缺的是让用户的计算着色器直接往实例 / 间接参数里写 |
 | P2 | 拆 `krender/src/lib.rs`、`kscene` | 纯重构，改动开始互相绊脚时再做 |
 | P2 | 其余渲染 / 导入缺口 | 按具体游戏需要挑 |
 
@@ -97,7 +97,7 @@
 | 2D 自定义材质 | `ksprite` 是独立的批处理管线，没有钩子 |
 | 异步读回 | GPU 读回是同步等待的 |
 | 计算结果当顶点 | 粒子能直接用存储缓冲，存储纹理能直接当材质贴图（`StorageTexture::texture()`）；网格的顶点缓冲还不行——要么塞进 `Rgba16Float` 纹理在顶点钩子里 `textureLoad`（`tsl_vfx_linkedparticles` 就这么做），要么等这一项 |
-| 逐实例剔除 / 间接绘制 | 实例化（见三）按**整组**剔除，看见一个就画全部——大组要自己按区域切成几个节点；没有 `draw_indirect`，计算着色器生成的实例还得读回再塞（`struct_drawindirect`、`tsl_galaxy` 仍是拼大网格的写法）。实例矩阵变了没有运动向量；拾取、物理不认实例 |
+| 间接绘制的剩余 | GPU 逐实例剔除已经有了（见三），还差：① 计算着色器生成的实例 / 间接参数没有接口直接画，还得读回再塞（`struct_drawindirect`、`tsl_galaxy` 仍是拼大网格的写法）；② 半透明的实例化节点在相机里不按实例剔（原子压紧不保序，原样拷）；③ 要 `INDIRECT_FIRST_INSTANCE`，没有的适配器（WebGPU 上是可选特性）退回 CPU 整组剔；④ 统计里的三角形数还是 CPU 估的（剔除前）。实例矩阵变了没有运动向量；拾取、物理不认实例 |
 | 材质绑不了存储缓冲 | 钩子里读不了 `array<T>`，只能经存储纹理 |
 | 彩色 / 透射阴影 | 阴影图只有深度。半透明物体能投（`with_blended_shadows`）但影子是实的；焦散这类由接收面在 `Surface.transmitted` 里自己画（`volume_caustics`） |
 | TAAU 的快速运动 | 高斯加权 + 包围盒夹历史，快速运动和大面积遮挡变化时会糊 / 有轻微残影；没有反应遮罩 |
@@ -105,7 +105,7 @@
 | 探针过渡 | 只混两个探针，三个交叠的角落会跳一下 |
 | 环境捕获 | 跨面取样是最近邻；多次弹射要自己连捕几遍 |
 | IES A/B 型 | 只有几何不变量守着，没有厂商真文件对照过 |
-| 后处理的几处近似 | 没有 MRT 自发光通道（bloom 遮罩代替）、预通道材质只有系数没有贴图 |
+| 后处理的几处近似 | 没有 MRT 自发光通道（bloom 遮罩代替）、预通道的材质目标（基础色 / 粗糙度，给 SSR、SSGI）只有系数没有贴图（镂空倒是按贴图 alpha 裁了，见三） |
 | 海洋的 FFT 在 CPU 上 | 三个级联三条线程，128²（中 / 高画质）一帧约 3.5 ms（release；debug 下 3.9 ms——kcomponents 在 dev 下也开了 opt-level 3）。256²（超高）按 N² log N 估要四倍多，没实测过。「计算结果当贴图」已经有了（`StorageTexture::texture()`），挪到计算着色器只差做 |
 | 海洋网格跟着相机连续平移 | 远处稀疏顶点会轻微「游」（短波在远处已淡出，基本看不出）；要彻底消除得换成按格对齐的几何 clipmap |
 | 海面的常量还在调色板贴图里 | 参数槽现在有 16 个，放得下了，但 16 个 RGBA8 常量挪进参数槽是纯重构，没做 |
@@ -120,10 +120,10 @@
 
 | 缺口 | 说明 |
 |---|---|
-| 软体双向耦合 | 布料推不动刚体；软体之间不互相碰 |
-| 碎裂 | 八等分而不是按撞击点凸切割 |
+| 软体双向耦合 | ✅ 2026-10：`step_soft_bodies` + `Coupling::TwoWay`——粒子被推开 Δx 的动量 `m·Δx/h` 等大反向地加回动态刚体（接触点上，带转动），总动量守恒（测试到 5e-5）；吊床兜得住箱子、布压在箱子上有重量。软体有了真实总质量 `SoftBodySettings::mass`（以前每粒子写死 1 千克，48×48 的布两千多千克，这才是「加回去会弹飞」的根子）。同一次 `step_soft_bodies` 里的几个软体共用子步、粒子互相推开。剩下：软体之间只比粒子不比三角形（粒子半径要盖住间距的一半）；没有摩擦；kscene 没有软体组件，示例直接调 kphysics。`physics_cloth` 改成双向（球打进布里被兜住） |
+| 碎裂 | ✅ 真切割（`FracturePlane` + 凸包重建，`Scene::fracture_node`，`physics_break` 真切）。2026-10 核对时修了三处：① `physics_break` 拿接触力方向直接当平面法线——那是被撞那个面的法线，平面贴着被撞的面，切下来的是一片厚度等于「这一帧陷进去多深」的薄板（球越慢越薄，慢到一定程度当擦边拒掉）；改成 `FracturePlane::from_impact`（过撞击点、**包含**撞击方向，和 three.js 的 `subdivideByImpact` 一样），快慢球都劈成两块 20 厘米以上的（测试 `a_cannonball_cracks_a_brick_along_the_impact` 对照了旧写法）；② 示例把墙里砖压砖、砖压地的支撑力也当撞击，现在只认炮弹 / 碎块砸的；③ 碎块网格按顶点平均法线，方块被着色成圆鼓鼓的，改成平面着色。只支持立方体和凸包（凸包是点集近似切）；母节点挂在有缩放的父节点下时碎块缩放强制为 1，没处理 |
 | 多体关节 | ✅ 3D/2D 世界层四件套 + 场景同步（`Joint::multibody`，失败回落普通关节） |
-| 多线程求解 | rapier 支持，但要接 ktask 而不是它自带的 rayon |
+| 多线程求解 | ✅ 2026-10，**但不是接 ktask**：rapier 的并行全写死在 rayon 上（`par_iter`、`broadcast`、`in_place_scope`），没有换执行器的口子，不 fork 换不掉。做法是开 rapier 的 `parallel`，rayon 关在 kphysics 里：`PhysicsWorld::set_solver_threads`（2D 同），同线程数的世界共用一个池，`step` 整步放进去跑（rapier 不会再自己按核数开满一个全局池）。默认 1 线程（逐位可复现）；`0` 自动，最多 4 个——`stacked_threads` 基准 500 个箱子 1 线程 1.04 ms、4 线程 0.62 ms、开满 15 线程 0.73 ms，100 个箱子时多线程反而慢一倍。自己的代码接了 ktask：软体的逐粒子碰撞查询超过 512 个粒子分给 `ComputeTaskPool`，和串行逐位一致（测试）。kscene 还没暴露这个开关之外的东西（`scene.physics_mut().set_solver_threads`） |
 
 ### 动画 / 粒子 / 音频
 
@@ -186,6 +186,9 @@
 | 没有顶点钩子 | ✅ `material_vertex` | `krender/src/surface.wgsl` |
 | 顶点钩子只进主通道（位移出来的形状没影子、SSAO 看不到） | ✅ 2026-10 修：写了 `material_vertex` 的材质，预通道和阴影的入口拼在它自己的着色器后面编，四条管线（阴影 / 预通道 × 静态 / 蒙皮）先过同一个钩子；阴影 pass 和主 pass 实例顺序一致，直接读主 pass 的逐对象数据。无头测试 `a_vertex_hook_moves_the_shadow_too`（关掉这套就挂，A/B 过）；`materials_displacementmap` 打开了阴影 | `krender/src/shadow_hooked.wgsl`、`prepass.wgsl` |
 | 材质只有 4 个参数槽、2 个自定义贴图槽 | ✅ 2026-10 先扩到 8 个，同月再扩到 **16 个 `vec4`**（程序化木纹 7 个叠在物理材质的 5 个上）、4 张二维贴图 + 纹理数组 + 三维纹理。逐对象数据随之变大（没量对帧时的影响）；主着色器片元阶段的采样纹理超过 WebGPU 基线，建设备时按适配器要上限（`SAMPLED_TEXTURES_PER_STAGE`）。WGSL 里用别名 `MaterialParams`，两条测试守着别名长度和纹理数 | `kmaterial::standard`、`krender::required_limits` |
+| 实例化只能整组剔除、没有间接绘制 | ✅ 2026-10：`krender::cull`。CPU 照旧按节点剔、建批次；之后一个计算 pass 对每个（槽, 视图）判可见——视图 0 是相机，1.. 是每层阴影（级联、立方体面、额外光源的面），一次 dispatch 全剔完——看得见的槽原子压紧进那个视图那个批次的一段，同时累加间接参数的实例数；各个 pass（主、预通道、遮罩、阴影）改 `draw_indexed_indirect`。各 pass 绑的槽缓冲就是压紧结果（一个视图一段，`first_instance = 视图 × 槽数 + 批次起点`，CPU 预填），着色器一行没改；半透明在相机里原样拷、保持远近顺序。判据和 CPU 的 `shadow_visibility` 同一个；蒙皮、形变的网格局部包围盒不准，退回整组判。开着时阴影不再在 CPU 上逐级剔。要 `INDIRECT_FIRST_INSTANCE`（建设备时有就请求），没有、或 `Renderer::set_gpu_culling(false)` 时走原来的路。无头测试 `gpu_culling_draws_the_same_picture_and_culls_instances`（开 / 关逐像素一致，读回间接参数：相机里 1600 个方块只画 142 个，三层阴影各剔各的）。`benches/render.rs` 的 `render/instanced_shadow/*`：带阴影的五万个实例，整帧（含等显卡）10.3 ms 对 16.2 ms，CPU 侧 3.0 ms 对 6.1 ms（同一轮对照 `control/sort` 3.0 ms） | `krender/src/cull.rs`、`cull.wgsl` |
+| 预通道里镂空的叶子是整块面片、双面材质的背面没有 | ✅ 2026-10 修：镂空材质（表面钩子里 discard，`Physical::alpha_cutoff`）的预通道走 `prepass_cutout_fs`，和阴影一样把钩子跑一遍再写；预通道管线分单面 / 双面两套，双面的不剔背面。以前 TAA 在叶片透明的那一圈拿叶子的运动向量对齐后面的地面，镜头一平移叶子、布帘边缘就拖影，SSAO 在空处算出一圈遮蔽。无头测试 `texture_alpha_cutoff_cuts_the_prepass_too`、`double_sided_back_faces_are_in_the_prepass`（借 SSAO 看预通道；都 A/B 过，退回旧行为就挂） | `krender/src/prepass.wgsl`、`shadow_hooked.wgsl`、`ssao::PrepassPipelines` |
+| 阴影图一建就是满配 | ✅ 2026-10：主光源 2048² × 6 层 + 额外光源 1024² × 12 层（约 150 MB）改成先放 1×1 占位，第一次画影子时按实际用到的层数建；只有方向光的场景额外光源那张一直不占 | `krender` 的 `create_shadow_layers`、`encode_shadow_pass` |
 | 只有一套 UV | ✅ `Vertex::uv1` | `kmesh` |
 | 没有子网格材质组 | ✅ `MeshGroup` + `Node::set_materials` | `kmesh`、`kscene` |
 | 点光 / 聚光的影子按方向光算 | ✅ 立方体阴影 / 透视阴影（2026-09 修的真 bug） | `klight::cascade` |

@@ -291,6 +291,263 @@ fn texture_alpha_cutoff_cuts_the_shadow_too() {
     );
 }
 
+/// 只开 SSAO（没有影子）的地面 + 一个物体。SSAO 全靠预通道的深度和法线，预通道里多了什么，
+/// 地面上就多一圈遮蔽——拿它看预通道画进去了什么。
+fn ssao_scene_pixels(object: Node) -> Option<Vec<u8>> {
+    use kmaterial::Material;
+    use kmath::Vec4;
+    let mut renderer = pollster::block_on(Renderer::headless(96, 96))?;
+    renderer.set_ssao(crate::SsaoSettings {
+        enabled: true,
+        radius: 1.0,
+        strength: 2.0,
+        ..Default::default()
+    });
+    let mut scene = Scene::new();
+    scene.add_node(
+        Node::new("Camera")
+            .with_camera(Camera::default())
+            .with_transform(Transform::looking_at(
+                Vec3::new(0.0, 4.0, 4.0),
+                Vec3::ZERO,
+                Vec3::Y,
+            )),
+    );
+    scene.add_node(
+        Node::new("Ground")
+            .with_mesh(Mesh::plane(1.0))
+            .with_material(Material::default().with_base_color(Vec4::new(0.7, 0.7, 0.7, 1.0)))
+            .with_scale(Vec3::new(14.0, 1.0, 14.0)),
+    );
+    scene.add_node(Node::new("Sky").with_light(klight::Light::hemisphere(Vec3::splat(0.4))));
+    scene.add_node(object);
+    scene.update();
+    let mut ui = Ui::new();
+    for _ in 0..3 {
+        ui.begin_frame(Vec2::new(96.0, 96.0), 1.0);
+        ui.end_frame();
+        renderer.render(&scene, &ui, &[]);
+    }
+    renderer.read_pixels().map(|(_, _, pixels)| pixels)
+}
+
+#[test]
+fn texture_alpha_cutoff_cuts_the_prepass_too() {
+    use kasset::Resource;
+    use kmaterial::Material;
+    use ktexture::Texture;
+    // 预通道（SSAO、TAA 的运动向量都靠它）也得按贴图 alpha 裁：贴图整张 alpha = 0 的方块在主画面里
+    // 没了，预通道里也该没有。回归：预通道曾经不跑表面钩子，镂空的树叶在里面是整块面片——
+    // SSAO 在空处算出一圈遮蔽，TAA 拿叶片的运动向量去对齐后面的地面，镜头一动叶子边缘就拖影。
+    let cube = |transparent: bool| {
+        let alpha = if transparent { 0 } else { 255 };
+        let texture = Texture::solid(4, 4, [200, 120, 80, alpha]);
+        let mut material = Material::default()
+            .with_base_color_texture(Resource::new_ok(format!("alpha {alpha}"), texture));
+        kpbr::physical::Physical {
+            alpha_cutoff: 0.5,
+            ..Default::default()
+        }
+        .apply(&mut material);
+        Node::new("Cube")
+            .with_mesh(Mesh::cube())
+            .with_material(material)
+            .with_position(Vec3::new(0.0, 0.5, 0.0))
+    };
+    let Some(cut) = ssao_scene_pixels(cube(true)) else {
+        eprintln!("没有可用的显卡适配器，跳过");
+        return;
+    };
+    let solid = ssao_scene_pixels(cube(false)).unwrap();
+    let empty =
+        ssao_scene_pixels(Node::new("Nothing").with_position(Vec3::new(0.0, 0.5, 0.0))).unwrap();
+    let cube_and_occlusion = changed_pixels(&solid, &empty);
+    assert!(
+        cube_and_occlusion > 40,
+        "对照场景里方块和遮蔽只占 {cube_and_occlusion} 个像素"
+    );
+    let leftover = changed_pixels(&cut, &empty);
+    assert!(
+        leftover * 10 < cube_and_occlusion,
+        "贴图 alpha 为 0 的方块在预通道里还在：和空场景有 {leftover} 个像素不同（方块 + 遮蔽占 {cube_and_occlusion} 个）"
+    );
+}
+
+#[test]
+fn double_sided_back_faces_are_in_the_prepass() {
+    use kmaterial::Material;
+    use kmath::{Quat, Vec4};
+    // 竖着立在地上的一块双面板子。正面朝相机和背面朝相机，主画面里一样，
+    // 预通道里也该一样——它压在地上的那圈遮蔽不该因为朝向就没了。
+    // 回归：预通道曾经一律剔背面，双面的树叶、布帘从背后看时预通道里是后面的地面。
+    let board = |facing_camera: bool| {
+        let angle = if facing_camera { 1.0 } else { -1.0 } * std::f32::consts::FRAC_PI_2;
+        Node::new("Board")
+            .with_mesh(Mesh::plane(1.0))
+            .with_material(
+                Material::default()
+                    .with_base_color(Vec4::new(0.7, 0.7, 0.7, 1.0))
+                    .with_double_sided(),
+            )
+            .with_rotation(Quat::from_rotation_x(angle))
+            .with_scale(Vec3::new(2.0, 1.0, 2.0))
+            .with_position(Vec3::new(0.0, 1.0, 0.0))
+    };
+    let Some(front) = ssao_scene_pixels(board(true)) else {
+        eprintln!("没有可用的显卡适配器，跳过");
+        return;
+    };
+    let back = ssao_scene_pixels(board(false)).unwrap();
+    let empty =
+        ssao_scene_pixels(Node::new("Nothing").with_position(Vec3::new(0.0, 1.0, 0.0))).unwrap();
+    let board_and_occlusion = changed_pixels(&front, &empty);
+    assert!(
+        board_and_occlusion > 40,
+        "对照场景里板子和遮蔽只占 {board_and_occlusion} 个像素"
+    );
+    let different = changed_pixels(&front, &back);
+    assert!(
+        different * 10 < board_and_occlusion,
+        "双面板子背对相机时和正对时有 {different} 个像素不同（板子 + 遮蔽占 {board_and_occlusion} 个）"
+    );
+}
+
+/// 一大片实例化的方块（大半在画面外）+ 一组半透明的实例化面片，开着阴影。
+/// 返回画面，和开着 GPU 剔除时读回的 `[视图][批次]` 实例数。
+/// 画面像素，和读回的 `[视图][批次]` 实例数（没开 GPU 剔除时为 `None`）。
+type CulledFrame = (Vec<u8>, Option<Vec<Vec<u32>>>);
+
+fn instanced_scene(gpu_culling: bool) -> Option<CulledFrame> {
+    use kmaterial::{BlendMode, Material};
+    use kmath::{Quat, Vec4};
+    use kscene::Instance;
+    let mut renderer = pollster::block_on(Renderer::headless(96, 96))?;
+    renderer.set_gpu_culling(gpu_culling);
+    renderer.set_shadow_cascades(klight::cascade::CascadeSettings {
+        max_distance: 30.0,
+        ..Default::default()
+    });
+    let mut scene = Scene::new();
+    scene.add_node(
+        Node::new("Camera")
+            .with_camera(Camera::default())
+            .with_transform(Transform::looking_at(
+                Vec3::new(0.0, 6.0, 9.0),
+                Vec3::ZERO,
+                Vec3::Y,
+            )),
+    );
+    scene.add_node(
+        Node::new("Ground")
+            .with_mesh(Mesh::plane(1.0))
+            .with_material(Material::default().with_base_color(Vec4::new(0.7, 0.7, 0.7, 1.0)))
+            .with_scale(Vec3::new(80.0, 1.0, 80.0)),
+    );
+    scene.add_node(
+        Node::new("Sun")
+            .with_light(
+                klight::Light::directional()
+                    .with_intensity(2.5)
+                    .with_shadows(),
+            )
+            .with_transform(Transform::looking_at(
+                Vec3::new(-4.0, 6.0, -2.0),
+                Vec3::ZERO,
+                Vec3::Y,
+            )),
+    );
+    // 40 × 40 个方块铺开 80 米，相机只看得见中间一小块。
+    let cubes: Vec<Instance> = (0..40)
+        .flat_map(|i| (0..40).map(move |j| (i, j)))
+        .map(|(i, j)| {
+            let position = Vec3::new(i as f32 * 2.0 - 40.0, 0.5, j as f32 * 2.0 - 40.0);
+            Instance::from_parts(
+                position,
+                Quat::from_rotation_y((i * j) as f32),
+                Vec3::splat(0.8),
+            )
+            .with_color(Vec3::new(i as f32 / 40.0, 0.5, j as f32 / 40.0))
+        })
+        .collect();
+    scene.add_node(
+        Node::new("Cubes")
+            .with_mesh(Mesh::cube())
+            .with_material(Material::default())
+            .with_instances(cubes),
+    );
+    // 半透明的竖片，前后叠着：顺序错了混出来的颜色就不一样。
+    let panes: Vec<Instance> = (0..6)
+        .map(|k| {
+            Instance::from_parts(
+                Vec3::new(k as f32 * 0.3 - 0.8, 1.2, 2.0 - k as f32 * 0.6),
+                Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                Vec3::splat(1.2),
+            )
+            .with_color(Vec3::new(1.0 - k as f32 / 6.0, k as f32 / 6.0, 0.4))
+        })
+        .collect();
+    scene.add_node(
+        Node::new("Panes")
+            .with_mesh(Mesh::plane(1.0))
+            .with_material(
+                Material::default()
+                    .with_base_color(Vec4::new(1.0, 1.0, 1.0, 0.5))
+                    .with_blend_mode(BlendMode::Alpha)
+                    .with_double_sided(),
+            )
+            .with_instances(panes),
+    );
+    scene.update();
+    let mut ui = Ui::new();
+    for _ in 0..3 {
+        ui.begin_frame(Vec2::new(96.0, 96.0), 1.0);
+        ui.end_frame();
+        renderer.render(&scene, &ui, &[]);
+    }
+    let counts = renderer.read_cull_counts();
+    renderer
+        .read_pixels()
+        .map(|(_, _, pixels)| (pixels, counts))
+}
+
+#[test]
+fn gpu_culling_draws_the_same_picture_and_culls_instances() {
+    // GPU 逐实例剔除 + 间接绘制（`cull`）和 CPU 那条路画出来要一样：不透明的、阴影里的、
+    // 半透明的（要保持远近顺序）都是。同时它真的剔了——读回间接参数，相机看得见的方块
+    // 远少于 1600 个，每层阴影也各剔各的。
+    let Some((gpu, counts)) = instanced_scene(true) else {
+        eprintln!("没有可用的显卡适配器，跳过");
+        return;
+    };
+    let Some(counts) = counts else {
+        eprintln!("适配器不支持 INDIRECT_FIRST_INSTANCE，GPU 剔除没开，跳过");
+        return;
+    };
+    let (cpu, none) = instanced_scene(false).unwrap();
+    assert!(none.is_none(), "关掉以后不该还在走 GPU 剔除");
+    let different = changed_pixels(&gpu, &cpu);
+    assert!(
+        different <= 2,
+        "GPU 剔除和 CPU 画出来的有 {different} 个像素不同"
+    );
+
+    eprintln!("各视图各批次的实例数：{counts:?}");
+    // 批次 0 是方块（不透明的先进表），相机视图里只剩看得见的那些。
+    let camera = &counts[0];
+    let cubes = camera.iter().copied().max().unwrap_or(0);
+    assert!(
+        cubes > 10 && cubes < 400,
+        "相机视图里画了 {cubes} 个方块（共 1600 个），剔除没起作用：{camera:?}"
+    );
+    assert!(counts.len() > 2, "没有阴影层：{}", counts.len());
+    // 各层阴影覆盖的范围不同，剔出来的数也不该一样多。
+    let per_layer: Vec<u32> = counts[1..].iter().map(|view| view.iter().sum()).collect();
+    assert!(
+        per_layer.iter().any(|&n| n != per_layer[0]) && per_layer.iter().all(|&n| n < 1600),
+        "各层阴影的实例数：{per_layer:?}"
+    );
+}
+
 #[test]
 fn a_shadow_radius_softens_the_edge() {
     use kmaterial::Material;

@@ -549,6 +549,13 @@ impl Renderer {
                 } else {
                     kmath::Aabb::EMPTY
                 },
+                // 蒙皮、形变的网格局部包围盒不准（CPU 上的包围盒是按关节、权重现算的）：给空的，
+                // GPU 剔除就不按实例测，退回整组判（见 `cull.wgsl`）。
+                local_aabb: if skin_offset.is_some() || mesh.has_morph_targets() {
+                    kmath::Aabb::EMPTY
+                } else {
+                    mesh.aabb()
+                },
                 // 没有子网格材质组时画整份网格——用 `mesh.index_count()`
                 // 而不是缓存里的 `gpu.index_count`：两者理应相等，但网格
                 // 缓存刚好在上面才建好或刷新过，直接用来源数据更直接。
@@ -622,14 +629,19 @@ impl Renderer {
         joints: &[[[f32; 4]; 4]],
         morph_weights: &[f32],
         frame: &FrameInstances<'_>,
+        cull_views: Option<u32>,
     ) {
         let (objects, slots) = (&frame.objects, &frame.slots);
         let total_draws = objects.len();
         // 槽、实例缓冲不够就翻倍，换了缓冲要重建对象绑定组（下面几处重建都会带上新的这块），
         // 阴影 pass 那边看 `instance_generation` 变了也跟着重建。
+        //
+        // 开着 GPU 剔除时各个 pass 绑的槽缓冲是压紧结果，一个视图一段，要 槽数 × 视图数 那么大；
+        // 原始槽由剔除 pass 自己的缓冲收着（`prepare_gpu_cull` 已经写过了）。
+        let needed = slots.len() as u64 * u64::from(cull_views.unwrap_or(1));
         let mut slots_grew = false;
-        if slots.len() as u64 > self.slot_capacity {
-            let capacity = (slots.len() as u64).next_power_of_two();
+        if needed > self.slot_capacity {
+            let capacity = needed.next_power_of_two();
             self.slot_buffer = create_slot_storage(&self.device, capacity);
             self.slot_capacity = capacity;
             slots_grew = true;
@@ -716,7 +728,7 @@ impl Renderer {
             self.queue
                 .write_buffer(&self.object_buffer, 0, bytemuck::cast_slice(objects));
         }
-        if !slots.is_empty() {
+        if !slots.is_empty() && cull_views.is_none() {
             self.queue
                 .write_buffer(&self.slot_buffer, 0, bytemuck::cast_slice(slots));
         }

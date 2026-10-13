@@ -10,7 +10,13 @@ use super::*;
 ///
 /// 蒙皮批次要第二路顶点缓冲（骨骼下标与权重）；网格缺了这一路时整批跳过，
 /// 而不是用错的布局去画。
-fn draw_batch(pass: &mut wgpu::RenderPass<'_>, gpu_mesh: &GpuMesh, batch: &Batch) {
+/// `indirect` 是 GPU 剔除给这一批写好的间接参数（见 `cull`）；`None` 就按批次的实例范围直接画。
+fn draw_batch(
+    pass: &mut wgpu::RenderPass<'_>,
+    gpu_mesh: &GpuMesh,
+    batch: &Batch,
+    indirect: Option<(&wgpu::Buffer, u64)>,
+) {
     pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
     if batch.skinned {
         let Some(skin) = gpu_mesh.skin_buffer.as_ref() else {
@@ -19,6 +25,11 @@ fn draw_batch(pass: &mut wgpu::RenderPass<'_>, gpu_mesh: &GpuMesh, batch: &Batch
         pass.set_vertex_buffer(1, skin.slice(..));
     }
     pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+    if let Some((buffer, offset)) = indirect {
+        // 索引区间、实例起点 CPU 预填，实例数是剔除 pass 数出来的。
+        pass.draw_indexed_indirect(buffer, offset);
+        return;
+    }
     // 实例范围的起点即 `@builtin(instance_index)` 的起始值。
     pass.draw_indexed(
         batch.index_range.0..batch.index_range.0 + batch.index_range.1,
@@ -233,14 +244,20 @@ impl Renderer {
             .write_buffer(&self.shadow.globals_buffer, 0, &blob);
 
         for (index, &(matrix, local, layer, resolution)) in shadow_layers.iter().enumerate() {
-            let layer_batches = cascade_batches(
-                batches,
-                slots,
-                instance_bounds,
-                matrix,
-                resolution,
-                settings.min_shadow_texels,
-            );
+            // 开着 GPU 剔除：每层都画全部批次，画几个实例由这一层自己的间接参数定（剔除 pass 已经
+            // 按实例判过了）。没开：CPU 上逐对象判一遍，切出这一层看得见的几段。
+            let layer_batches: std::borrow::Cow<'_, [Batch]> = if self.cull_active {
+                std::borrow::Cow::Borrowed(batches)
+            } else {
+                std::borrow::Cow::Owned(cascade_batches(
+                    batches,
+                    slots,
+                    instance_bounds,
+                    matrix,
+                    resolution,
+                    settings.min_shadow_texels,
+                ))
+            };
             // 写 `self.stats`：统计在准备阶段末尾就定格搬进 self 了。
             self.stats.shadow_draw_calls += layer_batches.len() as u32;
             let layer_view = if local {
@@ -278,7 +295,7 @@ impl Renderer {
             //
             // 管线键：(蒙皮, 钩子 id)。普通物体钩子 id 记 nil。
             let mut current: Option<(bool, Uuid)> = None;
-            for batch in &layer_batches {
+            for batch in layer_batches.iter() {
                 let Some(gpu_mesh) = self.meshes.get(&batch.mesh_id) else {
                     continue;
                 };
@@ -317,7 +334,12 @@ impl Renderer {
                     });
                     current = Some(key);
                 }
-                draw_batch(&mut pass, gpu_mesh, batch);
+                draw_batch(
+                    &mut pass,
+                    gpu_mesh,
+                    batch,
+                    self.indirect_args(batch, 1 + index as u32),
+                );
             }
         }
     }
@@ -338,9 +360,9 @@ impl Renderer {
             pass.set_bind_group(0, &self.globals_bind_group, &[]);
             pass.set_bind_group(1, &self.object_bind_group, &[]);
 
-            // 预通道只关心几何，不关心材质——换管线的判据是「蒙皮与否」，
-            // 外加写了顶点钩子的材质有自己的一套（位移后的形状才是 SSAO 该看的）。
-            let mut current: Option<(bool, Uuid)> = None;
+            // 预通道只关心几何，不关心材质——换管线的判据是「蒙皮与否」「双面与否」，
+            // 外加带钩子的材质有自己的一套（位移后的形状、镂空后的轮廓才是 SSAO、TAA 该看的）。
+            let mut current: Option<(bool, bool, Uuid)> = None;
             for batch in batches {
                 let Some(gpu_mesh) = self.meshes.get(&batch.mesh_id) else {
                     continue;
@@ -352,6 +374,7 @@ impl Renderer {
                 });
                 let key = (
                     batch.skinned,
+                    batch.double_sided,
                     if hooked.is_some() {
                         batch.shader_id
                     } else {
@@ -359,18 +382,19 @@ impl Renderer {
                     },
                 );
                 if current != Some(key) {
-                    match hooked {
-                        Some((passes, _)) => {
-                            pass.set_pipeline(&passes.prepass[usize::from(batch.skinned)])
-                        }
-                        None => pass.set_pipeline(self.ssao.prepass_pipeline(batch.skinned)),
-                    }
+                    let pipeline = match hooked {
+                        Some((passes, _)) => passes.prepass.pick(batch.skinned, batch.double_sided),
+                        None => self
+                            .ssao
+                            .prepass_pipeline(batch.skinned, batch.double_sided),
+                    };
+                    pass.set_pipeline(pipeline);
                     current = Some(key);
                 }
                 if let Some((_, textures)) = hooked {
                     pass.set_bind_group(2, textures, &[]);
                 }
-                draw_batch(&mut pass, gpu_mesh, batch);
+                draw_batch(&mut pass, gpu_mesh, batch, self.indirect_args(batch, 0));
             }
         }
         let ssao_on = self.ssao.settings.enabled;
@@ -459,7 +483,7 @@ impl Renderer {
                 current_pipeline = Some(key);
             }
             pass.set_bind_group(2, texture_bind_group, &[]);
-            draw_batch(&mut pass, gpu_mesh, batch);
+            draw_batch(&mut pass, gpu_mesh, batch, self.indirect_args(batch, 0));
         }
 
         // 天空放在最后画：此时深度缓冲已填好，只有空白像素能通过 LessEqual 测试，
@@ -531,7 +555,7 @@ impl Renderer {
                 };
                 pass.set_pipeline(self.pipeline_for(batch, true));
                 pass.set_bind_group(2, texture_bind_group, &[]);
-                draw_batch(&mut pass, gpu_mesh, batch);
+                draw_batch(&mut pass, gpu_mesh, batch, None);
             }
         }
         let transparent_batches = readers.as_slice();
@@ -583,7 +607,7 @@ impl Renderer {
                     current = Some(key);
                 }
                 pass.set_bind_group(2, texture_bind_group, &[]);
-                draw_batch(&mut pass, gpu_mesh, batch);
+                draw_batch(&mut pass, gpu_mesh, batch, None);
             }
         }
 
@@ -625,7 +649,7 @@ impl Renderer {
                 pass.set_pipeline(self.mask.pipeline(batch.skinned));
                 current_skinned = Some(batch.skinned);
             }
-            draw_batch(&mut pass, gpu_mesh, batch);
+            draw_batch(&mut pass, gpu_mesh, batch, self.indirect_args(batch, 0));
         }
     }
 

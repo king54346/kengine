@@ -151,19 +151,20 @@ pub mod prelude {
     };
     pub use kphysics::{
         BodyHandle, ColliderDesc, ColliderHandle, ColliderShape, CollisionEvent, ContactForceEvent,
-        InteractionGroups, JointDesc, JointHandle, JointKind, PhysicsDebugOptions, PhysicsWorld,
-        RayCastOptions, RayHit, RigidBodyDesc, RigidBodyType, ShapeCastOptions, SoftBody,
-        SoftBodySettings, SphericalLimits, VehicleController, WheelDesc, WheelState, WheelTuning,
+        Coupling, InteractionGroups, JointDesc, JointHandle, JointKind, PhysicsDebugOptions,
+        PhysicsWorld, RayCastOptions, RayHit, RigidBodyDesc, RigidBodyType, ShapeCastOptions,
+        SoftBody, SoftBodySettings, SphericalLimits, VehicleController, WheelDesc, WheelState,
+        WheelTuning, step_soft_bodies,
     };
     pub use krender::{
         AntiAlias, ContactShadows, PassOutput, PostEffect, PostInputs, PostSettings, PostStack,
         PostStage, PresentMode, RenderStats, SsaoSettings, ToneMapping, Upscaling, effects,
     };
     pub use kscene::{
-        AnimationPlayer, Cell, Collider, Instance, Joint, LimbDesc, Lod, NavGrid, NavGridSettings,
-        Node, Ragdoll, RagdollBuilder, RagdollLimb, RigidBody, Scene, SceneDebugOptions,
-        SceneRayHit, ScriptSlot, Skin, SortMode, SoundSource, SpriteInstance, Streaming, Terrain,
-        Transform, hinge_limits,
+        AnimationPlayer, Cell, Collider, FractureOptions, FracturePlane, Instance, Joint, LimbDesc,
+        Lod, NavGrid, NavGridSettings, Node, Ragdoll, RagdollBuilder, RagdollLimb, RigidBody,
+        Scene, SceneDebugOptions, SceneRayHit, ScriptSlot, Skin, SortMode, SoundSource,
+        SpriteInstance, Streaming, Terrain, Transform, hinge_limits,
     };
     pub use kscript::{Script, ScriptLoader, ScriptRuntime, ScriptStats, Signal};
     pub use kshader::{Shader, ShaderLoader};

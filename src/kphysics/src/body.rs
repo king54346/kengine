@@ -320,6 +320,13 @@ impl BodyRef<'_> {
         self.0.is_sleeping()
     }
 
+    /// 是否允许休眠。`can_sleep(false)` 在 rapier 里是把激活阈值设成负数，
+    /// 没有直接的 getter，这里看阈值符号反推。
+    pub fn can_sleep(&self) -> bool {
+        self.0.activation().normalized_linear_threshold >= 0.0
+            && self.0.activation().angular_threshold >= 0.0
+    }
+
     /// 是否启用。
     pub fn is_enabled(&self) -> bool {
         self.0.is_enabled()

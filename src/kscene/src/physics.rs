@@ -603,7 +603,7 @@ mod scene_test {
     use super::*;
     use crate::{ParticleSystem, Scene, Transform};
     use kmath::Mat4;
-    use kphysics::{InteractionGroups, JointKind, RayCastOptions};
+    use kphysics::{FractureOptions, FracturePlane, InteractionGroups, JointKind, RayCastOptions};
 
     /// 一块 100×1×100 的地面，上表面在 y = 0。
     fn add_ground(scene: &mut Scene) -> Handle<Node> {
@@ -1571,5 +1571,254 @@ mod scene_test {
         }
 
         assert_eq!(run_once(), run_once());
+    }
+
+    /// 一块 1 米的动态立方体，位置给在原点。
+    fn add_breakable_cube(scene: &mut Scene) -> Handle<Node> {
+        scene.add_node(
+            Node::new("crate")
+                .with_position(Vec3::ZERO)
+                .with_rigid_body(RigidBody::dynamic())
+                .with_collider(Collider::cuboid(Vec3::splat(0.5))),
+        )
+    }
+
+    #[test]
+    fn fracture_node_splits_a_cube_into_two_children() {
+        let mut scene = Scene::new();
+        let cube = add_breakable_cube(&mut scene);
+        let plane = FracturePlane::new(Vec3::ZERO, Vec3::X).unwrap();
+
+        let children = scene
+            .fracture_node(cube, &plane, &FractureOptions::default())
+            .expect("竖直一切应该把立方体分成两块");
+
+        // 母节点没了，两块节点都在。
+        assert!(scene.try_get(cube).is_none());
+        for child in children {
+            let node = scene.try_get(child).expect("碎块节点该在");
+            // 碎块网格是切出来的，不该还是完整的立方体。
+            assert!(node.mesh.is_some(), "碎块 {child:?} 该有自己的网格");
+            let body = node.rigid_body.as_ref().expect("碎块该有刚体");
+            let collider = node.collider.as_ref().expect("碎块该有碰撞体");
+            assert!(body.native().is_some(), "碎块原生刚体该建出来");
+            assert!(collider.native().is_some(), "碎块原生碰撞体该建出来");
+        }
+
+        // 物理世界里也是一换二：刚好两个刚体、两个碰撞体。
+        assert_eq!(scene.physics().body_count(), 2);
+        assert_eq!(scene.physics().collider_count(), 2);
+
+        // 切完跑一帧，同步不该 panic，碎块该在原位附近。
+        scene.step_physics(1.0 / 60.0);
+        scene.update();
+        for child in children {
+            let position = scene.try_get(child).unwrap().transform.position;
+            assert!(position.length() < 1.0, "碎块不该飞出去：{position:?}");
+        }
+    }
+
+    #[test]
+    fn fracture_node_maps_physics_user_data_back_to_nodes() {
+        let mut scene = Scene::new();
+        let cube = add_breakable_cube(&mut scene);
+        let plane = FracturePlane::new(Vec3::ZERO, Vec3::X).unwrap();
+
+        let children = scene
+            .fracture_node(cube, &plane, &FractureOptions::default())
+            .expect("该切开");
+
+        // 子刚体与子碰撞体的用户数据都该反查回各自的节点——
+        // 不然「碎块再碎」时连该切哪个节点都找不到。
+        for child in children {
+            let node = scene.try_get(child).unwrap();
+            let body = node.rigid_body.as_ref().unwrap().native().unwrap();
+            let collider = node.collider.as_ref().unwrap().native().unwrap();
+            let body_data = scene.physics().body(body).unwrap().user_data();
+            let collider_data = scene.physics().collider(collider).unwrap().user_data();
+            assert_eq!(scene.node_of_physics_user_data(body_data), Some(child));
+            assert_eq!(scene.node_of_physics_user_data(collider_data), Some(child));
+        }
+    }
+
+    #[test]
+    fn fracture_node_inherits_the_contact_threshold_by_default() {
+        let mut scene = Scene::new();
+        let cube = scene.add_node(
+            Node::new("crate")
+                .with_position(Vec3::ZERO)
+                .with_rigid_body(RigidBody::dynamic())
+                .with_collider({
+                    let mut collider = Collider::cuboid(Vec3::splat(0.5));
+                    collider.set_contact_force_threshold(42.0);
+                    collider
+                }),
+        );
+        let plane = FracturePlane::new(Vec3::ZERO, Vec3::X).unwrap();
+
+        // 默认（阈值 < 0）继承母体：两块都是 42。
+        let children = scene
+            .fracture_node(cube, &plane, &FractureOptions::default())
+            .expect("该切开");
+        for child in children {
+            let node = scene.try_get(child).unwrap();
+            assert_eq!(
+                node.collider.as_ref().unwrap().contact_force_threshold(),
+                42.0
+            );
+        }
+
+        // 显式正值覆盖：两块都是新的值。
+        let cube = add_breakable_cube(&mut scene);
+        let children = scene
+            .fracture_node(
+                cube,
+                &plane,
+                &FractureOptions {
+                    child_contact_threshold: 7.0,
+                    ..FractureOptions::default()
+                },
+            )
+            .expect("该切开");
+        for child in children {
+            let node = scene.try_get(child).unwrap();
+            assert_eq!(
+                node.collider.as_ref().unwrap().contact_force_threshold(),
+                7.0
+            );
+        }
+    }
+
+    /// 照 `physics_break` 的做法真撞一次：地上一块砖，一颗球横着砸过去，读球和砖之间的接触力事件，
+    /// 用 `plane_of(撞击点, 力方向)` 切。切开了返回两块沿切割面法线各有多厚（米），没切开返回 `None`。
+    fn shoot_a_brick(
+        speed: f32,
+        plane_of: impl Fn(Vec3, Vec3) -> Option<FracturePlane>,
+    ) -> Option<[f32; 2]> {
+        let mut scene = Scene::new();
+        add_ground(&mut scene);
+        let half = Vec3::new(0.45, 0.28, 0.45);
+        let mut collider = Collider::cuboid(half);
+        collider.set_contact_force_threshold(50.0);
+        let brick = scene.add_node(
+            Node::new("brick")
+                .with_position(Vec3::new(0.0, half.y, 0.0))
+                .with_rigid_body(RigidBody::dynamic())
+                .with_collider(collider),
+        );
+        let ball = scene.add_node(
+            Node::new("ball")
+                .with_position(Vec3::new(0.1, 0.35, 4.0))
+                .with_rigid_body(RigidBody::dynamic())
+                .with_collider(Collider::new(
+                    kphysics::ColliderDesc::ball(0.35).with_density(18.0),
+                )),
+        );
+        scene
+            .try_get_mut(ball)
+            .unwrap()
+            .rigid_body_mut()
+            .unwrap()
+            .set_linvel(Vec3::new(0.0, 0.0, -speed));
+        let dt = 1.0 / 60.0;
+        for _ in 0..60 {
+            scene.step_physics(dt);
+            scene.update();
+            let hit = scene.contact_force_events().iter().find_map(|event| {
+                let (a, b) = scene.contact_force_nodes(event);
+                (a == Some(brick) && b == Some(ball) || a == Some(ball) && b == Some(brick))
+                    .then_some((event.max_force_direction, event.collider1, event.collider2))
+            });
+            let Some((direction, c1, c2)) = hit else {
+                continue;
+            };
+            let point = scene
+                .physics()
+                .contact_point(c1, c2)
+                .unwrap_or(scene.try_get(brick).unwrap().transform.position);
+            let plane = plane_of(point, direction)?;
+            let pieces = scene.fracture_node(brick, &plane, &FractureOptions::default())?;
+            return Some(pieces.map(|piece| {
+                let world = scene.world_matrix(piece);
+                let mesh = scene.try_get(piece).unwrap().mesh.as_ref().unwrap();
+                let along: Vec<f32> = mesh
+                    .vertices()
+                    .iter()
+                    .map(|v| world.transform_point3(v.position()).dot(plane.normal))
+                    .collect();
+                along.iter().copied().fold(f32::MIN, f32::max)
+                    - along.iter().copied().fold(f32::MAX, f32::min)
+            }));
+        }
+        panic!("球没砸出够大的接触力");
+    }
+
+    #[test]
+    fn shards_are_flat_shaded() {
+        // 碎块的每个三角形三个顶点法线都是这个面的法线（平面着色），不是共用顶点按面平均出来的。
+        let mut scene = Scene::new();
+        let cube = add_breakable_cube(&mut scene);
+        let plane = FracturePlane::new(Vec3::new(0.1, 0.0, 0.0), Vec3::new(1.0, 0.3, 0.0)).unwrap();
+        let children = scene
+            .fracture_node(cube, &plane, &FractureOptions::default())
+            .unwrap();
+        for child in children {
+            let mesh = scene.try_get(child).unwrap().mesh.as_ref().unwrap();
+            let vertices = mesh.vertices();
+            assert!(!mesh.indices().is_empty());
+            for t in mesh.indices().chunks_exact(3) {
+                let [a, b, c] = [t[0], t[1], t[2]].map(|i| vertices[i as usize]);
+                let face = (b.position() - a.position())
+                    .cross(c.position() - a.position())
+                    .normalize();
+                for v in [a, b, c] {
+                    assert!(
+                        (v.normal() - face).length() < 1e-4,
+                        "{:?} vs {face:?}",
+                        v.normal()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_cannonball_cracks_a_brick_along_the_impact() {
+        // `FracturePlane::from_impact`：平面过撞击点、包含撞击方向，砖顺着冲击劈成两块像样的。
+        // 快慢都一样——和球在那一帧陷进去多深无关。
+        for speed in [26.0, 6.0] {
+            let thickness = shoot_a_brick(speed, FracturePlane::from_impact)
+                .unwrap_or_else(|| panic!("{speed} m/s 没切开"));
+            assert!(
+                thickness.iter().all(|&t| t > 0.2),
+                "{speed} m/s 切出来的两块厚度 {thickness:?}"
+            );
+        }
+        // 对照：拿力的方向直接当法线（`physics_break` 原来的写法）。力的方向就是被撞那个面的法线，
+        // 平面平行于被撞的面、过接触点——切下来的是一片厚度等于穿透深度的薄板。
+        let along_force = |point: Vec3, direction: Vec3| FracturePlane::new(point, direction);
+        let slow = shoot_a_brick(6.0, along_force);
+        assert!(
+            slow.is_none_or(|thickness| thickness.iter().any(|&t| t < 0.03)),
+            "力方向当法线，慢球切出来的应该是一片薄板：{slow:?}"
+        );
+    }
+
+    #[test]
+    fn fracture_node_leaves_a_grazing_cut_untouched() {
+        let mut scene = Scene::new();
+        let cube = add_breakable_cube(&mut scene);
+        // 平面擦着边过（立方体右脸在 x = 0.5）：切出来是薄片，
+        // 整个碎裂取消，母体与世界都原样。
+        let plane = FracturePlane::new(Vec3::new(0.4999, 0.0, 0.0), Vec3::X).unwrap();
+
+        assert!(
+            scene
+                .fracture_node(cube, &plane, &FractureOptions::default())
+                .is_none()
+        );
+        assert!(scene.try_get(cube).is_some(), "母节点该还在");
+        assert_eq!(scene.physics().body_count(), 1);
+        assert_eq!(scene.physics().collider_count(), 1);
     }
 }

@@ -73,8 +73,8 @@ fn scene(count: usize, shadows: bool) -> Scene {
 }
 
 /// 同一片方块，改成实例化：八种材质各一个节点，方块全是实例。和 [`scene`] 逐个对得上（位置、材质）。
-fn instanced_scene(count: usize) -> Scene {
-    let mut scene = scene(0, false);
+fn instanced_scene(count: usize, shadows: bool) -> Scene {
+    let mut scene = scene(0, shadows);
     let materials: Vec<Material> = (0..8)
         .map(|i| {
             let t = i as f32 / 7.0;
@@ -140,7 +140,7 @@ fn render(c: &mut Criterion) {
     for (label, shadows) in [("plain", false), ("shadow", true), ("instanced", false)] {
         for count in [1_000usize, 10_000, 50_000] {
             let scene = if label == "instanced" {
-                instanced_scene(count)
+                instanced_scene(count, false)
             } else {
                 scene(count, shadows)
             };
@@ -164,6 +164,44 @@ fn render(c: &mut Criterion) {
             });
         }
     }
+
+    // GPU 逐实例剔除 + 间接绘制（`krender::cull`）开 / 关：带阴影的实例化方块。
+    // `cpu` 只计 `render`（和上面一样）；`frame` 连等显卡做完一起计——剔除省下的是显卡的活
+    // （画面外、阴影层外的实例不再跑顶点着色器），只看 CPU 量不到。
+    for (label, gpu_culling) in [("gpu-cull", true), ("cpu-cull", false)] {
+        renderer.set_gpu_culling(gpu_culling);
+        for count in [10_000usize, 50_000] {
+            let scene = instanced_scene(count, true);
+            for _ in 0..3 {
+                renderer.render(&scene, &ui, &[]);
+            }
+            renderer.wait_idle();
+            for (timing, with_gpu) in [("cpu", false), ("frame", true)] {
+                group.bench_with_input(
+                    BenchmarkId::new(format!("instanced_shadow/{label}/{timing}"), count),
+                    &count,
+                    |b, _| {
+                        b.iter_custom(|iterations| {
+                            let mut total = Duration::ZERO;
+                            for _ in 0..iterations {
+                                let start = Instant::now();
+                                black_box(renderer.render(&scene, &ui, &[]));
+                                if with_gpu {
+                                    renderer.wait_idle();
+                                    total += start.elapsed();
+                                } else {
+                                    total += start.elapsed();
+                                    renderer.wait_idle();
+                                }
+                            }
+                            total
+                        });
+                    },
+                );
+            }
+        }
+    }
+    renderer.set_gpu_culling(true);
     group.finish();
 }
 

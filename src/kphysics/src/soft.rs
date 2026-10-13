@@ -16,17 +16,20 @@
 //! 走**子步**（substep）而不是靠加迭代次数——子步在数学上比多迭代更接近
 //! 真解，这一点是 XPBD 那篇论文的主要结论之一。
 //!
-//! # 和刚体世界是单向耦合
+//! # 和刚体世界、和别的软体
 //!
-//! 布会被刚体推开，但**不会反过来推刚体**。
+//! [`SoftBody::step`] 是**单向**的：布被刚体推开，刚体不动。要双向就用 [`step_soft_bodies`] 配
+//! [`Coupling::TwoWay`]：粒子被推开 Δx，等于它在这个子步里多了 `质量 × Δx / h` 的动量，等大反向
+//! 的冲量加到被碰的动态刚体上（作用在接触点）。布静止压在箱子上时，一帧传过去的冲量正好是布的
+//! 重量；布砸下来、被箱子撞，传的就是相应的动量——总动量守恒（测试 `two_way_coupling_conserves_momentum`）。
 //!
-//! 双向耦合要把粒子受到的冲量加回刚体上，而一块布有几千个粒子、
-//! 每个质量都比箱子小两三个数量级——质量比一悬殊，加回去的冲量要么
-//! 没有可见效果，要么在几帧里把箱子弹飞。真要做得可靠得给软体一个
-//! 整体质量再分配，那是另一套东西。
+//! 以前不做双向，是因为每个粒子的质量写死为 1 千克，一块 48×48 的布有两千多千克，加回去的冲量会
+//! 把箱子弹飞。现在软体有真实的总质量（[`SoftBodySettings::mass`]，平均分给粒子）；它只用在和外界
+//! 交换动量上，软体内部的约束只看粒子之间的质量比，原来的手感一点没变。
 //!
-//! 所以：布落在箱子上会披下来，但推不动箱子。这条限制写在这儿而不是
-//! 让人自己去发现。
+//! 几个软体放进同一次 [`step_soft_bodies`] 就会互相碰：共用子步，不同软体的粒子离得比两边半径
+//! 之和还近就推开，按质量分谁让谁。只比粒子不比三角形——粒子半径要盖住粒子间距的一半，不然小东西
+//! 会从缝里钻过去。
 //!
 //! # 顶点要焊接
 //!
@@ -34,7 +37,7 @@
 //! 图元在接缝处（UV 缝、硬边）有重复顶点，不焊的话那些顶点各走各的，
 //! 球会从缝上裂开——而且不报任何错，看起来像「模型坏了」。
 
-use crate::{InteractionGroups, PhysicsWorld};
+use crate::{BodyHandle, PhysicsWorld, RigidBodyType};
 use kmath::{Mat4, Vec3};
 use kmesh::{Mesh, Vertex};
 
@@ -78,6 +81,11 @@ pub struct SoftBodySettings {
     /// 按粒子间距的 0.8～1 倍给。**静止时就比这更近**的粒子对不参与
     /// （它们是相邻粒子，归距离约束管），所以给得比间距大会让布变硬。
     pub self_collision: f32,
+    /// 整个软体的质量（千克），平均分到每个粒子上。
+    ///
+    /// 软体内部只看粒子之间的质量比，这一项不影响它自己怎么动；它决定的是和外界交换动量时
+    /// 有多重：双向耦合时布压在箱子上有多沉、被箱子撞时把箱子拖慢多少，两个软体互撞时谁让谁。
+    pub mass: f32,
 }
 
 impl Default for SoftBodySettings {
@@ -91,6 +99,7 @@ impl Default for SoftBodySettings {
             particle_radius: 0.02,
             pressure: 0.0,
             self_collision: 0.0,
+            mass: 1.0,
         }
     }
 }
@@ -418,13 +427,23 @@ impl SoftBody {
     /// 步进一帧。
     ///
     /// `world` 给了就和里面的刚体做碰撞（**单向**：布被推开，刚体不动）。
-    /// 给 `None` 就只有内部约束和重力。
+    /// 给 `None` 就只有内部约束和重力。要刚体也被软体推动、或者几个软体互相碰，
+    /// 用 [`step_soft_bodies`]。
     pub fn step(&mut self, dt: f32, gravity: Vec3, world: Option<&PhysicsWorld>) {
-        if dt <= 0.0 || self.particles.is_empty() {
-            return;
-        }
-        let substeps = self.settings.substeps.max(1);
-        let h = dt / substeps as f32;
+        let coupling = match world {
+            Some(world) => Coupling::OneWay(world),
+            None => Coupling::None,
+        };
+        step_soft_bodies(&mut [self], dt, gravity, coupling);
+    }
+
+    /// 每个粒子的质量（千克）。
+    fn particle_mass(&self) -> f32 {
+        self.settings.mass.max(1e-6) / self.particles.len().max(1) as f32
+    }
+
+    /// 子步开头：积分速度、预测位置。
+    fn begin_substep(&mut self, h: f32, gravity: Vec3) {
         // 阻尼是**每秒**衰减掉的比例，所以指数是子步的时长（秒），
         // 不是 `1/子步数`。
         //
@@ -441,46 +460,45 @@ impl SoftBody {
         } else {
             f32::INFINITY
         };
-
-        for _ in 0..substeps {
-            for particle in &mut self.particles {
-                if particle.inverse_mass == 0.0 {
-                    particle.previous = particle.position;
-                    continue;
-                }
-                particle.velocity = (particle.velocity + gravity * h) * damping;
-                let speed = particle.velocity.length();
-                if speed > max_speed {
-                    particle.velocity *= max_speed / speed;
-                }
+        for particle in &mut self.particles {
+            if particle.inverse_mass == 0.0 {
                 particle.previous = particle.position;
-                particle.position += particle.velocity * h;
+                continue;
             }
+            particle.velocity = (particle.velocity + gravity * h) * damping;
+            let speed = particle.velocity.length();
+            if speed > max_speed {
+                particle.velocity *= max_speed / speed;
+            }
+            particle.previous = particle.position;
+            particle.position += particle.velocity * h;
+        }
+    }
 
-            for _ in 0..self.settings.iterations.max(1) {
-                self.solve_distances();
-                if self.settings.pressure > 0.0 {
-                    self.solve_volume();
-                }
+    /// 子步中段：自己的约束（距离、体积、自碰撞）。
+    fn solve_internal(&mut self) {
+        for _ in 0..self.settings.iterations.max(1) {
+            self.solve_distances();
+            if self.settings.pressure > 0.0 {
+                self.solve_volume();
             }
+        }
+        let thickness = self.settings.self_collision.max(0.0);
+        if thickness > 0.0 {
+            self.solve_self_collisions(thickness);
+        }
+    }
 
-            if thickness > 0.0 {
-                self.solve_self_collisions(thickness);
+    /// 子步结尾：速度由「实际挪了多少」反推。
+    ///
+    /// 这是 PBD 的关键一步：约束把粒子拉回去的那部分位移会**变成**速度的修正，
+    /// 于是碰撞和约束天然就有正确的反弹与减速。
+    fn end_substep(&mut self, h: f32) {
+        for particle in &mut self.particles {
+            if particle.inverse_mass == 0.0 {
+                continue;
             }
-
-            if let Some(world) = world {
-                self.solve_collisions(world);
-            }
-
-            // 速度由「实际挪了多少」反推。这是 PBD 的关键一步：
-            // 约束把粒子拉回去的那部分位移会**变成**速度的修正，
-            // 于是碰撞和约束天然就有正确的反弹与减速。
-            for particle in &mut self.particles {
-                if particle.inverse_mass == 0.0 {
-                    continue;
-                }
-                particle.velocity = (particle.position - particle.previous) / h;
-            }
+            particle.velocity = (particle.position - particle.previous) / h;
         }
     }
 
@@ -669,42 +687,51 @@ impl SoftBody {
     }
 
     /// 和刚体世界碰撞：把陷进碰撞体里的粒子推到表面外。
-    fn solve_collisions(&mut self, world: &PhysicsWorld) {
+    ///
+    /// `impulses` 给了就是双向耦合：粒子被推开 Δx，等于它在这个子步里多了 `质量 × Δx / h` 的动量，
+    /// 等大反向的冲量记给被碰的动态刚体（作用在接触点上，偏心的会带转动）。
+    ///
+    /// 每个粒子各查各的、互不影响，粒子多时切块丢给引擎的 ktask 计算池并行。结果和串行逐位一样：
+    /// 每个粒子的计算不变，冲量按块的顺序拼回去，顺序也不变。
+    fn solve_collisions(
+        &mut self,
+        world: &PhysicsWorld,
+        h: f32,
+        impulses: Option<&mut Vec<(BodyHandle, Vec3, Vec3)>>,
+    ) {
         let radius = self.settings.particle_radius.max(0.0);
-        for particle in &mut self.particles {
-            if particle.inverse_mass == 0.0 {
-                continue;
+        let mass = self.particle_mass();
+        let coupled = impulses.is_some();
+        let query = world.point_query();
+        let solve = |chunk: &mut [Particle]| {
+            let mut out = Vec::new();
+            for particle in chunk {
+                if let Some(impulse) = collide_particle(particle, &query, radius, mass / h)
+                    && coupled
+                {
+                    out.push(impulse);
+                }
             }
-            // `solid = false`：要的是**表面**上最近的点。给 true 的话
-            // 陷在内部的粒子会把自己的位置当成投影点返回，一动不动。
-            let Some(projection) = world.project_point(
-                particle.position,
-                radius.max(1e-3),
-                false,
-                InteractionGroups::ALL,
-            ) else {
-                continue;
-            };
-
-            let to_surface = projection.point - particle.position;
-            let distance = to_surface.length();
-            if projection.is_inside {
-                // 陷进去了：推到表面外面再留出半径。
-                let normal = if distance > 1e-6 {
-                    to_surface / distance
-                } else {
-                    Vec3::Y
-                };
-                particle.position = projection.point + normal * radius;
-            } else if distance < radius {
-                // 还在外面但贴得太近：沿表面法线顶开。
-                let normal = if distance > 1e-6 {
-                    -to_surface / distance
-                } else {
-                    Vec3::Y
-                };
-                particle.position = projection.point + normal * radius;
-            }
+            out
+        };
+        let found: Vec<(BodyHandle, Vec3, Vec3)> = if self.particles.len() < PARALLEL_PARTICLES {
+            solve(&mut self.particles)
+        } else {
+            use ktask::ParallelSliceMut;
+            let pool = ktask::ComputeTaskPool::get_or_init(ktask::TaskPool::default);
+            let chunk = self
+                .particles
+                .len()
+                .div_ceil(pool.thread_num().max(1) * 4)
+                .max(64);
+            self.particles
+                .par_chunk_map_mut(pool, chunk, |_, chunk| solve(chunk))
+                .into_iter()
+                .flatten()
+                .collect()
+        };
+        if let Some(impulses) = impulses {
+            impulses.extend(found);
         }
     }
 
@@ -769,6 +796,248 @@ impl SoftBody {
         // 贴在一张不动的布上，形状变了明暗不变。
         mesh.recompute_normals();
         true
+    }
+}
+
+/// 粒子数到这么多才把碰撞查询分给 ktask：再少的话分发的开销比查询本身还大。
+const PARALLEL_PARTICLES: usize = 512;
+
+/// 一个粒子和刚体世界碰：陷进去或贴得太近就推到表面外留出半径。推了、而且碰的是刚体的话，
+/// 返回该记给那个刚体的冲量 `(刚体, -推开量 × 质量 / h, 接触点)`。
+fn collide_particle(
+    particle: &mut Particle,
+    query: &crate::world::PointQuery<'_>,
+    radius: f32,
+    mass_over_h: f32,
+) -> Option<(BodyHandle, Vec3, Vec3)> {
+    if particle.inverse_mass == 0.0 {
+        return None;
+    }
+    // `solid = false`：要的是**表面**上最近的点。给 true 的话
+    // 陷在内部的粒子会把自己的位置当成投影点返回，一动不动。
+    let (point, inside, body) = query.project(particle.position, radius.max(1e-3))?;
+    let to_surface = point - particle.position;
+    let distance = to_surface.length();
+    let before = particle.position;
+    if inside {
+        // 陷进去了：推到表面外面再留出半径。
+        let normal = if distance > 1e-6 {
+            to_surface / distance
+        } else {
+            Vec3::Y
+        };
+        particle.position = point + normal * radius;
+    } else if distance < radius {
+        // 还在外面但贴得太近：沿表面法线顶开。
+        let normal = if distance > 1e-6 {
+            -to_surface / distance
+        } else {
+            Vec3::Y
+        };
+        particle.position = point + normal * radius;
+    } else {
+        return None;
+    }
+    let push = particle.position - before;
+    body.map(|body| (body, -push * mass_over_h, point))
+}
+
+/// 软体和刚体世界怎么耦合。
+pub enum Coupling<'a> {
+    /// 不和刚体碰，只有内部约束和重力。
+    None,
+    /// 软体被刚体推开，刚体不受影响（布披在箱子上，推不动箱子）。
+    OneWay(&'a PhysicsWorld),
+    /// 双向：软体被推开的动量等大反向地加回动态刚体上——布压在箱子上有重量，
+    /// 箱子撞进布里会被拖慢，吊床兜得住掉下来的箱子。固定 / 运动学刚体照旧只推软体。
+    ///
+    /// 冲量在 [`step_soft_bodies`] 结束时一次加上（改的是刚体速度），刚体在下一次
+    /// [`PhysicsWorld::step`] 里才动。所以先步进软体、再步进刚体世界。
+    TwoWay(&'a mut PhysicsWorld),
+}
+
+/// 一起步进几个软体：共用子步，子步里不同软体的粒子互相推开（离得比两边
+/// [`particle_radius`](SoftBodySettings::particle_radius) 之和还近的粒子对），按各自的
+/// [`mass`](SoftBodySettings::mass) 分配谁让谁。
+///
+/// 子步数取这几个软体里最大的那个。只有一个软体时和 [`SoftBody::step`] 完全一样。
+///
+/// # 只比粒子
+///
+/// 软体之间只拿粒子当小球互相推，不比三角形。粒子间距比两边半径之和还大的话，
+/// 小东西能从粒子之间的缝里钻过去——布要兜住另一个软体，粒子半径按粒子间距的一半往上给。
+pub fn step_soft_bodies(
+    bodies: &mut [&mut SoftBody],
+    dt: f32,
+    gravity: Vec3,
+    mut coupling: Coupling<'_>,
+) {
+    let bodies: Vec<&mut SoftBody> = bodies
+        .iter_mut()
+        .map(|body| &mut **body)
+        .filter(|body| !body.particles.is_empty())
+        .collect();
+    let mut bodies = bodies;
+    if dt <= 0.0 || bodies.is_empty() {
+        return;
+    }
+    let substeps = bodies
+        .iter()
+        .map(|body| body.settings.substeps.max(1))
+        .max()
+        .unwrap_or(1);
+    let h = dt / substeps as f32;
+    let mut impulses = Vec::new();
+    let mut scratch = PairScratch::default();
+    for _ in 0..substeps {
+        for body in bodies.iter_mut() {
+            body.begin_substep(h, gravity);
+            body.solve_internal();
+        }
+        if bodies.len() > 1 {
+            collide_bodies(&mut bodies, &mut scratch);
+        }
+        match &mut coupling {
+            Coupling::None => {}
+            Coupling::OneWay(world) => {
+                for body in bodies.iter_mut() {
+                    body.solve_collisions(world, h, None);
+                }
+            }
+            Coupling::TwoWay(world) => {
+                for body in bodies.iter_mut() {
+                    body.solve_collisions(world, h, Some(&mut impulses));
+                }
+            }
+        }
+        for body in bodies.iter_mut() {
+            body.end_substep(h);
+        }
+    }
+    if let Coupling::TwoWay(world) = coupling {
+        for (handle, impulse, point) in impulses {
+            if let Some(mut body) = world.body_mut(handle)
+                && body.body_type() == RigidBodyType::Dynamic
+            {
+                body.apply_impulse_at_point(impulse, point, true);
+            }
+        }
+    }
+}
+
+/// 软体间碰撞的空间哈希缓冲。
+#[derive(Default)]
+struct PairScratch {
+    /// 所有软体的粒子排成一列：(第几个软体, 第几个粒子)。
+    entries: Vec<(u32, u32)>,
+    starts: Vec<u32>,
+    sorted: Vec<u32>,
+}
+
+/// 不同软体的粒子离得比两边半径之和还近就推开，按两边粒子的真实质量分。
+///
+/// 空间哈希的格子边长取最大的「两倍半径」，看周围 27 格就不会漏。
+fn collide_bodies(bodies: &mut [&mut SoftBody], scratch: &mut PairScratch) {
+    let reach = bodies
+        .iter()
+        .map(|body| body.settings.particle_radius.max(0.0))
+        .fold(0.0f32, f32::max)
+        * 2.0;
+    if reach <= 0.0 {
+        return;
+    }
+    let inverse_cell = 1.0 / reach;
+    let cell_of = |p: Vec3| {
+        [
+            (p.x * inverse_cell).floor() as i32,
+            (p.y * inverse_cell).floor() as i32,
+            (p.z * inverse_cell).floor() as i32,
+        ]
+    };
+    scratch.entries.clear();
+    for (b, body) in bodies.iter().enumerate() {
+        scratch
+            .entries
+            .extend((0..body.particles.len() as u32).map(|p| (b as u32, p)));
+    }
+    let count = scratch.entries.len();
+    let buckets = (count * 2).max(1).next_power_of_two();
+    let mask = buckets - 1;
+    let bucket_of = |c: [i32; 3]| {
+        let h = (c[0].wrapping_mul(92_837_111))
+            ^ (c[1].wrapping_mul(689_287_499))
+            ^ (c[2].wrapping_mul(283_923_481));
+        h as u32 as usize & mask
+    };
+    let position = |bodies: &[&mut SoftBody], (b, p): (u32, u32)| {
+        bodies[b as usize].particles[p as usize].position
+    };
+    // 计数排序，同 `solve_self_collisions`。
+    scratch.starts.clear();
+    scratch.starts.resize(buckets + 1, 0);
+    scratch.sorted.clear();
+    scratch.sorted.resize(count, 0);
+    for &entry in &scratch.entries {
+        scratch.starts[bucket_of(cell_of(position(bodies, entry)))] += 1;
+    }
+    let mut running = 0;
+    for start in scratch.starts.iter_mut() {
+        running += *start;
+        *start = running;
+    }
+    for (index, &entry) in scratch.entries.iter().enumerate() {
+        let bucket = bucket_of(cell_of(position(bodies, entry)));
+        scratch.starts[bucket] -= 1;
+        scratch.sorted[scratch.starts[bucket] as usize] = index as u32;
+    }
+
+    // 每个粒子的真实质量倒数（钉死的是 0）和半径。
+    let unit: Vec<f32> = bodies
+        .iter()
+        .map(|body| 1.0 / body.particle_mass())
+        .collect();
+    let radius: Vec<f32> = bodies
+        .iter()
+        .map(|body| body.settings.particle_radius.max(0.0))
+        .collect();
+    for a in 0..count {
+        let (body_a, particle_a) = scratch.entries[a];
+        let [cx, cy, cz] = cell_of(position(bodies, (body_a, particle_a)));
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let bucket = bucket_of([cx + dx, cy + dy, cz + dz]);
+                    let range =
+                        scratch.starts[bucket] as usize..scratch.starts[bucket + 1] as usize;
+                    for slot in range {
+                        let b = scratch.sorted[slot] as usize;
+                        let (body_b, particle_b) = scratch.entries[b];
+                        // 同一个软体的归自碰撞管；每对只处理一次。
+                        if body_b <= body_a {
+                            continue;
+                        }
+                        let (ia, ib) = (body_a as usize, body_b as usize);
+                        let wa = bodies[ia].particles[particle_a as usize].inverse_mass * unit[ia];
+                        let wb = bodies[ib].particles[particle_b as usize].inverse_mass * unit[ib];
+                        let total = wa + wb;
+                        if total <= 0.0 {
+                            continue;
+                        }
+                        let contact = radius[ia] + radius[ib];
+                        let delta = bodies[ib].particles[particle_b as usize].position
+                            - bodies[ia].particles[particle_a as usize].position;
+                        let distance_squared = delta.length_squared();
+                        if distance_squared >= contact * contact || distance_squared < 1e-12 {
+                            continue;
+                        }
+                        let distance = distance_squared.sqrt();
+                        let correction = delta * ((contact - distance) / distance / total);
+                        bodies[ia].particles[particle_a as usize].position -= correction * wa;
+                        bodies[ib].particles[particle_b as usize].position += correction * wb;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1083,6 +1352,271 @@ mod tests {
             closest > thickness * 0.8,
             "两层布最近只隔 {closest}，厚度是 {thickness} —— 自碰撞没把它们推开"
         );
+    }
+
+    /// 四角钉住、水平张在 y = 2 的一块布（吊床）。
+    fn hammock() -> SoftBody {
+        let mut body = SoftBody::cloth(
+            16,
+            16,
+            2.0,
+            2.0,
+            Mat4::from_rotation_translation(
+                kmath::Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                Vec3::new(0.0, 2.0, 0.0),
+            ),
+        );
+        for corner in [0, 15, 16 * 15, 16 * 16 - 1] {
+            body.pin(corner);
+        }
+        body.set_settings(SoftBodySettings {
+            particle_radius: 0.06,
+            iterations: 4,
+            ..SoftBodySettings::default()
+        });
+        body
+    }
+
+    #[test]
+    fn a_hammock_catches_a_box_only_when_coupled_both_ways() {
+        // 单向耦合的布推不动刚体：箱子直接穿过布掉下去。双向的话布兜得住它。
+        let run = |two_way: bool| {
+            let mut world = PhysicsWorld::new();
+            let body = world.add_body(
+                &RigidBodyDesc::dynamic().with_position(Vec3::new(0.0, 3.0, 0.0)),
+                0,
+            );
+            world
+                .add_collider(&ColliderDesc::cuboid(Vec3::splat(0.25)), Some(body), 0)
+                .unwrap();
+            world.update_query_structures();
+            let mut cloth = hammock();
+            let dt = 1.0 / 60.0;
+            for _ in 0..180 {
+                let coupling = if two_way {
+                    Coupling::TwoWay(&mut world)
+                } else {
+                    Coupling::OneWay(&world)
+                };
+                step_soft_bodies(&mut [&mut cloth], dt, Vec3::new(0.0, -9.81, 0.0), coupling);
+                world.step(dt);
+            }
+            world.body(body).unwrap().position().y
+        };
+        let one_way = run(false);
+        let two_way = run(true);
+        eprintln!("吊床：单向 y = {one_way}，双向 y = {two_way}");
+        assert!(
+            one_way < 0.0,
+            "单向耦合时箱子停在 y = {one_way}，布不该兜得住"
+        );
+        assert!(
+            two_way > 1.0 && two_way < 2.5,
+            "双向耦合时箱子停在 y = {two_way}，吊床在 y = 2，该被兜住"
+        );
+    }
+
+    #[test]
+    fn a_landing_cloth_pushes_what_it_lands_on() {
+        // 一块不受重力、悬在半空的箱子，布从上面落下来压住它。双向耦合时箱子被压得往下走，
+        // 而且它拿到的动量就是布交出去的：布的质量 × 落到箱子上时的速度，量级对得上。
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(&RigidBodyDesc::dynamic().with_gravity_scale(0.0), 0);
+        world
+            .add_collider(
+                &ColliderDesc::cuboid(Vec3::new(1.5, 0.25, 1.5)).with_density(1.0),
+                Some(body),
+                0,
+            )
+            .unwrap();
+        world.update_query_structures();
+        let box_mass = world.body(body).unwrap().mass();
+        let mut cloth = SoftBody::cloth(
+            10,
+            10,
+            2.0,
+            2.0,
+            Mat4::from_rotation_translation(
+                kmath::Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                Vec3::new(0.0, 1.5, 0.0),
+            ),
+        );
+        let cloth_mass = 2.0;
+        cloth.set_settings(SoftBodySettings {
+            particle_radius: 0.05,
+            mass: cloth_mass,
+            damping: 0.0,
+            ..SoftBodySettings::default()
+        });
+        let dt = 1.0 / 60.0;
+        // 从 1.5 米落到 0.25 米的箱面上，落地速度 √(2 g h) ≈ 5 m/s。
+        for _ in 0..40 {
+            step_soft_bodies(
+                &mut [&mut cloth],
+                dt,
+                Vec3::new(0.0, -9.81, 0.0),
+                Coupling::TwoWay(&mut world),
+            );
+            world.step(dt);
+        }
+        let velocity = world.body(body).unwrap().linvel();
+        assert!(velocity.y < -0.1, "箱子没被布压动：{velocity:?}");
+        // 箱子的动量不超过布能给的（布落地速度 × 质量，再加上之后压着它的重量），也不至于少一个量级。
+        let momentum = -velocity.y * box_mass;
+        let landing = cloth_mass * (2.0f32 * 9.81 * 1.0).sqrt();
+        eprintln!(
+            "落布：箱子质量 {box_mass}，速度 {velocity:?}，动量 {momentum}，布落地动量 {landing}"
+        );
+        assert!(
+            momentum > landing * 0.3 && momentum < landing * 2.0,
+            "箱子拿到的动量 {momentum}，布落地时带的动量 {landing}"
+        );
+        // 横向没有凭空多出来的动量。
+        assert!(
+            velocity.x.abs() < 0.05 && velocity.z.abs() < 0.05,
+            "{velocity:?}"
+        );
+    }
+
+    #[test]
+    fn two_way_coupling_conserves_momentum() {
+        // 没有重力，布朝一个静止的箱子扔过去。撞完之后布和箱子的总动量应当还是布一开始的动量：
+        // 推开粒子的冲量等大反向地给了箱子，不多不少。
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(&RigidBodyDesc::dynamic().with_gravity_scale(0.0), 0);
+        world
+            .add_collider(
+                &ColliderDesc::cuboid(Vec3::new(1.5, 1.5, 0.25)),
+                Some(body),
+                0,
+            )
+            .unwrap();
+        world.update_query_structures();
+        let box_mass = world.body(body).unwrap().mass();
+        let mut cloth = SoftBody::cloth(10, 10, 2.0, 2.0, Mat4::from_translation(Vec3::Z * 1.0));
+        let cloth_mass = 3.0;
+        cloth.set_settings(SoftBodySettings {
+            particle_radius: 0.05,
+            mass: cloth_mass,
+            damping: 0.0,
+            ..SoftBodySettings::default()
+        });
+        cloth.add_velocity(Vec3::new(0.0, 0.0, -4.0));
+        let momentum = |cloth: &SoftBody, world: &PhysicsWorld| {
+            let mean = cloth.particles.iter().map(|p| p.velocity).sum::<Vec3>()
+                / cloth.particles.len() as f32;
+            mean * cloth_mass + world.body(body).unwrap().linvel() * box_mass
+        };
+        let before = momentum(&cloth, &world);
+        let dt = 1.0 / 60.0;
+        for _ in 0..30 {
+            step_soft_bodies(
+                &mut [&mut cloth],
+                dt,
+                Vec3::ZERO,
+                Coupling::TwoWay(&mut world),
+            );
+            world.step(dt);
+        }
+        let after = momentum(&cloth, &world);
+        let box_velocity = world.body(body).unwrap().linvel();
+        eprintln!("动量：撞前 {before:?}，撞后 {after:?}，箱子速度 {box_velocity:?}");
+        assert!(box_velocity.z < -0.5, "箱子没被撞动：{box_velocity:?}");
+        assert!(
+            (after - before).length() < before.length() * 0.05,
+            "总动量从 {before:?} 变成了 {after:?}"
+        );
+    }
+
+    #[test]
+    fn parallel_collision_queries_match_the_serial_ones_bit_for_bit() {
+        // 粒子多于 `PARALLEL_PARTICLES` 时碰撞查询分给 ktask。每个粒子的计算一样、冲量按块的顺序
+        // 拼回去，所以和一个一个串行地查结果逐位相同。
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(&RigidBodyDesc::dynamic(), 0);
+        world
+            .add_collider(&ColliderDesc::ball(0.8), Some(body), 0)
+            .unwrap();
+        world.update_query_structures();
+        let mut cloth = SoftBody::cloth(
+            48,
+            48,
+            3.0,
+            3.0,
+            Mat4::from_rotation_translation(
+                kmath::Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                Vec3::new(0.0, 0.7, 0.0),
+            ),
+        );
+        cloth.set_settings(SoftBodySettings {
+            particle_radius: 0.05,
+            ..SoftBodySettings::default()
+        });
+        assert!(cloth.particle_count() >= PARALLEL_PARTICLES);
+        let h = 1.0 / 240.0;
+
+        let mut serial = cloth.clone();
+        let query = world.point_query();
+        let mass_over_h = serial.particle_mass() / h;
+        let expected: Vec<_> = serial
+            .particles
+            .iter_mut()
+            .filter_map(|p| collide_particle(p, &query, 0.05, mass_over_h))
+            .collect();
+
+        let mut impulses = Vec::new();
+        cloth.solve_collisions(&world, h, Some(&mut impulses));
+        assert!(!expected.is_empty(), "布没碰到球，测不出东西");
+        assert_eq!(impulses, expected);
+        for (a, b) in cloth.particles.iter().zip(&serial.particles) {
+            assert_eq!(a.position, b.position);
+        }
+    }
+
+    #[test]
+    fn two_soft_bodies_collide_when_stepped_together() {
+        // 一个软球掉进吊床。各自步进的话软体之间谁也看不见谁，球穿过布掉下去；
+        // 一起步进的话布兜得住它。
+        let ball = || {
+            let mut ball = SoftBody::from_mesh(
+                &Mesh::sphere(8, 12),
+                Mat4::from_scale_rotation_translation(
+                    Vec3::splat(0.6),
+                    kmath::Quat::IDENTITY,
+                    Vec3::new(0.0, 3.0, 0.0),
+                ),
+            );
+            ball.set_settings(SoftBodySettings {
+                pressure: 1.0,
+                particle_radius: 0.06,
+                mass: 0.5,
+                ..SoftBodySettings::default()
+            });
+            ball
+        };
+        let gravity = Vec3::new(0.0, -9.81, 0.0);
+        let dt = 1.0 / 60.0;
+        let lowest = |body: &SoftBody| body.positions().map(|p| p.y).fold(f32::INFINITY, f32::min);
+
+        let (mut cloth, mut sphere) = (hammock(), ball());
+        for _ in 0..150 {
+            cloth.step(dt, gravity, None);
+            sphere.step(dt, gravity, None);
+        }
+        let apart = lowest(&sphere);
+
+        let (mut cloth, mut sphere) = (hammock(), ball());
+        for _ in 0..150 {
+            step_soft_bodies(&mut [&mut cloth, &mut sphere], dt, gravity, Coupling::None);
+        }
+        let together = lowest(&sphere);
+        eprintln!("软球：各自步进最低 y = {apart}，一起步进最低 y = {together}");
+        assert!(apart < 0.0, "各自步进时球停在 y = {apart}，不该被布兜住");
+        assert!(
+            together > 0.8,
+            "一起步进时球最低到 y = {together}，吊床在 y = 2，该被兜住"
+        );
+        assert!(sphere.positions().all(|p| p.is_finite()));
     }
 
     #[test]

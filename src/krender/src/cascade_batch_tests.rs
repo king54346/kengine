@@ -18,6 +18,7 @@ fn batch_of(first: u32, count: u32) -> Batch {
         first,
         count,
         index_range: (0, 36),
+        cull: crate::cull::NO_BATCH,
     }
 }
 
