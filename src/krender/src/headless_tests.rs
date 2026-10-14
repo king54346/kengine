@@ -56,6 +56,45 @@ fn headless_frames_produce_pixels() {
 }
 
 #[test]
+fn a_ui_image_updates_in_place_when_its_pixels_change() {
+    // `Texture::with_pixels`（id 不变、版本加一）再登记一次，界面上画的要跟着变——小地图每帧这么重画。
+    // 回归：界面贴图按 id 只传一次，换了像素还是第一版。
+    let Some(mut renderer) = renderer() else {
+        return;
+    };
+    let scene = Scene::new();
+    let red = ktexture::Texture::new(2, 2, [255, 0, 0, 255].repeat(4));
+    let frame = |renderer: &mut Renderer, texture: &ktexture::Texture| {
+        let mut ui = Ui::new();
+        ui.register_texture(texture.clone());
+        ui.begin_frame(Vec2::new(64.0, 64.0), 1.0);
+        ui.image(
+            kui::Rect::new(0.0, 0.0, 64.0, 64.0),
+            texture.id(),
+            [[0.0, 0.0], [1.0, 1.0]],
+            kmath::Vec4::ONE,
+        );
+        ui.end_frame();
+        renderer.render(&scene, &ui, &[]);
+        let (_, _, pixels) = renderer.read_pixels().unwrap();
+        let at = (32 * 64 + 32) * 4;
+        [pixels[at], pixels[at + 1], pixels[at + 2]]
+    };
+    let before = frame(&mut renderer, &red);
+    let green = red.with_pixels([0, 255, 0, 255].repeat(4));
+    assert_eq!(green.id(), red.id());
+    let after = frame(&mut renderer, &green);
+    assert!(
+        before[0] > 200 && before[1] < 50,
+        "第一帧该是红的：{before:?}"
+    );
+    assert!(
+        after[1] > 200 && after[0] < 50,
+        "换了像素还是旧的：{after:?}"
+    );
+}
+
+#[test]
 fn unused_meshes_are_evicted() {
     let Some(mut renderer) = renderer() else {
         return;

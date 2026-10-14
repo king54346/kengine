@@ -21,6 +21,7 @@
 
 pub mod config;
 pub mod formats;
+pub mod gui;
 pub mod scene;
 mod terrain;
 pub mod xml;

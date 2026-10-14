@@ -36,6 +36,9 @@ pub(crate) struct UiResources {
     atlas_bind_group: Option<wgpu::BindGroup>,
     /// 用户贴图的绑定组。
     bind_groups: FxHashMap<Uuid, wgpu::BindGroup>,
+    /// 用户贴图在显存里的那块和它的版本（[`Texture::revision`]）。版本变了就原地重写像素
+    /// （`Texture::with_pixels`：id 不变、版本加一），绑定组照用——每帧重画的小地图靠这个。
+    images: FxHashMap<Uuid, (wgpu::Texture, u64)>,
 
     vertex_buffer: wgpu::Buffer,
     vertex_capacity: u64,
@@ -195,6 +198,7 @@ impl UiResources {
             texture_layout,
             atlas_bind_group: None,
             bind_groups: FxHashMap::default(),
+            images: FxHashMap::default(),
             vertex_buffer: create_vertex_buffer(device, Self::INITIAL_VERTICES),
             vertex_capacity: Self::INITIAL_VERTICES,
             index_buffer: create_index_buffer(device, Self::INITIAL_INDICES),
@@ -331,7 +335,16 @@ impl UiResources {
         queue: &wgpu::Queue,
         texture: &Texture,
     ) {
-        if self.bind_groups.contains_key(&texture.id()) {
+        if let Some((image, revision)) = self.images.get_mut(&texture.id()) {
+            let size = image.size();
+            if *revision != texture.revision()
+                && size.width == texture.width().max(1)
+                && size.height == texture.height().max(1)
+            {
+                crate::write_texture_pixels(queue, image, texture);
+                crate::write_texture_mips(queue, image, texture);
+                *revision = texture.revision();
+            }
             return;
         }
         let uploaded = crate::upload_texture(device, queue, texture);
@@ -350,6 +363,8 @@ impl UiResources {
             ],
         });
         self.bind_groups.insert(texture.id(), bind_group);
+        self.images
+            .insert(texture.id(), (uploaded.texture, texture.revision()));
     }
 }
 

@@ -66,11 +66,17 @@ impl Ui {
     ///
     /// **在加载时登记，不要每帧登记**：贴图是长期资源，
     /// 一张 1024² 的图集每帧重传要走 4 MB 带宽。
+    ///
+    /// 同一张图换了像素（[`Texture::with_pixels`]：id 不变、版本加一）再登记一次，会换成新的那版，
+    /// 渲染器看到版本变了就原地重写显存——每帧重画的小块图（小地图）这么更新，不用每帧一张新图。
+    ///
+    /// [`Texture::with_pixels`]: ktexture::Texture::with_pixels
     pub fn register_texture(&mut self, texture: Texture) {
-        if self.textures.iter().any(|t| t.id() == texture.id()) {
-            return;
+        match self.textures.iter_mut().find(|t| t.id() == texture.id()) {
+            Some(old) if old.revision() != texture.revision() => *old = texture,
+            Some(_) => {}
+            None => self.textures.push(texture),
         }
-        self.textures.push(texture);
     }
 
     /// 已登记的界面贴图。渲染器每帧扫一遍。
@@ -564,5 +570,19 @@ mod tests {
         assert_eq!(ui.draw_list().vertices().len(), 4);
         // 贴图会另起一批：换纹理就得换绑定组，合不进纯色那一批。
         assert!(!ui.draw_list().batches().is_empty());
+    }
+
+    #[test]
+    fn registering_new_pixels_of_the_same_texture_replaces_the_old_version() {
+        let mut ui = Ui::new();
+        let first = Texture::new(1, 1, vec![255, 0, 0, 255]);
+        ui.register_texture(first.clone());
+        ui.register_texture(first.clone());
+        assert_eq!(ui.textures().len(), 1);
+        let second = first.with_pixels(vec![0, 255, 0, 255]);
+        ui.register_texture(second.clone());
+        assert_eq!(ui.textures().len(), 1);
+        assert_eq!(ui.textures()[0].revision(), second.revision());
+        assert_eq!(ui.textures()[0].data(), second.data());
     }
 }

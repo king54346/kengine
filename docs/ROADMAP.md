@@ -53,7 +53,7 @@
 | kaudio | 音频（cpal + symphonia）：整段 / 流式来源（可 seek）、3D 空间音频 |
 | kgltf | glTF 2.0 导入（含 Draco、meshopt、KTX2、各 KHR 材质扩展、变体） |
 | kimport | 其余格式：OBJ STL PLY FBX Collada 3MF AMF 3DS VOX KMZ USD/USDZ LDraw IFC 3DM VRML SVG Lottie MaterialX TTF 立体字…… |
-| kxunxian | 寻仙解包资源直读：`.cct` 角色配置 / `.cmf` 材质表 / `.pmf` 网格 / `.psf` 骨架 / `.paf` 动作；按装扮拼玩家角色（zj 衣柜），武器 wqa、法宝 fba 挂到挂点骨骼上，上下半身动作合并，也可以拼「A 的上半身 + B 的下半身」（骑乘放技能）；挂点可以导出成空节点（骑手 `ride_tun` 对坐骑 `ride_0`）；读地图场景 `scn/`（256 米单元的高度图、预混地表、水面、天空、`.ort`/`.sit`/`.cty` 三层物件摆放、`<Phy>` / `<Projectee>` 碰撞网格、地表分层混合——照游戏 `pge_core.dll` 里的地形 HLSL 写的材质钩子） |
+| kxunxian | 寻仙解包资源直读：`.cct` 角色配置 / `.cmf` 材质表 / `.pmf` 网格 / `.psf` 骨架 / `.paf` 动作；按装扮拼玩家角色（zj 衣柜），武器 wqa、法宝 fba 挂到挂点骨骼上，上下半身动作合并，也可以拼「A 的上半身 + B 的下半身」（骑乘放技能）；挂点可以导出成空节点（骑手 `ride_tun` 对坐骑 `ride_0`）；读地图场景 `scn/`（256 米单元的高度图、预混地表、水面、天空、`.ort`/`.sit`/`.cty` 三层物件摆放、`<Phy>` / `<Projectee>` 碰撞网格、地表分层混合——照游戏 `pge_core.dll` 里的地形 HLSL 写的材质钩子）；界面资源 `gui`：原版界面贴图（`gui/image`，布局 XML 里 `路径|x,y,宽,高` 的取法）、按身体查玩家头像（`cha_pic` 表 → `zjNN_心情.png`，用原版圆形遮罩烘成圆的）、门派技能图标（`skill_data_*` 第 4 列）。表格是 GBK 的，只按字节取 ASCII 列，不解码。`xunxian` 例子照原版布局画了底部技能栏和左上角状态区（`examples/kengine/xunxian/hud.rs`） |
 | kfont | 字体加载、光栅化、排版、矢量轮廓（ab_glyph） |
 | klocale | 本地化：Fluent（`.ftl`）子集的字符串表、当前语言 + 回退链、`tr!` / 脚本 `tr()`（零依赖，解析器自写） |
 | knav | 导航：2.5D 格子烘焙（边缘按代理半径腐蚀）、A* + 视线拉直、动态挡区 / 代价（零依赖） |
